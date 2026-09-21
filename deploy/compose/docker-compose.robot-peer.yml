@@ -23,7 +23,7 @@ services:
       SWARMDECK_CLOUD_TOPIC: "${SWARMDECK_CLOUD_TOPIC:?Set the sensor-frame cloud topic}"
       SWARMDECK_BASE_FRAME: "${SWARMDECK_BASE_FRAME:?Set the physical base frame}"
       SWARMDECK_ODOM_FRAME: "${SWARMDECK_ODOM_FRAME:?Set the continuous odometry frame}"
-      SWARMDECK_NAVIGATION_FRAME: "${SWARMDECK_NAVIGATION_FRAME:?Set the local planner frame}"
+      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_TF_TOPIC: "${SWARMDECK_TF_TOPIC:-/tf}"
       SWARMDECK_TF_STATIC_TOPIC: "${SWARMDECK_TF_STATIC_TOPIC:-/tf_static}"
       SWARMDECK_COLOR_TOPIC: "${SWARMDECK_COLOR_TOPIC:-}"
@@ -100,7 +100,7 @@ services:
     environment:
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the robot-local ROS domain}"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
-      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-indexed}"
+      SWARMDECK_PLANNER_MAP_PROVIDER: mola
     volumes:
       - onboard_peer_maps:/maps
     command: ["swarmdeck-indexed-map-server", "--maps-root", "/maps"]

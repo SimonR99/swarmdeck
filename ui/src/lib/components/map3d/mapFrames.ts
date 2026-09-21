@@ -31,18 +31,6 @@ export function routePositions(
   return positions;
 }
 
-/** Robot clouds can be local; the SLAM fallback already publishes world XYZ. */
-export function cloudToWorld(
-  positions: Float32Array, frame: string | null, transform?: MapTransform
-) {
-  if (frame === 'world' || !transform) return;
-  const c = Math.cos(transform.yaw), s = Math.sin(transform.yaw);
-  for (let i = 0; i < positions.length; i += 3) {
-    const x = positions[i], y = positions[i + 1];
-    positions[i] = transform.x + x * c - y * s;
-    positions[i + 1] = transform.y + x * s + y * c;
-  }
-}
 
 /** Costmaps and network grids are always in their source robot's map frame. */
 export function decalPose(

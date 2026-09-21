@@ -1,5 +1,5 @@
 import { deflate } from 'pako';
-import type { ServerMessage, RobotState, MapInfo } from '$lib/types/protocol';
+import type { ServerMessage, RobotState } from '$lib/types/protocol';
 
 /**
  * Standalone fleet simulator.
@@ -88,10 +88,8 @@ const MOCK_DETECTION_CLASSES = [
 export class MockFleet {
   private truth = buildTruth();
   private truthCostmap = buildTruthCostmap();
-  private known = new Int8Array(W * H).fill(-1);
   private robots: MockRobot[] = [];
   private timers: number[] = [];
-  private seq = 0;
   private t0 = performance.now();
   private detectionSeq = 0;
   private network = new Map<string, Uint8Array>();
@@ -130,12 +128,9 @@ export class MockFleet {
       this.network.set(`robot_${i}`, new Uint8Array(W * H).fill(255));
     }
 
-    const info: MapInfo = { resolution: RES, width: W, height: H, origin: ORIGIN, seq: 0 };
-    this.emit({ type: 'map_info', info });
     this.pushCostmaps();
 
     this.timers.push(setInterval(() => this.step(0.2), 200) as unknown as number);
-    this.timers.push(setInterval(() => this.pushPatch(), 600) as unknown as number);
     this.timers.push(setInterval(() => this.pushNetworkPatches(), 1000) as unknown as number);
     this.timers.push(setInterval(() => this.pushCostmaps(), 1000) as unknown as number);
     this.timers.push(setInterval(() => this.maybeDetect(), 5200) as unknown as number);
@@ -159,11 +154,7 @@ export class MockFleet {
     const r = this.robots.find((x) => x.id === robotId);
     if (!r) return;
     r.lastAttended = 0;
-    if (kind === 'set_goal' && payload) {
-      r.target = { ...payload };
-      r.navStatus = 'active';
-      r.mode = 'nav';
-    } else if (kind === 'cancel_goal') {
+    if (kind === 'cancel_goal') {
       r.target = null;
       r.navStatus = 'cancelled';
       r.mode = 'idle';
@@ -213,7 +204,6 @@ export class MockFleet {
       const apDistance = Math.hypot(r.x - 3, r.y + 2);
       r.quality = Math.max(4, Math.min(100, 98 - apDistance * 3.2 + Math.sin(tMono * 0.7 + r.x) * 4));
       r.lastAttended += dt;
-      this.reveal(r.x, r.y);
       this.recordNetwork(r);
 
       this.emit({
@@ -323,7 +313,7 @@ export class MockFleet {
     this.networkDirty.clear();
   }
 
-  private encodeCostmap(robotId: string, kind: 'global' | 'local', origin: { x: number; y: number }, width: number, height: number, values: Int8Array) {
+  private encodeCostmap(robotId: string, kind: 'local', origin: { x: number; y: number }, width: number, height: number, values: Int8Array) {
     const compressed = deflate(new Uint8Array(values.buffer));
     let binary = '';
     for (let i = 0; i < compressed.length; i++) binary += String.fromCharCode(compressed[i]);
@@ -339,7 +329,7 @@ export class MockFleet {
       origin,
       width,
       height,
-      frame_id: `${robotId}/map_frame`,
+      frame_id: `${robotId}/odom`,
       updated_at: Date.now() / 1000,
       data: btoa(binary)
     });
@@ -348,13 +338,11 @@ export class MockFleet {
   private pushCostmaps() {
     if (!this.robots.length) return;
     // The mock's truth array is in the same bottom-up convention as the map
-    // patches. The browser costmap layer receives top-down rows.
     const global = new Int8Array(W * H);
     for (let y = 0; y < H; y++) {
       global.set(this.truthCostmap.subarray((H - 1 - y) * W, (H - y) * W), y * W);
     }
     for (const robot of this.robots) {
-      this.encodeCostmap(robot.id, 'global', ORIGIN, W, H, global);
 
       const width = 100;
       const height = 100;
@@ -374,68 +362,6 @@ export class MockFleet {
     }
   }
 
-  /** Reveal ground truth within sensor radius, simulating SLAM. */
-  private reveal(wx: number, wy: number) {
-    const cx = Math.round((wx - ORIGIN.x) / RES);
-    const cy = Math.round(H - (wy - ORIGIN.y) / RES);
-    for (let y = cy - REVEAL_R; y <= cy + REVEAL_R; y++) {
-      if (y < 0 || y >= H) continue;
-      for (let x = cx - REVEAL_R; x <= cx + REVEAL_R; x++) {
-        if (x < 0 || x >= W) continue;
-        if ((x - cx) ** 2 + (y - cy) ** 2 > REVEAL_R * REVEAL_R) continue;
-        this.known[y * W + x] = this.truth[y * W + x];
-      }
-    }
-  }
-
-  /** Push the bounding box around all robots as a patch. */
-  private pushPatch() {
-    if (!this.robots.length) return;
-    let x0 = W,
-      y0 = H,
-      x1 = 0,
-      y1 = 0;
-    let anyInside = false;
-    for (const r of this.robots) {
-      const cx = Math.round((r.x - ORIGIN.x) / RES);
-      const cy = Math.round(H - (r.y - ORIGIN.y) / RES);
-      const rx0 = cx - REVEAL_R - 2;
-      const ry0 = cy - REVEAL_R - 2;
-      const rx1 = cx + REVEAL_R + 2;
-      const ry1 = cy + REVEAL_R + 2;
-      if (rx1 > 0 && rx0 < W && ry1 > 0 && ry0 < H) {
-        x0 = Math.min(x0, Math.max(0, rx0));
-        y0 = Math.min(y0, Math.max(0, ry0));
-        x1 = Math.max(x1, Math.min(W, rx1));
-        y1 = Math.max(y1, Math.min(H, ry1));
-        anyInside = true;
-      }
-    }
-    if (!anyInside) return;
-    const w = x1 - x0;
-    const h = y1 - y0;
-    if (w <= 0 || h <= 0) return;
-
-    const sub = new Int8Array(w * h);
-    for (let y = 0; y < h; y++)
-      for (let x = 0; x < w; x++) sub[y * w + x] = this.known[(y0 + y) * W + (x0 + x)];
-
-    const deflated = deflate(new Uint8Array(sub.buffer));
-    let bin = '';
-    for (let i = 0; i < deflated.length; i++) bin += String.fromCharCode(deflated[i]);
-
-    this.emit({
-      type: 'map_patch',
-      seq: ++this.seq,
-      resolution: RES,
-      origin: ORIGIN,
-      x0,
-      y0,
-      w,
-      h,
-      data: btoa(bin)
-    });
-  }
 
   private maybeDetect() {
     if (!this.robots.length || Math.random() > 0.55) return;

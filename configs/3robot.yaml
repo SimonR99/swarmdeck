@@ -36,9 +36,6 @@ fleet:
     profile: vlp16
 
 map:
-  merge_mode: graph
-  size_m: 30.0
-  resolution: 0.05
   # Spread along the corridor, as in 4robot.yaml, so the robots start apart and
   # have to meet before any inter-robot loop closure is possible.
   start_poses:

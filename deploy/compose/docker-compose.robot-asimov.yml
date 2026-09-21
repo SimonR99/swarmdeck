@@ -124,7 +124,7 @@ services:
   # Reuses swarmdeck_ros/src/swarmdeck_nav, with Asimov-specific frames and a
   # Mid-360 obstacle scan projection. Nav2 writes only cmd_vel_nav; the
   # adapter remains the sole publisher to the real /cmd_vel and relays
-  # autonomy only while its NavigateToPose goal is active. No standalone
+  # autonomy only while its FollowPath goal is active. No standalone
   # odom_tf service is needed here (unlike Botman/Aslan): Asimov's
   # world -> base_link TF comes from the onboard Unitree/Livox localization,
   # independent of whether this container is up.
@@ -152,8 +152,8 @@ services:
         - >-
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/asimov_0/navigate_to_pose' &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /asimov_0/bt_navigator | grep -q '^active'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/asimov_0/follow_path' &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /asimov_0/controller_server | grep -q '^active'
       interval: 20s
       timeout: 12s
       retries: 12
@@ -169,7 +169,7 @@ services:
     depends_on:
       camera:
         condition: service_started
-      # `service_started`, NOT `service_healthy`: a bt_navigator that never
+      # `service_started`, NOT `service_healthy`: a controller_server that never
       # reaches `active` should not take telemetry/teleop off the dashboard.
       # capabilities() already only advertises `navigate` once the action
       # server actually resolves at runtime -- see docker-compose.robot-botman.yml.

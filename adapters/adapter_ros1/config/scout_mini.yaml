@@ -7,9 +7,8 @@
 # way. `python3 adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml` needs
 # nothing else to start talking to tars's real topics.
 #
-# Live on tars since 2026-08-06: SLAM, camera, map, and now navigate_to via
-# local_planner. See docs/robots/fleet.md for the platform matrix and what
-# was verified. navigate_to WILL drive the robot once a goal is sent — see the
+# Live on tars: camera and local navigation topics.
+# See docs/robots/fleet.md for the platform matrix and what was verified.
 # nav_goal/nav_stop comments below before assuming this is inert.
 robot_type: scout_mini
 network_iface: auto
@@ -26,7 +25,7 @@ footprint:
 # (/lvi_sam/lidar/mapping/odometry) is already loop-closure-corrected, so odom_lidar is
 # the closest thing this robot has to a fixed/global frame — use it where the protocol
 # expects "map". Do not default this back to map/base_link; that pair does not exist here.
-map_frame: odom_lidar
+navigation_frame: odom_lidar
 base_frame: base_link_filtered
 lidar_height_m: 0.575
 
@@ -51,11 +50,6 @@ lidar_height_m: 0.575
 #
 # The requested physical band is 0.150..1.800 m: 15 cm above the floor through
 # 1.8 m obstacle height.
-map_cloud_height_band:
-  floor_z: -0.575
-  min_z: 0.150
-  max_z: 1.800
-# Projection of map_global into the SwarmDeck OccupancyGrid.
 native_map_resolution: 0.05
 native_map_padding_m: 1.0
 native_map_max_cells: 8000000
@@ -67,17 +61,13 @@ topics:
   # scout_base_node's raw `odom` wheel odometry.
   odom: /odometry/filtered
   # No OccupancyGrid publisher exists in rover_agx.launch.
-  map: ""
   # Live registered cloud from LVI-SAM used for raytraced 2D map, 3D keyframes, and 3D visualization.
-  map_cloud: /lvi_sam/lidar/mapping/cloud_registered
-  map_cloud_global: ""
   # This ROS 1 profile has no Nav2 costmap publisher.
-  global_costmap: ""
   local_costmap: ""
   # localPlanner's selected local path — the route it actually intends to drive,
   # ~100 poses at 10 Hz. Published in `chassis_link` (a VEHICLE frame, 0.476 m
   # below os_sensor — the same offset as the planner's own sensorOffsetZ), not
-  # in map_frame, so _on_plan transforms it through TF before upload. Without
+  # in navigation_frame, so _on_plan transforms it through TF before upload. Without
   # this the dashboard drew no route at all for this robot and the only line on
   # the map was the trail it had already driven, which makes "did the planner
   # steer around that, or through it?" unanswerable from the GUI.
@@ -109,7 +99,7 @@ topics:
   # this — the standard RViz "2D Nav Goal" topic, not a custom one. Confirmed from
   # source (goalHandler_pointstamped in both nodes): the pose is used directly as
   # global goalX/goalY, same frame as state_estimation (/odometry/filtered, i.e.
-  # map_frame above) — no relative-frame conversion needed on our end.
+  # navigation_frame above) — no relative-frame conversion needed on our end.
   nav_goal: /move_base_simple/goal
   # pathFollower's safety-stop input (std_msgs/Int8, 1=halt, 0=resume). Belt
   # and suspenders alongside nav_cmd_vel below — makes pathFollower's own
@@ -180,11 +170,8 @@ nav_joy_reverse_steering: true
 # lidar currently sees may not be reachable in one shot; it isn't a global
 # path planner.
 actions:
-  # No move_base (actionlib) runs on tars — navigate_to uses topics.nav_goal
-  # above instead (see DEFAULTS in adapter_ros1.py: nav_goal takes priority
-  # over this when both are configured). Left pointed at the ROS 1 convention
-  # so this resolves automatically if move_base is ever added instead.
-  navigate_to_pose: move_base
+  # No move_base (actionlib) runs on tars; nav_goal above is the vendor topic.
+  # This remains pointed at the ROS 1 convention for optional move_base hosts.
 
 # Depth is unsynced on this USB 2.1 camera, and the bus still gaps. The
 # adapter default of 0.35 s then drops the sample,
@@ -195,20 +182,8 @@ perception:
 
 rates:
   state_hz: 5.0
-  map_period_s: 2.0
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45   # SwarmDeck protocol default — scout_base_node's own cmd_vel watchdog behavior (if any) was not inspected
 battery_voltage_min: 23.0
 battery_voltage_max: 29.2
-
-# Color registered scans and optimized keyframes using the color CameraInfo.
-map_color:
-  enabled: true
-  max_age_s: 0.05
-  history_s: 2.0
-
-# Match the 0.35 m corridor used by the shared global planner. Rejoining uses
-# the original downloaded grid; it never carves occupied cells around the robot.
-nav_route_clearance_m: 0.35
-nav_route_lookahead_m: 0.8

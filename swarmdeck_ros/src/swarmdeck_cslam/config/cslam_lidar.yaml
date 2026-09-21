@@ -5,20 +5,12 @@
 # written from the docs and had invented half its parameter names, which ROS 2
 # would have accepted in silence).
 #
-# Topics are relative and the nodes run namespaced per robot, so `odom_icp`
-# resolves to `/robot_N/odom_icp`.
+# Topics are relative and peer.launch.py supplies normalized odometry paths.
 /**:
   ros__parameters:
     frontend:
       sensor_type: "lidar"
-      # The lidar odometry from slam_rtabmap.launch.py, NOT the wheel topic on
-      # <ns>/odom. cslam integrates whatever it is given here as the motion
-      # prior between keyframes, so handing it wheel odometry would feed the
-      # pose graph the one channel that cannot observe slip.
-      # Overridden by cslam.launch.py with ABSOLUTE paths into the fleet's
-      # namespace (`/robot_N/...`). These relative defaults would resolve under
-      # cslam's own `/rN` namespace, where nothing publishes.
-      odom_topic: "odom_icp"
+      odom_topic: "odom"
       pointcloud_topic: "scan/points"
       # 0.2 m rather than KITTI's 0.5: the indoor world this fleet started in is
       # a 24 m building with 6 m rooms, and at 0.5 m a doorway is three voxels

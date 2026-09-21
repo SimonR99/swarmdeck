@@ -146,7 +146,7 @@ export class Map3DLayers {
     showSensors: boolean;
     showCostmap: boolean;
     showNetwork: boolean;
-    costmapKind: 'global' | 'local';
+    costmapKind: 'local';
     time: number;
     getGroundZ?: (x: number, y: number) => number;
   }) {
@@ -478,7 +478,7 @@ export class Map3DLayers {
   private updateDecals(
     showCostmap: boolean,
     showNetwork: boolean,
-    costmapKind: 'global' | 'local'
+    costmapKind: 'local'
   ) {
     // 3D Costmap ground decal
     const viewedCostmapRobotId =
@@ -512,7 +512,7 @@ export class Map3DLayers {
       if (this.costmapMesh.userData.seq !== costmapLayer.seq) material.map.needsUpdate = true;
       this.costmapMesh.userData.seq = costmapLayer.seq;
 
-      const pose = decalPose(costmapLayer.info, mapStore.status?.transforms[costmapLayer.robotId]);
+      const pose = decalPose(costmapLayer.info, mapStore.info?.transforms?.[costmapLayer.robotId]);
       this.costmapMesh.scale.set(pose.width, pose.height, 1);
       this.costmapMesh.rotation.z = pose.yaw;
       this.costmapMesh.position.set(pose.x, pose.y, 0.2);
@@ -544,7 +544,7 @@ export class Map3DLayers {
       }
       material.map.needsUpdate = true;
 
-      const pose = decalPose(networkLayer.info, mapStore.status?.transforms[networkLayer.robotId]);
+      const pose = decalPose(networkLayer.info, mapStore.info?.transforms?.[networkLayer.robotId]);
       this.networkMesh.scale.set(pose.width, pose.height, 1);
       this.networkMesh.rotation.z = pose.yaw;
       this.networkMesh.position.set(pose.x, pose.y, 0.21);

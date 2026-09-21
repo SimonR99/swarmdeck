@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 import importlib
 import json
 import math
 import os
-import subprocess
 import sys
 import threading
 from contextlib import nullcontext
@@ -24,7 +24,6 @@ import time
 import urllib.parse
 import urllib.request
 import zlib
-from collections import deque
 from pathlib import Path
 
 import cv2
@@ -34,8 +33,7 @@ import websockets
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from nav2_msgs.action import FollowPath, NavigateToPose
-from nav2_msgs.srv import ClearEntireCostmap
+from nav2_msgs.action import FollowPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -45,8 +43,7 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from robot_localization.srv import SetPose
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
@@ -61,55 +58,28 @@ from adapters.runtime import (
     AdapterSensorMixin,
     AdapterTelemetryMixin,
     TRANSPORT_DEFAULTS,
-    cloud_xyz,
     deep_merge,
     stamp_seconds,
-    unique_row_index,
     yaw_of,
 )
 from adapters.session import run_adapter_session
 from adapters.navigation_result import navigation_failure_reason
 from adapters.route_progress import route_progress_tick
-from adapters.keyframe_producer import (
-    DEFAULT_MAX_YAW_RATE,
-    KeyframeUploader,
-    laser_scan_to_map_points,
-    points_lidar_to_map,
-    pose7_from_xy_yaw,
-    se3_from_quat_xyz,
-)
 from adapters.costmap import CostmapSnapshot, normalize_costmap
-from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
-from adapters.onboard_mapping import (
-    mapping_authority_mode,
-    publish_onboard_map,
-    map_upload_headers,
-    map_source_is_current,
-)
 
 from sim_cslam import (
-    CSLAM_GRID,
     SLAM_GRAPHS,
-    on_cslam_grid as _on_cslam_grid,
     on_slam_graph as _on_slam_graph,
     slam_graph_payload,
-    upload_cslam_grid,
 )
-from sim_reset import (
-    gz_world_name as _gz_world_name,
-    reset_module_state,
-    reset_world,
-)
-from slam_startup import SlamToolboxStartup, uses_slam_toolbox
 
 # The platform table, imported from the spawner rather than restated here.
 #
 # This adapter has to know its own footprint (it reports it at `hello`, and the
-# GUI draws robots at that size) and its spawn height (the reset teleports it
-# back there). Both are facts about the model Gazebo was handed, and a second
-# copy of them would be wrong the first time a chassis changed — the same
-# argument session.launch.py already makes by importing lidar_spec from here
-# instead of re-reading the YAML.
+# GUI draws robots at that size). That is a fact about the model the simulator
+# was handed, and a second copy of it would be wrong the first time a chassis
+# changed — the same argument session.launch.py already makes by importing
+# lidar_spec from here instead of re-reading the YAML.
 sys.path.insert(0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"))
 from spawn_fleet import (  # noqa: E402
     DEFAULT_ROBOT_PROFILE,
@@ -206,19 +176,9 @@ def camera_point_to_map(
 
 # --------------------------------------------------------------- wedge escape
 #
-# Nav2 cannot plan out of a pose whose footprint overlaps a mapped obstacle, and
-# it cannot recover from one either. Measured on the Scout Mini at a corridor
-# doorway: its own map placed the door jamb 0.255 m from its centre, inside the
-# 0.290 m inscribed radius derived from its 0.580 m width, so
-#
-#   planner_server   "Failed to create plan with tolerance of: 0.500000"
-#   behavior_server  "Collision Ahead - Exiting DriveOnHeading" / "backup failed"
-#
-# repeated forever. The robot was NOT actually touching anything — ground truth
-# put the jamb 0.379 m away, 0.089 m clear — it was ~0.26 m of SLAM drift, which
-# the wider Bunkers (0.389 m inscribed) absorb and the Scout does not. Clearing
-# the costmap does not help: the obstacle comes from the static layer, which
-# slam_toolbox repopulates every `map_update_interval`.
+# Nav2's controller can wedge when the footprint overlaps a local obstacle.
+# A bounded reverse leaves the robot able to accept the next command without
+# making a second planning or mapping authority.
 #
 # So the escape lives here, outside Nav2. It reverses, and ONLY reverses,
 # because the ground immediately behind is the ground the robot just drove over
@@ -261,24 +221,11 @@ NAV_RECOVER_INTERVAL_S = 30.0
 # The owner has a 60 s shared bringup deadline; allow its initial startup to
 # finish before a queued recovery, plus the recovery's own bounded attempt.
 NAV_RECOVER_TIMEOUT_S = 125.0
+# Per-service discovery wait inside a bounded recovery: short, so one absent
+# service cannot consume the whole shared deadline.
+LIFECYCLE_SERVICE_TIMEOUT_S = 2.0
 
-# A direct, one-shot repair for SLAM Toolbox's own lifecycle manager timing out
-# during the crowded fleet startup. This is separate from Nav2 recovery below:
-# Nav2 cannot become useful until its map producer is active.
-SLAM_STARTUP_DEADLINE_S = 30.0
-SLAM_STARTUP_SERVICE_TIMEOUT_S = 2.0
-
-WORLD_SETTLE_S = 0.5
 SERVICE_TIMEOUT_S = 8.0
-
-# The SLAM back ends this stack can run, newest request first. Discovered rather
-# than assumed, because `slam_backend:=rtabmap` swaps the SLAM node out entirely
-# and a call to a service that is not there is indistinguishable from a call to
-# one that is merely slow.
-SLAM_RESET_SERVICES = (
-    ("slam_toolbox/reset", "slam_toolbox.srv", "Reset"),
-    ("rtabmap/reset", "std_srvs.srv", "Empty"),
-)
 
 
 def _srv_type(module: str, name: str):
@@ -313,10 +260,7 @@ class RobotBridge(
     ) -> None:
         self.node = node
         self.id = robot_id
-        self.map_frame = f"{robot_id}/map_frame"
-        self.mapping_authority_mode = mapping_authority_mode()
-        self.onboard_mapping = self.mapping_authority_mode == "onboard"
-        self._onboard_map_warned_at = 0.0
+        self.navigation_frame = f"{robot_id}/odom"
         self.http_url = http_url
         self.t0 = time.monotonic()
         # What this robot IS. `footprint_radius` is not decoration: the GUI draws
@@ -340,7 +284,6 @@ class RobotBridge(
         self.robot_type = self.cfg["robot_type"]
         self.footprint_radius = self.cfg["footprint_radius"]
         self.footprint = self.cfg["footprint"]
-        self.spawn_z = spec.spawn_z
         # Where this platform's RGBD camera is bolted, from the same table the
         # SDF was rendered from. Turning a duck detection into a map marker is
         # the only thing that reads it. See camera_point_to_map().
@@ -348,48 +291,13 @@ class RobotBridge(
         self.camera_z = spec.camera_z
         self.lidar_x = spec.lidar_x
         self.lidar_z = spec.lidar_z
-        rates = self.cfg.get("rates") or {}
-        self._keyframes = KeyframeUploader(
-            robot_id,
-            http_url,
-            # Gazebo's one-ring scan is instantaneous, so it cannot suffer
-            # spinning-lidar motion skew. Keep turn observations enabled even
-            # when wheel motion is badly reported, but retain the platform's
-            # normal capture period: 0.5 s overwhelmed online registration in
-            # a four-robot merge (279 captures with 80 still queued).
-            min_period_s=float(rates.get("keyframe_period_s", 2.0)),
-            max_yaw_rate=(0.0 if instantaneous_planar_scan else DEFAULT_MAX_YAW_RATE),
-            height_band={
-                "floor_z": -float(spec.base_height),
-                "min_z": 0.15,
-                "max_z": 1.8,
-            },
-            lidar_height_m=float(spec.base_height + spec.lidar_z),
-        )
-        self._nav_map = NavMapClient(http_url, robot_id)
         self._scan_cloud_at = 0.0
         self.battery = None
 
-        # Two links of the same TF chain: map_frame -> odom -> base_link. Both
-        # come off the robot's namespaced /tf, which is the only place they are
-        # guaranteed to be consistent with each other. See map_pose().
-        self._map_to_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._odom_to_base: dict[str, float] | None = None
-        self._map_tf_seen = False
-        self._home_pose: dict[str, float] | None = None
-        # Short history of each link, keyed by the TF stamp, so a cloud can be
-        # paired with the pose it was captured AT rather than the newest one.
-        # See map_pose_at(). Two seconds at the bridge's ~50 Hz is ample, and
-        # bounded so a long run cannot grow it without limit.
-        self._map_to_odom_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
         self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(
             maxlen=128
         )
-        # Bounded capture diagnostics, available without per-scan logging.
-        self.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
-        self.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
-        self.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
-        self._pose_lookup_rejected = 0
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -397,14 +305,10 @@ class RobotBridge(
         self.nav_status = "idle"
         self._nav_failure_reason: str | None = None
         self.mode = "idle"
-        self.grid: OccupancyGrid | None = None
-        self._grid_dirty = False
         self._costmaps: dict[str, CostmapSnapshot] = {}
         self._costmap_dirty: set[str] = set()
         self._costmap_lock = threading.Lock()
         self._costmap_warned_at: dict[str, float] = {}
-        self._cloud: PointCloud2 | None = None
-        self._cloud_dirty = False
         self._camera_frame: Image | None = None
         self._camera_dirty = False
         self._camera_encoding_warned = False
@@ -448,22 +352,7 @@ class RobotBridge(
         # first, and one that starts during the reset is skipped.
         self._upload_lock = threading.Lock()
         self._service_clients: dict = {}
-        self._slam_startup = None
-        if uses_slam_toolbox(os.environ.get("SLAM_BACKEND")):
-            # Both simulation entrypoints start adapter_sim only after their
-            # 60 s ADAPTER_DELAY lifecycle grace. Query immediately here: an
-            # inactive node at this point is the abandoned startup we repair.
-            self._slam_startup = SlamToolboxStartup(
-                self._slam_toolbox_state,
-                self._change_slam_toolbox_state,
-                lambda detail: self.node.get_logger().error(
-                    f"[{self.id}] SLAM Toolbox startup recovery exhausted: {detail}; "
-                    "map and navigation readiness remain unavailable"
-                ),
-                deadline_s=SLAM_STARTUP_DEADLINE_S,
-            )
         self._reset_report: dict | None = None
-        self._start_pose: dict | None = None
 
         node.create_subscription(Odometry, f"/{robot_id}/odom", self._on_odom, 10)
         # Depth chosen for the executor, not the publisher. TF arrives at 10 Hz,
@@ -480,40 +369,9 @@ class RobotBridge(
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         node.create_subscription(
-            OccupancyGrid, f"/{robot_id}/map", self._on_map, latched
-        )
-        node.create_subscription(
-            OccupancyGrid,
-            f"/{robot_id}/global_costmap/costmap",
-            lambda msg: self._on_costmap(msg, "global"),
-            qos_profile_sensor_data,
-        )
-        node.create_subscription(
-            OccupancyGrid,
-            f"/{robot_id}/local_costmap/costmap",
+            OccupancyGrid, f"/{robot_id}/local_costmap/costmap",
             lambda msg: self._on_costmap(msg, "local"),
             qos_profile_sensor_data,
-        )
-        self.pub_global_map = node.create_publisher(
-            OccupancyGrid, f"/{robot_id}/global_map", latched
-        )
-        node.create_subscription(
-            LaserScan, f"/{robot_id}/scan", self._on_scan, qos_profile_sensor_data
-        )
-        node.create_subscription(
-            PointCloud2,
-            f"/{robot_id}/scan/points",
-            self._on_scan_cloud,
-            qos_profile_sensor_data,
-        )
-        # RTAB-Map's accumulated 3D map, for the GUI's optional 3D view. This is
-        # the assembled map in the robot's own map frame, NOT the raw sensor
-        # cloud on scan/points: the view wants what the robot has built, and the
-        # sensor stream would be both wrong (lidar frame) and far too fast.
-        # SLAM Toolbox publishes nothing here, so the 2D fleet simply has no 3D
-        # view rather than a misleading one.
-        node.create_subscription(
-            PointCloud2, f"/{robot_id}/cloud_map", self._on_cloud, latched
         )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
         # Three streams off one `rgbd_camera`, bridged by session.launch.py. The
@@ -540,9 +398,6 @@ class RobotBridge(
             qos_profile_sensor_data,
         )
 
-        self.nav_client = ActionClient(
-            node, NavigateToPose, f"/{robot_id}/navigate_to_pose"
-        )
         self.path_client = ActionClient(node, FollowPath, f"/{robot_id}/follow_path")
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
         from adapters.exploration import configure_exploration
@@ -561,200 +416,21 @@ class RobotBridge(
         }
 
     def _on_tf(self, msg: TFMessage) -> None:
-        """Track both links of map_frame -> odom -> base_link from robot /tf."""
-        map_frame = f"{self.id}/map_frame"
+        """Track only the continuous odometry-to-base transform."""
         odom_frame = f"{self.id}/odom"
         base_frame = f"{self.id}/base_link"
         for stamped in msg.transforms:
+            if stamped.header.frame_id != odom_frame or stamped.child_frame_id != base_frame:
+                continue
             t = stamped.transform
-            value = {
-                "x": t.translation.x,
-                "y": t.translation.y,
-                "yaw": yaw_of(t.rotation),
-            }
-            at = stamp_seconds(stamped.header)
-            if (
-                stamped.header.frame_id == map_frame
-                and stamped.child_frame_id == odom_frame
-            ):
-                self._map_to_odom = value
-                self._map_tf_seen = True
-                if at is not None:
-                    self._map_to_odom_log.append((at, value))
-            elif (
-                stamped.header.frame_id == odom_frame
-                and stamped.child_frame_id == base_frame
-            ):
-                self._odom_to_base = value
-                if at is not None:
-                    self._odom_to_base_log.append((at, value))
-
-        # Record the first complete map-frame pose, not the startup fallback
-        # at (0,0). Keep it across websocket reconnects and subsequent motion.
-        if (
-            getattr(self, "_home_pose", None) is None
-            and getattr(self, "_map_tf_seen", False)
-            and self._odom_to_base is not None
-        ):
-            pose = self._compose(self._map_to_odom, self._odom_to_base)
-            if all(math.isfinite(v) for v in pose.values()):
-                self._home_pose = pose
-
-    @staticmethod
-    def _compose(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
-        """SE(2) composition: the pose of `b` expressed in `a`'s parent frame."""
-        c, s = math.cos(a["yaw"]), math.sin(a["yaw"])
-        return {
-            "x": a["x"] + b["x"] * c - b["y"] * s,
-            "y": a["y"] + b["x"] * s + b["y"] * c,
-            "yaw": (a["yaw"] + b["yaw"] + math.pi) % (2 * math.pi) - math.pi,
-        }
+            self._odom_to_base = {"x": t.translation.x, "y": t.translation.y, "yaw": yaw_of(t.rotation)}
 
     def map_pose(self) -> dict[str, float]:
-        """Where this robot is in its own SLAM map frame.
-
-        Both links come from TF, and that is the whole point. `odom -> base_link`
-        is owned by the EKF (or, with `fuse_imu:=false`, by the drive plugin's
-        bridged TF), while `/<ns>/odom` carries the drive plugin's *raw wheel*
-        integration regardless. Composing SLAM's correction with the wheel topic
-        mixes two different chains: SLAM computed `map_frame -> odom` against the
-        EKF's `base_link`, so the result is off by exactly however far wheel
-        odometry has diverged from the filter.
-
-        That was not theoretical. Measured live on a four-robot run, the wheel
-        topic differed from the EKF by 0.18-0.48 m per robot, and the pose the
-        GUI drew was wrong against Gazebo ground truth by 0.16-0.47 m — the same
-        numbers, robot for robot. Composing from TF instead brings it to ~0.07 m,
-        which is SLAM's own residual. Worse, wheel odometry is the channel that
-        breaks catastrophically when a differential drive jams and spins its
-        wheels (8.8-30.5 m of error measured in docs/operations/known-issues.md), which is
-        why robot markers would occasionally jump right off the building.
-
-        The wheel topic remains a fallback for a robot whose TF carries no
-        `odom -> base_link` at all, because reporting the map origin forever is a
-        worse failure than reporting a drifting pose — but it says so out loud.
-        """
-        base = self._odom_to_base
-        if base is None:
-            if not self._warned_no_tf_base:
-                self._warned_no_tf_base = True
-                self.node.get_logger().warn(
-                    f"[{self.id}] no {self.id}/odom -> {self.id}/base_link on TF; "
-                    f"falling back to raw wheel odometry for the reported pose, "
-                    f"which will disagree with the map whenever the wheels slip."
-                )
-            base = self._odom_topic_pose
-        return self._compose(self._map_to_odom, base)
-
-    def map_pose_at(
-        self, at: float | None, *, require_history: bool = False
-    ) -> dict[str, float] | None:
-        """Where this robot was in its own SLAM map frame at time ``at``.
-
-        The same composition as :meth:`map_pose`, but each link is read at the
-        requested stamp rather than at whatever arrived most recently. That
-        matters only while turning, and there it matters a great deal: a scan
-        registered with a pose from a different instant is rotated about the
-        robot by the yaw accrued in between, and the merged map gets a rigidly
-        rotated copy of everything that scan saw. Translation is forgiving by
-        comparison, which is exactly the asymmetry the symptom showed.
-
-        ``adapter_ros2._on_map_cloud`` states the same rule for hardware and
-        gets it from tf2's own buffer. This node parses ``/tf`` itself, so it
-        keeps the short history the lookup needs.
-
-        Keyframes require odom->base samples bracketing the scan. Interpolate
-        translation and wrapped yaw: nearest-sample lookup can pair several
-        scans with one frozen yaw and fool the turn-rate gate. With
-        require_history=True, missing history drops the scan. Other callers
-        retain interpolation across gaps up to one second and the latest-pose
-        fallback. Capture-time odom->base interpolation requires a bracket no
-        wider than half a second; map->odom keeps the per-link interpolation.
-        """
-        if at is None or not math.isfinite(at):
-            if require_history:
-                self._pose_lookup_rejected = (
-                    getattr(self, "_pose_lookup_rejected", 0) + 1
-                )
-            return None if require_history else self.map_pose()
-
-        def lookup(log, current, link, *, require_bracket=False):
-            """Find the nearest bracket without sorting or allocating sample lists."""
-            if not log:
-                self.pose_lookup_empty[link] += 1
-                return None if require_bracket else current
-            lo = hi = None
-            # Most captures match a recent TF stamp exactly. Reverse traversal
-            # finds those quickly; a full pass still handles out-of-order TF.
-            for sample in reversed(log):
-                stamp = sample[0]
-                if stamp == at:
-                    return sample[1]
-                if stamp < at:
-                    if lo is None or stamp > lo[0]:
-                        lo = sample
-                elif hi is None or stamp <= hi[0]:
-                    hi = sample
-            if lo is not None and hi is not None:
-                span = hi[0] - lo[0]
-                self.pose_lookup_gap[link] = max(
-                    self.pose_lookup_gap[link], min(at - lo[0], hi[0] - at)
-                )
-                if span <= 1e-9:
-                    return lo[1]
-                if span <= (0.5 if require_bracket else 1.0):
-                    f = (at - lo[0]) / span
-                    dyaw = (hi[1]["yaw"] - lo[1]["yaw"] + math.pi) % (
-                        2 * math.pi
-                    ) - math.pi
-                    return {
-                        "x": lo[1]["x"] + f * (hi[1]["x"] - lo[1]["x"]),
-                        "y": lo[1]["y"] + f * (hi[1]["y"] - lo[1]["y"]),
-                        "yaw": (lo[1]["yaw"] + f * dyaw + math.pi) % (2 * math.pi)
-                        - math.pi,
-                    }
-            # Outside a usable bracket, captures must wait for another scan.
-            # Display-only callers retain their bounded nearest-pose fallback.
-            if lo is None:
-                best = hi
-            elif hi is None or at - lo[0] <= hi[0] - at:
-                best = lo
-            else:
-                best = hi
-            gap = abs(best[0] - at)
-            self.pose_lookup_gap[link] = max(self.pose_lookup_gap[link], gap)
-            if require_bracket:
-                self.pose_lookup_stale[link] += 1
-                return None
-            # Beyond the history the newest reading is the honest answer; a
-            # far-away sample is worse than no correction at all.
-            if gap <= 0.5:
-                return best[1]
-            self.pose_lookup_stale[link] += 1
-            return current
-
-        base = lookup(
-            self._odom_to_base_log,
-            self._odom_to_base,
-            "odom_base",
-            require_bracket=require_history,
-        )
-        correction = lookup(self._map_to_odom_log, self._map_to_odom, "map_odom")
-        if require_history and (base is None or not self._map_to_odom_log):
-            self._pose_lookup_rejected = getattr(self, "_pose_lookup_rejected", 0) + 1
-            return None
-        if base is None:
-            return self.map_pose()
-        return self._compose(correction, base)
-
-    def _on_map(self, msg: OccupancyGrid) -> None:
-        with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
-            self.grid = msg
-            self._grid_dirty = True
-            # Runs independently of the websocket session.
-            publish_onboard_map(self, msg)
+        pose = self._odom_to_base or self._odom_topic_pose
+        if self._odom_to_base is None and not self._warned_no_tf_base:
+            self._warned_no_tf_base = True
+            self.node.get_logger().warn(f"[{self.id}] no {self.id}/odom -> {self.id}/base_link TF; using odometry topic")
+        return dict(pose)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
@@ -767,12 +443,10 @@ class RobotBridge(
 
     def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
         """Capture Nav2's planner view without changing navigation inputs."""
-        if not map_source_is_current(self, msg):
-            return
         source = str(
             getattr(getattr(msg, "header", None), "frame_id", "") or ""
         ).lstrip("/")
-        target = f"{self.id}/map_frame"
+        target = f"{self.id}/odom"
         transform = (0.0, 0.0, 0.0)
         if source and source != target:
             expected_odom = f"{self.id}/odom"
@@ -782,297 +456,14 @@ class RobotBridge(
                     kind, f"unsupported frame {source!r}; expected {expected!r}"
                 )
                 return
-            transform = (
-                float(self._map_to_odom["x"]),
-                float(self._map_to_odom["y"]),
-                float(self._map_to_odom["yaw"]),
-            )
         try:
             snapshot = normalize_costmap(msg, target_frame=target, transform=transform)
         except (TypeError, ValueError) as exc:
             self._warn_costmap(kind, str(exc))
             return
-        with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
-            with self._costmap_lock:
-                self._costmaps[kind] = snapshot
-                self._costmap_dirty.add(kind)
-
-    def _pose7(self) -> np.ndarray:
-        pose = self.map_pose()
-        return pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-
-    def _enqueue_keyframe(
-        self, points_map: np.ndarray, t_map_base: np.ndarray, stamp: float
-    ) -> None:
-        uploader = getattr(self, "_keyframes", None)
-        if uploader is None or points_map.shape[0] == 0:
-            return
-        # Nav2 plans in map_frame from TF. A keyframe posed from wheel
-        # odometry lands in a different frame and the collaborative map
-        # cannot be loaded as a static layer (planner start and the grid
-        # disagree by metres). Wait for odom -> base_link.
-        if getattr(self, "_odom_to_base", None) is None:
-            return
-        try:
-            # The map cloud and this pose are one observation. Looking the pose
-            # up again here races SLAM's map->odom correction; a loop-closure
-            # jump between the two lookups turns an otherwise valid scan into
-            # metre-long phantom walls after conversion back to base frame.
-            uploader.consider(
-                points_map,
-                t_map_base,
-                stamp,
-                colorize=lambda points: self._keyframe_colors(
-                    points, t_map_base, stamp
-                ),
-            )
-        except Exception:
-            # Keyframe production must never starve the scan map or Nav2.
-            pass
-
-    def _keyframe_colors(self, points, t_map_base, stamp):
-        """Color accepted LiDAR samples with calibrated, synchronized RGB-D."""
-        from adapters.reconstruction import colorize_ros_rgbd
-
-        image = getattr(self, "_camera_frame", None)
-        depth = getattr(self, "_camera_depth", None)
-        info = getattr(self, "_camera_info", None)
-        if image is None or depth is None or info is None:
-            return None
-        at = stamp_seconds(image.header)
-        depth_at = stamp_seconds(depth.header)
-        if (
-            at is None
-            or depth_at is None
-            or abs(at - stamp) > 0.25
-            or abs(at - depth_at) > 0.05
-        ):
-            return None
-        camera_pose = self.map_pose_at(at, require_history=True)
-        if camera_pose is None:
-            return None
-        t_map_camera_base = se3_from_quat_xyz(
-            pose7_from_xy_yaw(camera_pose["x"], camera_pose["y"], camera_pose["yaw"])
-        )
-        # Optical axes: right=-base Y, down=-base Z, forward=base X.
-        optical_from_base = np.array(
-            [
-                [0.0, -1.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0, self.camera_z],
-                [1.0, 0.0, 0.0, -self.camera_x],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
-        )
-        transform = (
-            optical_from_base
-            @ np.linalg.inv(t_map_camera_base)
-            @ se3_from_quat_xyz(t_map_base)
-        )
-        return colorize_ros_rgbd(points, image, depth, info, transform)
-
-    def _on_scan(self, msg: LaserScan) -> None:
-        """2D fallback. Ignored while the 3D ``scan/points`` path is alive."""
-        if time.monotonic() - getattr(self, "_scan_cloud_at", 0.0) < 1.0:
-            return
-        at = stamp_seconds(msg.header)
-        pose = self.map_pose_at(at, require_history=True)
-        if pose is None:
-            return
-        points = laser_scan_to_map_points(
-            np.asarray(msg.ranges, dtype=np.float64),
-            angle_min=float(msg.angle_min),
-            angle_increment=float(msg.angle_increment),
-            range_min=float(msg.range_min),
-            range_max=float(msg.range_max),
-            pose_xy_yaw=(pose["x"], pose["y"], pose["yaw"]),
-            lidar_x=float(getattr(self, "lidar_x", 0.0)),
-            lidar_z=float(getattr(self, "lidar_z", 0.0)),
-        )
-        captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-        self._enqueue_keyframe(points, captured_pose, at)
-
-    def _on_scan_cloud(self, msg: PointCloud2) -> None:
-        self._scan_cloud_at = time.monotonic()
-        # The pose at the scan's stamp, not the newest one. See map_pose_at().
-        at = stamp_seconds(msg.header)
-        pose = self.map_pose_at(at, require_history=True)
-        if pose is None:
-            return
-        points = cloud_xyz(msg)
-        if not len(points):
-            return
-        mapped = points_lidar_to_map(
-            points,
-            (pose["x"], pose["y"], pose["yaw"]),
-            lidar_x=float(getattr(self, "lidar_x", 0.0)),
-            lidar_z=float(getattr(self, "lidar_z", 0.0)),
-        )
-        captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-        self._enqueue_keyframe(mapped, captured_pose, at)
-
-    def upload_keyframe(self) -> None:
-        uploader = getattr(self, "_keyframes", None)
-        if uploader is None:
-            return
-        if not self._upload_lock.acquire(blocking=False):
-            return
-        try:
-            uploader.upload_one()
-        finally:
-            self._upload_lock.release()
-
-    def pull_nav_map(self) -> None:
-        """Publish the collaborative map in this robot's frame for Nav2."""
-        client = getattr(self, "_nav_map", None)
-        pub = getattr(self, "pub_global_map", None)
-        if client is None or pub is None:
-            return
-        if not self._upload_lock.acquire(blocking=False):
-            return
-        try:
-            downloaded = client.poll()
-        finally:
-            self._upload_lock.release()
-        if downloaded is None:
-            if client.last_error:
-                self.node.get_logger().warn(
-                    f"[{self.id}] nav map download failed: {client.last_error}"
-                )
-            return
-        grid = OccupancyGrid()
-        pose = self.map_pose()
-        apply_to_occupancy_grid(
-            grid,
-            downloaded,
-            f"{self.id}/map_frame",
-            pose_xy=(pose["x"], pose["y"]),
-            clear_radius_m=float(self.footprint_radius) + 0.15,
-        )
-        grid.header.stamp = self.node.get_clock().now().to_msg()
-        pub.publish(grid)
-
-    def cslam_origin(self, graph: dict) -> dict | None:
-        """This robot's SLAM map frame expressed in cslam's common frame.
-
-        cslam reports where the robot IS in the common frame; the adapter knows
-        where the same robot is in its own map frame. The transform between the
-        two frames is therefore
-
-            T_map->common  =  pose_common  o  pose_own^-1
-
-        which is exactly what the map service needs to place this robot's grid.
-        Returns None until cslam has actually merged this robot with someone:
-        before that it reports its own frame as the common one, and publishing
-        an identity transform would claim a merge that has not happened.
-        """
-        common = graph.get("common")
-        if not isinstance(common, dict) or not graph.get("in_common_frame"):
-            return None
-        own = self.map_pose()
-        cyaw = float(common.get("yaw", 0.0))
-        dyaw = (cyaw - own["yaw"] + math.pi) % (2 * math.pi) - math.pi
-        c, s = math.cos(dyaw), math.sin(dyaw)
-        return {
-            "x": float(common.get("x", 0.0)) - (own["x"] * c - own["y"] * s),
-            "y": float(common.get("y", 0.0)) - (own["x"] * s + own["y"] * c),
-            "yaw": dyaw,
-            "frame": common.get("frame"),
-        }
-
-    def _on_cloud(self, msg: PointCloud2) -> None:
-        with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
-            self._cloud = msg
-            self._cloud_dirty = True
-
-    def upload_cloud(self) -> None:
-        """Voxel-downsample the 3D map and push it, quantised to 1 cm.
-
-        Downsampling happens here rather than in the backend because this is the
-        expensive end of a link that should stay cheap: a full RTAB-Map cloud is
-        millions of points, and the view draws each one as a single pixel.
-        """
-        if not self._cloud_dirty or self._cloud is None:
-            return
-        if not self._upload_lock.acquire(blocking=False):
-            return  # a reset is running; see upload_map
-        try:
-            self._upload_cloud_locked()
-        finally:
-            self._upload_lock.release()
-
-    def _upload_cloud_locked(self) -> None:
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
-        if not self._cloud_dirty or self._cloud is None:
-            return
-        self._cloud_dirty = False
-        points = self._cloud_xyz(self._cloud)
-        if not len(points):
-            return
-        # Deduplicate onto a voxel lattice: one point per occupied cell.
-        keys = np.round(points / CLOUD_VOXEL).astype(np.int32)
-        keep = unique_row_index(keys)
-        selected = points[keep]
-        rgb = self._display_cloud_colors(selected)
-        body = (
-            np.round(selected / CLOUD_SCALE).astype("<i2").tobytes()
-            if rgb is None
-            else selected.astype("<f4").tobytes() + rgb.tobytes()
-        )
-        format_query = "" if rgb is None else "&format=xyzrgb32"
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
-                    f"&scale={CLOUD_SCALE}{format_query}",
-                    data=zlib.compress(body, 1),
-                    headers=headers,
-                ),
-                timeout=self._cfg_timeout("upload_timeout_s"),
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] cloud upload failed: {exc}")
-
-    def _display_cloud_colors(self, points_map: np.ndarray) -> np.ndarray | None:
-        """Project the latest synchronized RGB-D frame onto display-map points."""
-        from adapters.reconstruction import colorize_ros_rgbd
-
-        image = getattr(self, "_camera_frame", None)
-        depth = getattr(self, "_camera_depth", None)
-        info = getattr(self, "_camera_info", None)
-        if image is None or depth is None or info is None:
-            return None
-        at = stamp_seconds(getattr(image, "header", None))
-        depth_at = stamp_seconds(getattr(depth, "header", None))
-        if at is None or depth_at is None or abs(at - depth_at) > 0.05:
-            return None
-        camera_pose = self.map_pose_at(at, require_history=True)
-        if camera_pose is None:
-            return None
-        t_map_camera_base = se3_from_quat_xyz(
-            pose7_from_xy_yaw(camera_pose["x"], camera_pose["y"], camera_pose["yaw"])
-        )
-        optical_from_base = np.array(
-            [
-                [0.0, -1.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0, self.camera_z],
-                [1.0, 0.0, 0.0, -self.camera_x],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
-        )
-        rgba = colorize_ros_rgbd(
-            points_map,
-            image,
-            depth,
-            info,
-            optical_from_base @ np.linalg.inv(t_map_camera_base),
-        )
-        return rgba[:, :3].copy() if rgba is not None and np.any(rgba[:, 3]) else None
+        with self._costmap_lock:
+            self._costmaps[kind] = snapshot
+            self._costmap_dirty.add(kind)
 
     def _on_camera(self, msg: Image) -> None:
         self._camera_frame = msg
@@ -1166,43 +557,6 @@ class RobotBridge(
     def _cfg_timeout(self, key: str) -> float:
         cfg = getattr(self, "cfg", None) or TRANSPORT_DEFAULTS
         return float(cfg[key])
-
-    def navigate_to(self, goal: dict) -> None:
-        """Map a planner-agnostic command onto Nav2's NavigateToPose action."""
-        planner = getattr(self, "objective_planner", None)
-        if planner is not None:
-            planner.navigate(goal)
-            return
-        if not self.nav_client.server_is_ready():
-            self.node.get_logger().error(f"[{self.id}] Nav2 action server is not ready")
-            self.goal = None
-            self.nav_status, self.mode = "failed", "idle"
-            return
-
-        request = NavigateToPose.Goal()
-        request.pose = PoseStamped()
-        request.pose.header.frame_id = f"{self.id}/map_frame"
-        request.pose.header.stamp = self.node.get_clock().now().to_msg()
-        request.pose.pose.position.x = float(goal["x"])
-        request.pose.pose.position.y = float(goal["y"])
-        yaw = float(goal.get("yaw", 0.0))
-        request.pose.pose.orientation.z = math.sin(yaw / 2)
-        request.pose.pose.orientation.w = math.cos(yaw / 2)
-
-        with self._goal_lock:
-            self._cancel_nav()
-            generation = self._goal_generation
-            self._nav_failure_reason = None
-            future = self.nav_client.send_goal_async(request)
-            self._goal_request_future = future
-            self._goal_request_generation = generation
-            self.goal = {
-                "x": float(goal["x"]),
-                "y": float(goal["y"]),
-                "yaw": yaw,
-            }
-            self.nav_status, self.mode = "active", "nav"
-            future.add_done_callback(lambda done: self._goal_response(done, generation))
 
     def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
         planner = getattr(self, "objective_planner", None)
@@ -1455,7 +809,7 @@ class RobotBridge(
         if name == f"{self.id}/odom":
             base = self._odom_to_base
             return base if base is not None else self._odom_topic_pose
-        if name == self.map_frame.lstrip("/"):
+        if name == self.navigation_frame.lstrip("/"):
             return self.map_pose()
         return None
 
@@ -1491,9 +845,7 @@ class RobotBridge(
 
     def navigation_ready(self) -> bool:
         """Whether the action servers and configured objective planner are live."""
-        actions_ready = bool(
-            self.nav_client.server_is_ready() and self.path_client.server_is_ready()
-        )
+        actions_ready = bool(self.path_client.server_is_ready())
         planner = getattr(self, "objective_planner", None)
         planner_client = getattr(planner, "client", None)
         return actions_ready and (
@@ -1508,7 +860,7 @@ class RobotBridge(
         action discovery is checked again on the next health cycle.
         """
         now = time.monotonic()
-        if self.nav_client.server_is_ready() and self.path_client.server_is_ready():
+        if self.path_client.server_is_ready():
             self._nav_down_since = 0.0
             return False
         if self._nav_down_since == 0.0:
@@ -1791,7 +1143,7 @@ class RobotBridge(
         if client is None:
             client = self.node.create_client(srv_type, name)
             self._service_clients[name] = client
-        wait_s = min(SLAM_STARTUP_SERVICE_TIMEOUT_S, remaining)
+        wait_s = min(LIFECYCLE_SERVICE_TIMEOUT_S, remaining)
         if not client.wait_for_service(timeout_sec=wait_s):
             raise TimeoutError(f"service unavailable: {name}")
 
@@ -1817,256 +1169,26 @@ class RobotBridge(
             raise RuntimeError(f"service returned no response: {name}")
         return response
 
-    def _slam_toolbox_state(self, not_after: float) -> int:
-        get_state = _srv_type("lifecycle_msgs.srv", "GetState")
-        if get_state is None:
-            raise RuntimeError("lifecycle_msgs.srv.GetState is not installed")
-        response = self._lifecycle_service_response(
-            f"/{self.id}/slam_toolbox/get_state",
-            get_state,
-            get_state.Request(),
-            not_after,
-        )
-        return int(response.current_state.id)
-
-    def _change_slam_toolbox_state(self, transition: int, not_after: float) -> bool:
-        change_state = _srv_type("lifecycle_msgs.srv", "ChangeState")
-        if change_state is None:
-            raise RuntimeError("lifecycle_msgs.srv.ChangeState is not installed")
-        request = change_state.Request()
-        request.transition.id = int(transition)
-        response = self._lifecycle_service_response(
-            f"/{self.id}/slam_toolbox/change_state",
-            change_state,
-            request,
-            not_after,
-        )
-        return bool(response.success)
-
-    def _configured_start_pose(self) -> dict | None:
-        """Where this robot was spawned, according to the backend's config.
-
-        Read from `/api/config` rather than from the study YAML on disk, so the
-        pose a reset returns the robot to and the prior the backend registers it
-        against cannot drift apart — they are then the same number from the same
-        file, which is the argument docker-compose.yml already makes for handing
-        the backend the same config the fleet runs.
-
-        Cached after the first success: the config does not change under a
-        running stack, and a reset should not depend on an HTTP round trip
-        succeeding at exactly the wrong moment.
-        """
-        if self._start_pose is not None:
-            return self._start_pose
-        try:
-            with urllib.request.urlopen(
-                f"{self.http_url}/api/config", timeout=5
-            ) as response:
-                config = json.loads(response.read()).get("config", {})
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] cannot read start pose: {exc}")
-            return None
-        pose = ((config.get("map") or {}).get("start_poses") or {}).get(self.id)
-        if not isinstance(pose, dict):
-            self.node.get_logger().warn(
-                f"[{self.id}] no start pose configured; leaving it where it stands "
-                f"rather than guessing one"
-            )
-            return None
-        self._start_pose = pose
-        return pose
-
-    def _reset_pose(self) -> bool:
-        """Teleport this robot back to its spawn pose.
-
-        Explicit, because a Gazebo world reset does not do it: the fleet is
-        created in a running world, and a reset only restores what the world SDF
-        declared. See reset_world().
-        """
-        pose = self._configured_start_pose()
-        if pose is None:
-            return False
-        world = _gz_world_name(self.node.get_logger())
-        if world is None:
-            return False
-        yaw = float(pose.get("yaw", 0.0))
-        qz, qw = math.sin(yaw / 2), math.cos(yaw / 2)
-        request = (
-            f'name: "{self.id}", '
-            f'position: {{x: {float(pose["x"])}, y: {float(pose["y"])}, z: {self.spawn_z}}}, '
-            f"orientation: {{z: {qz:.9f}, w: {qw:.9f}}}"
-        )
-        try:
-            done = subprocess.run(
-                [
-                    "gz",
-                    "service",
-                    "-s",
-                    f"/world/{world}/set_pose",
-                    "--reqtype",
-                    "gz.msgs.Pose",
-                    "--reptype",
-                    "gz.msgs.Boolean",
-                    "--timeout",
-                    "5000",
-                    "--req",
-                    request,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.node.get_logger().warn(f"[{self.id}] set_pose failed: {exc}")
-            return False
-        if "true" not in done.stdout.lower():
-            self.node.get_logger().warn(
-                f"[{self.id}] set_pose rejected: "
-                f"{done.stdout.strip()} {done.stderr.strip()}"
-            )
-            return False
-        return True
-
-    def _reset_odometry(self) -> bool:
-        """Re-zero the EKF's integrated pose.
-
-        Blunt, and safe to be blunt about, because of what ekf.yaml actually
-        fuses: linear velocity from the wheels and yaw RATE from the gyro, never
-        an absolute pose. Nothing will answer the new origin by re-asserting the
-        old one, and Gazebo returning the model to spawn injects no pose
-        measurement for the filter to argue with. Called after the world reset
-        has settled so the teleport's velocity transient is not what gets
-        integrated into the fresh estimate.
-        """
-        request = SetPose.Request()
-        request.pose.header.frame_id = f"{self.id}/odom"
-        request.pose.header.stamp = self.node.get_clock().now().to_msg()
-        request.pose.pose.pose.orientation.w = 1.0
-        return self._call(f"/{self.id}/set_pose", SetPose, request)
-
-    def _reset_slam(self) -> bool:
-        """Drop the pose graph and the map, whichever back end is running."""
-        available = dict(self.node.get_service_names_and_types())
-        for suffix, module, name in SLAM_RESET_SERVICES:
-            service = f"/{self.id}/{suffix}"
-            if service not in available:
-                continue
-            srv_type = _srv_type(module, name)
-            if srv_type is None:
-                self.node.get_logger().warn(
-                    f"[{self.id}] {service} exists but {module}.{name} is not installed"
-                )
-                continue
-            return self._call(service, srv_type, srv_type.Request())
-        self.node.get_logger().warn(
-            f"[{self.id}] no SLAM reset service; tried "
-            f"{[s for s, _, _ in SLAM_RESET_SERVICES]}"
-        )
-        return False
-
-    def _clear_costmaps(self) -> bool:
-        """Forget obstacles recorded against a map that no longer exists."""
-        ok = True
-        for layer in (
-            "global_costmap/clear_entirely_global_costmap",
-            "local_costmap/clear_entirely_local_costmap",
-        ):
-            ok = (
-                self._call(
-                    f"/{self.id}/{layer}",
-                    ClearEntireCostmap,
-                    ClearEntireCostmap.Request(),
-                )
-                and ok
-            )
-        return ok
-
     def reset(self) -> dict[str, bool]:
-        """Return this robot to its start state. Runs on a worker thread.
+        """Refuse the legacy per-robot reset. Runs on a worker thread.
 
-        Ordering is the whole design. Stop the robot before moving it; move it
-        before re-zeroing the filter that measures its movement; re-zero the
-        filter before restarting the SLAM that uses it as a motion prior; and
-        only drop the cached uploads once all of it has happened, so that what
-        the backend clears afterwards stays cleared.
-
-        Note what a reset does NOT do: restart the exploration bootstrap. If
-        `explore_seconds` has elapsed the fleet comes back stationary, waiting
-        for goals, which is the same state it would have been left in.
-
-        Returns a step-by-step verdict rather than a single boolean, because a
-        reset where the world moved but SLAM did not is a specific and
-        recognisable failure — the operator sees robots back at the start
-        drawing their old map — and naming it beats reporting `false`.
+        ARGoS owns the physical world through its socket bridge and onboard
+        mapping requires a fresh frontend mission, so a reset is a
+        composition-wide lifecycle operation of the host reset supervisor.
+        The negative acknowledgement is queued for the session transmitter,
+        which owns the websocket, so a misconfigured legacy server fails
+        promptly instead of waiting the full fleet reset timeout for silence.
         """
-        if os.environ.get("SWARMDECK_SIM_BACKEND", "gazebo").lower() == "argos":
-            # ARGoS owns the physical world through its socket bridge. Gazebo's
-            # SetPose and robot_localization SetPose services cannot reset that
-            # world and would only create a false estimator origin. Onboard
-            # mapping also requires a fresh frontend mission. The host reset
-            # supervisor performs that composition-wide lifecycle operation.
-            self.node.get_logger().warn(
-                f"[{self.id}] refusing legacy per-robot reset under ARGoS; "
-                "use the epoch-safe simulation reset supervisor"
-            )
-            steps = {"supervisor_required": False}
-            # The session transmitter, rather than this executor worker, owns
-            # the websocket. Queue the negative acknowledgement just like the
-            # normal reset path so a misconfigured legacy server fails promptly
-            # instead of waiting the full fleet reset timeout for silence.
-            self._reset_report = {
-                "type": "reset_done",
-                "robot_id": self.id,
-                "t_mono": round(time.monotonic() - self.t0, 4),
-                "ok": False,
-                "steps": steps,
-            }
-            return steps
-
-        steps: dict[str, bool] = {}
-        with self._upload_lock:
-            self._cancel_nav()
-            self.pub_cmd.publish(Twist())
-            self.goal = None
-            self.planned_path = []
-            self.nav_status, self.mode = "idle", "idle"
-            self._last_drive_at = 0.0
-
-            # Scenery first, then this robot. Two calls because a world reset
-            # restores only what the world SDF declared, and the fleet was
-            # spawned into a world that was already running.
-            steps["world"] = reset_world(self.node.get_logger())
-            steps["pose"] = self._reset_pose()
-            time.sleep(WORLD_SETTLE_S)
-            steps["odometry"] = self._reset_odometry()
-            steps["slam"] = self._reset_slam()
-            steps["costmaps"] = self._clear_costmaps()
-
-            # Last, and inside the lock: anything still cached here describes the
-            # world before the reset, and uploading it after the backend clears
-            # would put the old map straight back.
-            self.grid = None
-            self._grid_dirty = False
-            self._cloud = None
-            self._cloud_dirty = False
-            self._camera_frame = None
-            self._camera_dirty = False
-            # Not `_camera_info`: intrinsics are a fact about the lens, not about
-            # the world that was just reset, and dropping them would only delay
-            # the first detection that can be placed on the new map.
-            self._camera_depth = None
-            self._detections = None
-            costmap_lock = getattr(self, "_costmap_lock", None)
-            if costmap_lock is not None:
-                with costmap_lock:
-                    self._costmaps.clear()
-                    self._costmap_dirty.clear()
-
+        self.node.get_logger().warn(
+            f"[{self.id}] refusing legacy per-robot reset; "
+            "use the epoch-safe simulation reset supervisor"
+        )
+        steps = {"supervisor_required": False}
         self._reset_report = {
             "type": "reset_done",
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
-            "ok": all(steps.values()),
+            "ok": False,
             "steps": steps,
         }
         return steps
@@ -2101,75 +1223,23 @@ class RobotBridge(
             return False
 
     async def session_maps_tick(self, now: float, send, loop) -> None:
-        startup = self._slam_startup
-        if startup is not None:
-            # Claim the one startup episode before yielding. Reconnects and
-            # later map ticks must not keep scheduling executor no-ops.
-            self._slam_startup = None
-            # The state pump and ROS executor are separate threads. Only this
-            # map coroutine waits for the bounded recovery worker.
-            await loop.run_in_executor(None, startup.run_once)
         graph = SLAM_GRAPHS.get(self.id)
         last_graph = getattr(self, "_session_last_graph", 0.0)
         if graph is not None and now - last_graph > 3.0:
             self._session_last_graph = now
             await send(
                 slam_graph_payload(
-                    self.id, self.t0, graph, self.cslam_origin(graph), now
+                    self.id, self.t0, graph, None, now
                 )
             )
-        period = float((self.cfg.get("rates") or {}).get("cloud_period_s", 4.0))
-        last_grid = getattr(self, "_session_last_cslam_grid", 0.0)
-        if now - last_grid > period:
-            self._session_last_cslam_grid = now
-            await loop.run_in_executor(None, upload_cslam_grid, self.http_url)
         last_nav = getattr(self, "_session_last_nav_health", 0.0)
         if now - last_nav > 5.0:
             self._session_last_nav_health = now
             await loop.run_in_executor(None, self.recover_nav_if_down)
 
-    def upload_map(self) -> None:
-        if not self._grid_dirty or self.grid is None:
-            return
-        # Skip rather than wait. reset() holds this lock for several seconds, and
-        # blocking here would stall the tx loop behind it — the 5 Hz state stream
-        # would stop, and the backend reads four seconds of silence as the robot
-        # going offline. A skipped upload costs one 2 s cycle.
-        if not self._upload_lock.acquire(blocking=False):
-            return
-        try:
-            self._upload_map_locked()
-        finally:
-            self._upload_lock.release()
-
-    def _upload_map_locked(self) -> None:
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
-        if not self._grid_dirty or self.grid is None:
-            return
-        self._grid_dirty = False
-        g = self.grid
-        cells = np.array(g.data, dtype=np.int8).reshape(g.info.height, g.info.width)
-        body = zlib.compress(np.ascontiguousarray(cells).tobytes())
-        url = (
-            f"{self.http_url}/api/adapter/map?robot_id={self.id}"
-            f"&resolution={g.info.resolution}&width={g.info.width}&height={g.info.height}"
-            f"&origin_x={g.info.origin.position.x}&origin_y={g.info.origin.position.y}"
-        )
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(url, data=body, headers=headers),
-                timeout=self._cfg_timeout("upload_timeout_s"),
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
-
     def upload_costmaps(self) -> None:
         """Push the newest global/local Nav2 snapshots to the read-only overlay."""
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
+        headers = {"Content-Type": "application/octet-stream"}
         if not self._upload_lock.acquire(blocking=False):
             return
         try:
@@ -2179,6 +1249,7 @@ class RobotBridge(
                     for kind in tuple(self._costmap_dirty)
                     if kind in self._costmaps
                 ]
+                pending = [(kind, snap) for kind, snap in pending if kind == "local"]
                 for kind, _ in pending:
                     self._costmap_dirty.discard(kind)
 
@@ -2189,7 +1260,7 @@ class RobotBridge(
                 frame = urllib.parse.quote(snapshot.frame_id, safe="")
                 url = (
                     f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
-                    f"&kind={kind}&resolution={snapshot.resolution}"
+                    f"&kind=local&resolution={snapshot.resolution}"
                     f"&width={snapshot.width}&height={snapshot.height}"
                     f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
                     f"&frame_id={frame}"
@@ -2224,7 +1295,7 @@ class RobotBridge(
         if not self._camera_dirty or self._camera_frame is None:
             return
         if not self._upload_lock.acquire(blocking=False):
-            return  # a reset is running; see upload_map
+            return  # a reset is running
         try:
             self._process_camera_locked()
         finally:
@@ -2289,7 +1360,7 @@ def create_adapter_node():
     instant of the first reset and published `odom -> base_link` as identity
     from then on. That transform is half of the pose the GUI draws, so all four
     robots sat frozen on their spawn points while driving around the building —
-    and slam_toolbox, which uses the same TF as its motion prior, lost its
+    and peer_slam, which uses the same TF as its motion prior, lost its
     odometry at the same moment.
     """
     return rclpy.create_node(
@@ -2334,16 +1405,6 @@ def main() -> None:
         config_count_int,
     )
     node.create_subscription(String, "/swarmdeck/slam_graph", _on_slam_graph, 10)
-    node.create_subscription(
-        OccupancyGrid,
-        "/cslam/map",
-        _on_cslam_grid,
-        QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        ),
-    )
     # Platforms from the SAME config the fleet was spawned from, so the
     # adapter cannot describe a different fleet than the one Gazebo built.
     if fleet_cfg:

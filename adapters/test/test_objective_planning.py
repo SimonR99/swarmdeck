@@ -127,7 +127,7 @@ def rig(monkeypatch, response, *, refine_responses=None):
         refine_client.call_async.side_effect = refine_response
     bridge = Mock()
     bridge.id = "robot_1"
-    bridge.map_frame = "robot_1/map_frame"
+    bridge.navigation_frame = "robot_1/navigation_frame"
     bridge.cfg = {}
     bridge._mapping_authority = NS(current=lambda: None)
     bridge._goal_generation = 4
@@ -542,7 +542,7 @@ def test_return_home_uses_corrected_authority_anchor(monkeypatch):
         "mission_id": "mission-1",
         "component_id": "component-a",
         "map_epoch": 0,
-        "navigation_frame": "robot_1/map_frame",
+        "navigation_frame": "robot_1/navigation_frame",
         "mapping_graph_revision": 0,
         "geometry_revision": "a" * 64,
         "map_source_stamp": {"sec": 0, "nanosec": 0},
@@ -709,7 +709,7 @@ def test_claimed_initial_plan_retains_goal_until_planner_returns(monkeypatch):
     assert public["nav_status"] == "active"
     assert public["goal"] == {
         **goal,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
     }
     assert public["objective_continuation"] == {
         "objective": "navigate",
@@ -773,7 +773,7 @@ def correction_authority(
     mission_id="mission-1",
     landmark_id="kf-home",
     map_epoch=0,
-    navigation_frame="robot_1/map_frame",
+    navigation_frame="robot_1/navigation_frame",
     solution_order=(1, 0),
     yaw=0.0,
     home_yaw=0.0,
@@ -1096,7 +1096,7 @@ def test_return_home_authority_identity_change_fails_closed(monkeypatch, replace
         mission_id=replacement.get("mission_id", "mission-1"),
         landmark_id=replacement.get("landmark_id", "kf-home"),
         map_epoch=replacement.get("map_epoch", 0),
-        navigation_frame=replacement.get("navigation_frame", "robot_1/map_frame"),
+        navigation_frame=replacement.get("navigation_frame", "robot_1/navigation_frame"),
     )
 
     planner._check_active_authority()
@@ -2251,7 +2251,7 @@ def test_component_goal_is_reresolved_after_correction(monkeypatch):
         "y": 1.0,
         "z": 0.0,
         "yaw": 0.0,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
         "mission_id": "mission-1",
         "component_id": "component-a",
         "solution_order": [1, 0],
@@ -2284,7 +2284,7 @@ def test_component_click_is_rejected_if_frame_changes_before_initial_admission(
     goal = {
         "x": 4.0,
         "y": 1.0,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
         "mission_id": "mission-1",
         "component_id": "component-a",
         "solution_order": [1, 0],
@@ -2305,7 +2305,7 @@ def test_component_click_without_frame_revision_token_is_rejected(monkeypatch):
     goal = {
         "x": 4.0,
         "y": 1.0,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
         "mission_id": "mission-1",
         "component_id": "component-a",
         "component_goal": {"x": 5.0, "y": 1.0, "z": 0.0, "yaw": 0.0},
@@ -2325,7 +2325,7 @@ def test_component_goal_requires_matching_explicit_authority(monkeypatch):
     goal = {
         "x": 1.0,
         "y": 2.0,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
         "mission_id": "mission-other",
         "component_id": "component-a",
         "component_goal": {"x": 1.0, "y": 2.0},
@@ -2359,7 +2359,7 @@ def test_map_goal_is_resolved_once_into_stable_planning_frame(monkeypatch):
     bridge, planner, client = rig(monkeypatch, success_path())
     authority = stable_planning_authority(map_x=1.0)
     # Rotate map coordinates into the component while planning odometry stays
-    # fixed. The direct UI goal has no frame field and therefore uses map_frame.
+    # fixed. The direct UI goal has no frame field and therefore uses navigation_frame.
     authority["T_component_navigation"] = [
         [0.0, -1.0, 0.0, 1.0],
         [1.0, 0.0, 0.0, 0.0],
@@ -2394,7 +2394,7 @@ def test_stable_route_ignores_map_gauge_but_replans_planning_correction(
         "y": 1.0,
         "z": 0.4,
         "yaw": 0.0,
-        "frame_id": "robot_1/map_frame",
+        "frame_id": "robot_1/navigation_frame",
         "mission_id": "mission-1",
         "component_id": "component-a",
         "solution_order": [1, 0],

@@ -1,15 +1,12 @@
 # SwarmDeck Docker stack
 #
-# Full sim (ARGoS):    docker compose --profile argos up --build -d
-# Legacy sim (Gazebo): docker compose --profile gazebo up --build -d
-# Mock fleet only:     docker compose --profile mock up --build -d
 #
 # UI: http://localhost:5173   API: http://localhost:8080
 #
 # The ARGoS profile is three services around one volume:
 #
 #   argos        physics, Filament rendering and sensors. No ROS at all.
-#   sim          the ROS 2 Jazzy side: bridge, SLAM Toolbox, Nav2, adapter_sim.
+#   sim          the ROS 2 Jazzy bridge, odometry, controller and adapter.
 #   fast_livo2   the odometry front-end (Fast-LIVO2), in its own DDS domain.
 #
 # They talk over Unix sockets on `swarmdeck_runtime`, mounted at /run/swarmdeck
@@ -41,12 +38,14 @@ services:
       - --config
       # The SAME config the fleet runs. Hardcoding this meant the backend could
       # silently use different map resolution, extent, start poses and
-      # merge_mode from the simulation it was serving — `merge_mode: cslam` in a
       # scenario file simply never took effect, because the server was still
       # reading 4robot.yaml.
       - "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
     environment:
-      SWARMDECK_SLAM_URL: http://slam:8090
+      # Every replica upload, moving command and reset is fenced on the fleet
+      # mission; the host reset supervisor shares this directory.
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_SIM_RESET_DIR: /app/sessions/simulation-reset
     ports:
       - "8080:8080"
     volumes:
@@ -150,65 +149,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  slam:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.slam
-    image: swarmdeck-slam:local
-    command:
-      - python
-      - -m
-      - swarmdeck_slam
-      - --host
-      - "0.0.0.0"
-      - --port
-      - "8090"
-      - --server-url
-      - "http://server:8080"
-    environment:
-      SWARMDECK_SERVER_URL: http://server:8080
-      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
-      # Set to a path under /app/sessions to record every accepted keyframe for
-      # offline replay (slam/tools/replay.py). Empty disables capture, which is
-      # the normal state: a long run writes one file per keyframe.
-      SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
-      # Hardware validation on the 2026-08-31 Botman/Aslan session showed that
-      # the odometry-free reconstructor split 85 keyframes into 27 fragments
-      # and published a non-planar Aslan frame.  The graph solver kept all 85
-      # keyframes in one component while moving either onboard trajectory by
-      # at most 2.1 cm.  Preserve the robot SLAM trajectories and optimize only
-      # their verified closure residuals by default.
-      SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-graph}"
-      SWARMDECK_SLAM_ANCHOR_ROBOT: "${SWARMDECK_SLAM_ANCHOR_ROBOT:-}"
-      # Draw occupancy at onboard odometry (the default, "odometry as
-      # suggestion") or at the solver's optimized poses. Empty keeps the
-      # default. Set to 0 to let accepted loop closures actually move occupied
-      # cells, which today they never do. Pair it with a capture and replay the
-      # same keyframes both ways rather than eyeballing two live runs.
-      SWARMDECK_SLAM_ODOMETRY_AS_POSE: "${SWARMDECK_SLAM_ODOMETRY_AS_POSE:-}"
-      # Opt-in replay for production captures.  A deployment can point both
-      # variables at one durable session directory and restart without losing
-      # the in-memory graph.  Empty capture remains the normal simulation
-      # default, so old datasets are never replayed accidentally.
-      SWARMDECK_SLAM_RESTORE_CAPTURE: "${SWARMDECK_SLAM_RESTORE_CAPTURE:-false}"
-      SWARMDECK_SLAM_QUEUE_CAP: "${SWARMDECK_SLAM_QUEUE_CAP:-2048}"
-    volumes:
-      # Datasets land beside the session recordings, on the host, so a capture
-      # survives the container it was made in.
-      - ../../sessions:/app/sessions
-      - ../../configs:/app/configs:ro
-    ports:
-      - "8090:8090"
-    depends_on:
-      server:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
 
   ui:
     build:
@@ -298,8 +238,6 @@ services:
     depends_on:
       server:
         condition: service_healthy
-      slam:
-        condition: service_healthy
       mediamtx:
         condition: service_started
       duck_detector:
@@ -316,11 +254,20 @@ services:
       BACKEND_PORT: "8080"
       SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
       SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
-      SWARMDECK_SIM_BACKEND: argos
       RUNTIME_DIR: /run/swarmdeck
       ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
-      SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
-      GRID_3D: "${GRID_3D:-false}"
+      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      # MGG is the only planner; the adapter dispatches its routes to the
+      # Nav2 controller and plans in the continuous odometry frame.
+      SWARMDECK_MGG_ENABLED: "1"
+      SWARMDECK_PLANNING_BACKEND: mgg
+      SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
+      SWARMDECK_PLANNER_MAP_PROVIDER: mola
+      # Frontier reservations and peer keep-out discs are arbitrated in the
+      # surveyed deployment frame (plan.md invariant 19).
+      SWARMDECK_PEER_COORDINATION: "1"
+      SWARMDECK_COORDINATION_FRAME: deployment
       # Detection targets scattered through the world, classes assigned round
       # robin from adapters/perception/catalog.py.
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
@@ -328,13 +275,12 @@ services:
       # faster because it leaves the lockstep exchange, and correspondingly
       # less faithful. `make up-argos-dev` sets drift; nothing else should.
       SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-fast_livo2}"
-      # Bootstrap the maps by exploring, then stop and hand the fleet to the
-      # operator. Without this nothing drives, and goals issued against an empty
-      # map jam robots into walls where wheel slip destroys their odometry.
-      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      # Seconds of fleet exploration to bootstrap at startup; 0 leaves the
+      # fleet parked until the operator starts Explore.
+      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-0}"
       SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
       SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
-      ROS_DOMAIN_ID: "42"
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
       SWARMDECK_DETECTION_PERIOD_S: "${SWARMDECK_DETECTION_PERIOD_S:-1.0}"
       VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-500}"
@@ -357,13 +303,6 @@ services:
     restart: unless-stopped
 
   # Fast-LIVO2: Direct LiDAR-Inertial-Visual Odometry, on ROS 2 (multi-arch AMD64 & ARM64).
-  #
-  # This is what makes the simulated fleet's drift real rather than modelled.
-  # ARGoS's own <odometry implementation="drift"> perturbs ground-truth motion
-  # with Gaussian noise: it cannot slip a wheel against an obstacle, lose a
-  # scan to geometric degeneracy, or fail to converge. Fast-LIVO2 can, because
-  # it is really estimating from the simulated sensors, which is the problem
-  # swarmdeck-slam exists to solve.
   fast_livo2:
     profiles: ["argos"]
     build:
@@ -371,15 +310,11 @@ services:
       dockerfile: Dockerfile
     image: swarmdeck-fast-livo2:local
     environment:
-      # 1 fuses the camera (true LIVO). Only meaningful when the sim is also
-      # streaming it: see SWARMDECK_ESTIMATOR_CHANNELS on the sim service.
       IMG_EN: "${IMG_EN:-0}"
       RUNTIME_DIR: /run/swarmdeck
       SOCK: /run/swarmdeck/uf.sock
       RESULTS: /results
       FASTRTPS_DEFAULT_PROFILES_FILE: /tools/fastdds_large.xml
-      # Its own domain. The estimator's ROS traffic is internal to this
-      # container and must not land in the Jazzy graph on domain 42.
       ROS_DOMAIN_ID: "43"
     volumes:
       - ../../deploy/docker/fast_livo2:/tools:ro
@@ -388,92 +323,11 @@ services:
     command: ["bash", "-c", "exec bash /tools/run_fast_livo.sh"]
     restart: "no"
 
-  # --- legacy Gazebo profile ----------------------------------------------
-  #
-  # Kept runnable as an A/B control against the ARGoS stack, and only for
-  # that: it renders with `gpu_lidar` raytracing on the CPU at roughly 0.58x
-  # real time, and its odometry is an EKF over simulated wheels and gyro
-  # rather than a real front-end. `configs/4robot.yaml` now selects a 17-ring
-  # lidar for the ARGoS estimator, which is expensive here; use
-  # SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml for the cheap one.
-  gazebo:
-    profiles: ["gazebo"]
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.gazebo
-    # NOT swarmdeck-sim:local. That tag belongs to the `sim` service, which
-    # builds Dockerfile.sim and entrypoints into the ARGoS session; sharing it
-    # meant one `make build-sim` replaced the ARGoS container's image with this
-    # one, and `make up-argos` then started Gazebo without saying so.
-    image: swarmdeck-gazebo:local
-    depends_on:
-      server:
-        condition: service_healthy
-      slam:
-        condition: service_healthy
-      mediamtx:
-        condition: service_started
-      duck_detector:
-        condition: service_healthy
-    environment:
-      BACKEND_HOST: server
-      BACKEND_PORT: "8080"
-      # SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml reproduces the sensor
-      # the project shipped before the lidar profiles, as an A/B control.
-      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
-      SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
-      HEADLESS: "true"
-      ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
-      SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
-      # Keep RTAB-Map's occupancy in 3D, so `cloud_map` carries real structure
-      # and the GUI's 3D view shows a building rather than a flat tracing of the
-      # 2D map. Off by default because it halves the real-time factor
-      # (0.54 -> 0.25 measured) and the 2D map is unaffected either way — but it
-      # belongs here rather than only in the entrypoint, because "why is the 3D
-      # view flat" is otherwise a question with no discoverable answer.
-      #   GRID_3D=true SLAM_BACKEND=rtabmap make docker-up-gpu
-      GRID_3D: "${GRID_3D:-false}"
-      FUSE_IMU: "${FUSE_IMU:-true}"
-      # Bootstrap the maps by exploring, then stop and hand the fleet to the
-      # operator. Without this nothing drives, and goals issued against an empty
-      # map jam robots into walls where wheel slip destroys their odometry.
-      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
-      # Coordinated performs one bounded common-observation leg, then allocates
-      # non-overlapping frontier goals jointly. `reactive` is the legacy A/B.
-      EXPLORE_STRATEGY: "${EXPLORE_STRATEGY:-coordinated}"
-      # Evaluation-only truth recorder. When omitted during a keyframe capture,
-      # the entrypoint writes ground_truth.csv beside those keyframes. Nothing
-      # in the adapter, planner, or SLAM service receives this path or topic.
-      SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
-      SWARMDECK_GROUND_TRUTH_PATH: "${SWARMDECK_GROUND_TRUTH_PATH:-}"
-      # Keyframe production budget, per robot. Voxel matches the 0.05 m grid so
-      # the render is not coarser than the cells it fills; the yaw gate drops
-      # captures taken mid-turn, whose clouds are motion-skewed. Both are
-      # exposed here because the right values differ per platform and per link
-      # -- an OS1-128 at 0.05 m is a much larger cloud than the sim's 33 rings.
-      # Set the yaw gate to 0 to disable it (used when capturing a dataset that
-      # should stay ablatable offline).
-      SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
-      SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
-      ROS_DOMAIN_ID: "42"
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      SWARMDECK_DETECTOR_URL: http://duck_detector:8091
-      SWARMDECK_DETECTION_PERIOD_S: "${SWARMDECK_DETECTION_PERIOD_S:-1.0}"
-      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-500}"
-      VIDEO_FPS: "${VIDEO_FPS:-5}"
-      VIDEO_WIDTH: "${VIDEO_WIDTH:-320}"
-      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-240}"
-    volumes:
-      - ../../sessions:/app/sessions
-      - ../../configs:/app/configs:ro
-    shm_size: "2gb"
-    restart: unless-stopped
-
   # Shared AI perception for every simulated robot. The adapter still owns
   # camera transport and protocol publication; this sidecar only maps pixels
   # to YOLOE boxes. Hardware compose files use the matching JetPack image.
   duck_detector:
-    profiles: ["argos", "gazebo"]
+    profiles: ["argos"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
@@ -498,7 +352,7 @@ services:
       - duck_detector_models:/models
     restart: unless-stopped
 
-  # Synthetic fleet (no Gazebo / ROS)
+  # Synthetic fleet without ROS.
   mock:
     profiles: ["mock"]
     build:
@@ -520,8 +374,152 @@ services:
     healthcheck:
       disable: true
     restart: unless-stopped
+  # MGG and the peer/MOLA pipeline are part of every ARGoS deployment.
+  mgg:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mgg
+    network_mode: service:sim
+    environment:
+      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
+      SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
+      SWARMDECK_PEER_NAMES: "${SWARMDECK_PEER_NAMES:-}"
+      SWARMDECK_SIM_RESET_DIR: /run/swarmdeck-reset
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
+      SWARMDECK_PLANNER_MAP_PROVIDER: mola
+      SWARMDECK_MAPS_ROOT: /maps
+    volumes:
+      - ../../configs:/app/configs:ro
+      - ../mgg:/app/deploy/mgg:ro
+      - ../../sessions/simulation-reset:/run/swarmdeck-reset
+      - peer_maps:/maps:ro
+    command: ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && exec python3 /app/deploy/mgg/supervisor.py"]
+    depends_on:
+      sim:
+        condition: service_started
+
+  peer0: &peer0
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cslam
+    image: swarmdeck-cslam:planning
+    network_mode: service:sim
+    environment: &peer-env
+      PYTHONPATH: /app
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_PEER_NAMES: '${SWARMDECK_PEER_NAMES:-["robot_0","robot_1","robot_2","robot_3"]}'
+      SWARMDECK_PEER_INDEX: "0"
+      SWARMDECK_USE_SIM_TIME: "true"
+      SWARMDECK_CAPTURE_PROVIDER: "${SWARMDECK_CAPTURE_PROVIDER:-unknown}"
+      SWARMDECK_COLOR_FRAME_CONVENTION: body
+      SWARMDECK_SIM_RESET_DIR: /run/swarmdeck-reset
+      SWARMDECK_PEER_BODY_MASK: "${SWARMDECK_PEER_BODY_MASK:-false}"
+      SWARMDECK_PEER_PLATFORMS: "${SWARMDECK_PEER_PLATFORMS:-}"
+      SWARMDECK_INTER_ROBOT_CLOSURES: "${SWARMDECK_INTER_ROBOT_CLOSURES:-false}"
+      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
+      SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
+      SWARMDECK_PLANNER_MAP_PROVIDER: mola
+      SWARMDECK_SERVER_URL: http://server:8080
+    volumes:
+      - ../../autonomy:/app/autonomy:ro
+      - ../autonomy:/app/deploy/autonomy:ro
+      - peer_maps:/maps
+      - ../../sessions/simulation-reset:/run/swarmdeck-reset:ro
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
+    depends_on:
+      sim:
+        condition: service_started
+    restart: unless-stopped
+  peer1:
+    <<: *peer0
+    environment:
+      <<: *peer-env
+      SWARMDECK_PEER_INDEX: "1"
+  peer2:
+    <<: *peer0
+    environment:
+      <<: *peer-env
+      SWARMDECK_PEER_INDEX: "2"
+  peer3:
+    <<: *peer0
+    environment:
+      <<: *peer-env
+      SWARMDECK_PEER_INDEX: "3"
+
+  mapping:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:mola-native
+    environment:
+      SWARMDECK_MAPS_ROOT: /maps
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_MOLA_IMPORTER: /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
+      SWARMDECK_MOLA_MODE: persistent
+      SWARMDECK_MOLA_PLANNER_MAPS: "${SWARMDECK_MOLA_PLANNER_MAPS:-true}"
+      SWARMDECK_MOLA_TIMEOUT_S: "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      SWARMDECK_MOLA_POLL_S: "${SWARMDECK_MOLA_POLL_S:-1}"
+      SWARMDECK_MOLA_RETRY_S: "${SWARMDECK_MOLA_RETRY_S:-5}"
+      SWARMDECK_MOLA_MAX_OUTPUT_BYTES: "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      SWARMDECK_MOLA_KEEP_GENERATIONS: "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
+      SWARMDECK_MOLA_PARALLEL_PEERS: "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
+    volumes:
+      - peer_maps:/maps
+    command:
+      - swarmdeck-mola-worker
+      - --mode
+      - persistent
+      - --maps-root
+      - /maps
+      - --timeout
+      - "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      - --poll
+      - "${SWARMDECK_MOLA_POLL_S:-1}"
+      - --retry
+      - "${SWARMDECK_MOLA_RETRY_S:-5}"
+      - --max-output-bytes
+      - "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      - --keep-generations
+      - "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
+      - --parallel-peers
+      - "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
+    restart: unless-stopped
+  mapping-query:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:mola-native
+    network_mode: service:sim
+    environment:
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_PLANNER_MAP_PROVIDER: mola
+      SWARMDECK_MAP_QUERY_POLL_S: "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
+      SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
+      SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S: "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
+    volumes:
+      - peer_maps:/maps
+    command:
+      - swarmdeck-indexed-map-server
+      - --maps-root
+      - /maps
+      - --poll-s
+      - "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
+      - --max-snapshot-age-s
+      - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
+      - --superseded-grace-s
+      - "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
 
 volumes:
+  peer_maps:
+
   duck_detector_models:
   # Two Unix sockets, the generated world glTF and the generated
   # experiment, shared by argos, sim and fast_livo2. A named volume

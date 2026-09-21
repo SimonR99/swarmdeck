@@ -21,7 +21,7 @@ def _display_navigation(bridge, state, authority, anchored=True):
     from autonomy.live_mapping import display_path
 
     state = dict(state)
-    target = bridge.map_frame.lstrip("/")
+    target = bridge.navigation_frame.lstrip("/")
     transforms = {}
 
     def matrix(frame):
@@ -146,8 +146,8 @@ def live_state(bridge):
     # Import lazily: legacy ROS 1 deployments need no planning-frame support.
     if getattr(bridge, "_follow_path_display", None) is not None or (
         isinstance(state.get("goal"), dict)
-        and state["goal"].get("frame_id", bridge.map_frame).lstrip("/")
-        != bridge.map_frame.lstrip("/")
+        and state["goal"].get("frame_id", bridge.navigation_frame).lstrip("/")
+        != bridge.navigation_frame.lstrip("/")
     ):
         source = state
         state, drifted = _display_navigation(bridge, source, authority)
@@ -173,7 +173,7 @@ def live_state(bridge):
     from autonomy.live_mapping import PATH_FIELDS, display_path, validate_live_mapping
 
     try:
-        if authority["navigation_frame"].lstrip("/") != bridge.map_frame.lstrip("/"):
+        if authority["navigation_frame"].lstrip("/") != bridge.navigation_frame.lstrip("/"):
             return state
         payload = {
             **authority,

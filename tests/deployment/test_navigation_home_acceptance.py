@@ -24,7 +24,7 @@ def test_harness_reads_the_validated_live_home_contract():
         "robot_map_epoch": 0,
         "run_id": run_id,
         "component_id": "component",
-        "navigation_frame": "robot_0/map_frame",
+        "navigation_frame": "robot_0/odom",
         "solution_order": [0, -1],
         "T_component_navigation": IDENTITY_SE3,
         "authority_age_s": 0.1,

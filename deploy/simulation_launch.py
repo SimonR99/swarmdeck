@@ -113,20 +113,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--drift", action="store_const", const="drift", dest="odometry")
     result.add_argument(
-        "--fast-livo2", action="store_const", const="fast_livo2", dest="odometry"
-    )
-    backend = result.add_mutually_exclusive_group()
-    backend.add_argument("--mola", action="store_const", const="mola", dest="backend")
-    backend.add_argument(
-        "--legacy-cloud",
-        action="store_const",
-        const="legacy-cloud",
-        dest="backend",
-        help="use the former central cloud/OctoMap MGG path",
-    )
-    result.set_defaults(backend=os.getenv("SWARMDECK_SIM_MAPPING", "mola"))
-    result.add_argument(
         "-t", "--targets", type=int, default=int(os.getenv("TARGETS", "10"))
+    )
+    result.add_argument(
+        "--fast-livo2", action="store_const", const="fast_livo2", dest="odometry"
     )
     result.add_argument(
         "-e", "--explore", type=int, default=int(os.getenv("EXPLORE_SECONDS", "0"))
@@ -260,7 +250,7 @@ def custom_config_overlay(project: str, source: Path) -> Path:
     path = STATE_ROOT / f"{project}.custom-config.yml"
     quoted_source = json.dumps(str(source))
     lines = ["services:"]
-    for service in ("server", "slam", "sim", "mgg"):
+    for service in ("server", "sim", "mgg"):
         lines.extend(
             (
                 f"  {service}:",
@@ -276,21 +266,12 @@ def custom_config_overlay(project: str, source: Path) -> Path:
     return path
 
 
-def compose_files(render: str, backend: str) -> list[Path]:
+def compose_files(render: str) -> list[Path]:
     files = [COMPOSE / "docker-compose.yml"]
     if render in {"gpu", "nvidia"}:
         files.append(COMPOSE / "docker-compose.gpu.yml")
     elif render in {"dri", "intel", "amd"}:
         files.append(COMPOSE / "docker-compose.dri.yml")
-    files.append(COMPOSE / "docker-compose.mgg.yml")
-    if backend == "mola":
-        files.extend(
-            (
-                COMPOSE / "docker-compose.peers.yml",
-                COMPOSE / "docker-compose.mapping.yml",
-                COMPOSE / "docker-compose.onboard-planning.yml",
-            )
-        )
     return files
 
 
@@ -306,7 +287,6 @@ def new_epoch() -> dict[str, str]:
             )
         return read_deployment_env(ENV_FILE)
 
-
 def process_environment(
     spec: dict, epoch: dict[str, str] | None = None
 ) -> dict[str, str]:
@@ -320,23 +300,14 @@ def process_environment(
         EXPLORE_SECONDS=str(spec["explore"]),
         SWARMDECK_ROBOT_COUNT=str(spec["robot_count"]),
         SWARMDECK_PEER_NAMES=json.dumps(spec["robot_names"], separators=(",", ":")),
-        # Simulation publishes every robot's pose in one shared frame, so the
-        # peers can drop returns that landed on a neighbour before the
-        # keyframe is retained. Hardware profiles never set this. A state file
-        # saved before platforms were recorded masks nothing rather than
-        # starting peers that cannot size a body.
         SWARMDECK_PEER_BODY_MASK="true" if platforms else "false",
         SWARMDECK_PEER_PLATFORMS=json.dumps(
             platforms, separators=(",", ":"), sort_keys=True
         ),
         SWARMDECK_CAPTURE_PROVIDER="simulation",
-        SWARMDECK_MGG_MAP_BACKEND=(
-            "mola_snapshot" if spec["backend"] == "mola" else "cloud_octomap"
-        ),
-        SWARMDECK_PLANNER_MAP_PROVIDER=(
-            "mola" if spec["backend"] == "mola" else "indexed"
-        ),
-        SWARMDECK_MOLA_PLANNER_MAPS=("true" if spec["backend"] == "mola" else "false"),
+        SWARMDECK_SLAM_BACKEND="cslam",
+        SWARMDECK_PLANNER_MAP_PROVIDER="mola",
+        SWARMDECK_MOLA_PLANNER_MAPS="true",
         SWARMDECK_INDEXED_MAP_QUERY="0",
     )
     if epoch:
@@ -348,12 +319,11 @@ def process_environment(
 
 
 def command(spec: dict) -> list[str]:
-    result = ["docker", "compose", "-p", spec["project"]]
-    if spec["backend"] == "mola":
-        result.extend(("--env-file", str(ENV_FILE)))
+    result = ["docker", "compose", "-p", spec["project"], "--env-file", str(ENV_FILE)]
     for path in spec["compose_files"]:
         result.extend(("-f", path))
     return result
+
 
 
 def state_path(project: str) -> Path:
@@ -371,16 +341,20 @@ def load_state(project: str) -> dict:
         state = json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         raise ValueError(f"no saved simulation stack for project {project!r}") from exc
-    required = {"project", "backend", "compose_files", "services", "reset_services"}
-    if not isinstance(state, dict) or not required.issubset(state):
-        raise ValueError(f"saved simulation state is invalid: {path}")
+    required = {"version", "project", "compose_files", "services", "reset_services"}
+    if (
+        not isinstance(state, dict)
+        or state.get("version") != 2
+        or not required.issubset(state)
+    ):
+        raise ValueError(f"saved simulation state is invalid or obsolete: {path}")
     return state
 
 
 def stop_services(spec: dict, services: list[str]) -> int:
     if not services:
         return 0
-    epoch = ensure_deployment_env(ENV_FILE) if spec["backend"] == "mola" else None
+    epoch = ensure_deployment_env(ENV_FILE)
     environment = process_environment(spec, epoch)
     compose = command(spec)
     return subprocess.run(
@@ -391,7 +365,7 @@ def stop_services(spec: dict, services: list[str]) -> int:
 def remove_services(spec: dict, services: list[str]) -> int:
     if not services:
         return 0
-    epoch = ensure_deployment_env(ENV_FILE) if spec["backend"] == "mola" else None
+    epoch = ensure_deployment_env(ENV_FILE)
     environment = process_environment(spec, epoch)
     return subprocess.run(
         [*command(spec), "--profile", "argos", "rm", "-f", *services],
@@ -545,8 +519,6 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
         spec["project"],
         "--expected-robots",
         str(spec["robot_count"]),
-        "--backend",
-        spec["backend"],
         "--server-url",
         environment.get("SWARMDECK_RESET_SERVER_URL", "http://127.0.0.1:8080"),
     ]
@@ -593,16 +565,16 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
 def build_spec(args: argparse.Namespace, project: str) -> dict:
     if args.dev:
         args.scenario, args.render, args.odometry = "3robot", "dri", "drift"
-    if args.backend not in {"mola", "legacy-cloud"}:
-        raise ValueError("mapping backend must be mola or legacy-cloud")
+    if os.getenv("SWARMDECK_SLAM_BACKEND", "cslam") != "cslam":
+        raise ValueError("SWARMDECK_SLAM_BACKEND must be cslam")
     if args.targets < 0 or args.explore < 0:
         raise ValueError("targets and exploration seconds must be nonnegative")
     source = scenario_path(args.scenario)
     count, prefix = fleet_from_config(source)
     names = [f"{prefix}{index}" for index in range(count)]
-    if args.backend == "mola" and count > MAX_SIMULATION_PEERS:
+    if count > MAX_SIMULATION_PEERS:
         raise ValueError(
-            f"MOLA simulation supports at most {MAX_SIMULATION_PEERS} peers; "
+            f"CSLAM simulation supports at most {MAX_SIMULATION_PEERS} peers; "
             f"{source} configures {count}"
         )
     try:
@@ -612,23 +584,22 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
     except ValueError:
         container_config = "/app/configs/swarmdeck-launch.yaml"
         custom_overlay = custom_config_overlay(project, source)
-    files = compose_files(args.render, args.backend)
+    files = compose_files(args.render)
     if custom_overlay:
         files.append(custom_overlay)
-    peers = [f"peer{index}" for index in range(count)] if args.backend == "mola" else []
+    peers = [f"peer{index}" for index in range(count)]
     services = [
         "server",
         "ui",
-        "slam",
         "duck_detector",
         "mediamtx",
         "sim",
         "argos",
         "mgg",
+        *peers,
+        "mapping",
+        "mapping-query",
     ]
-    services.extend(peers)
-    if args.backend == "mola":
-        services.extend(("mapping", "mapping-query"))
     if args.odometry == "fast_livo2":
         services.append("fast_livo2")
     reset_services = [
@@ -637,9 +608,8 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
         if service not in {"ui", "duck_detector", "mediamtx"}
     ]
     return {
-        "version": 1,
+        "version": 2,
         "project": project,
-        "backend": args.backend,
         "scenario": str(source),
         "container_config": container_config,
         "robot_count": count,
@@ -661,7 +631,6 @@ def print_dry_run(spec: dict, build: bool, detach: bool) -> None:
     print("Simulation Bring-Up Configuration (Dry Run):")
     print(f"  Project:   {spec['project']}")
     print(f"  Scenario:  {spec['scenario']} ({spec['robot_count']} robots)")
-    print(f"  Mapping:   {spec['backend']}")
     print(f"  Render:    {spec['render']}")
     print(f"  Odometry:  {spec['odometry']}")
     invocation = command(spec) + [
@@ -688,9 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         print_dry_run(spec, args.build, args.detach)
         return 0
 
-    epoch = None
-    if spec["backend"] == "mola":
-        epoch = ensure_deployment_env(ENV_FILE)
+    epoch = ensure_deployment_env(ENV_FILE)
     environment = process_environment(spec, epoch)
     compose = command(spec)
     if args.action == "status":
@@ -703,8 +670,7 @@ def main(argv: list[str] | None = None) -> int:
             env=environment,
         ).returncode
     if args.action == "down":
-        if spec["backend"] == "mola":
-            stop_supervisor(project)
+        stop_supervisor(project)
         print(f"Stopping SwarmDeck simulation stack ({project})...")
         stopped = subprocess.run(
             [*compose, "--profile", "argos", "stop", *spec["services"]],
@@ -734,29 +700,25 @@ def main(argv: list[str] | None = None) -> int:
         removed = remove_services(previous, superseded)
         if removed:
             return removed
-    if spec["backend"] == "mola":
-        epoch = new_epoch()
-        environment = process_environment(spec, epoch)
+    epoch = new_epoch()
+    environment = process_environment(spec, epoch)
     flags = (["--build"] if args.build else []) + ["--force-recreate"]
     flags += ["-d"] if args.detach else []
     print(
         f"Starting {spec['robot_count']}-robot ARGoS simulation with "
-        f"{spec['backend']} mapping and {spec['odometry']} odometry..."
+        f"{spec['odometry']} odometry..."
     )
-    if spec["backend"] == "mola":
-        start_supervisor(spec, environment)
+    start_supervisor(spec, environment)
     try:
         result = subprocess.run(
             [*compose, "--profile", "argos", "up", *flags, *spec["services"]],
             env=environment,
         )
     except BaseException:
-        if spec["backend"] == "mola":
-            stop_supervisor(project)
+        stop_supervisor(project)
         raise
     if result.returncode:
-        if spec["backend"] == "mola":
-            stop_supervisor(project)
+        stop_supervisor(project)
         retire_services(spec, spec["services"])
         if previous is None:
             save_state(spec)

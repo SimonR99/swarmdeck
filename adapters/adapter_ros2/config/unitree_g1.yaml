@@ -13,7 +13,7 @@ footprint:
   - [-0.18, -0.22]
   - [-0.18, 0.22]
 
-map_frame: world
+navigation_frame: world
 base_frame: base_link
 lidar_height_m: 1.17
 
@@ -21,25 +21,17 @@ lidar_height_m: 1.17
 # transforms it through the timestamped world <- livox_frame TF before making
 # scans/keyframes.  The live transform places the lidar about 1.17 m above the
 # floor (0.46 m above base_link).
-map_cloud_height_band:
-  floor_z: 0.0
-  min_z: 0.15
-  max_z: 1.80
 retain_free_space: true
 
 topics:
   odom: /odom
-  map: ""
-  map_cloud: /utlidar/cloud_livox_mid360
-  # Nav2's planner_server publishes its global route in the robot namespace.
+  # MGG route in the robot navigation frame.
   plan: /asimov_0/plan
-  # DWB's selected local trajectory; the adapter displays this over the global
-  # route because it is the path the controller is currently following.
+  # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /asimov_0/local_plan
   # Nav2 costmaps are visualization-only snapshots; the adapter never
   # republishes them to the planner or merges them into SwarmDeck's occupancy
   # map.
-  global_costmap: /asimov_0/global_costmap/costmap
   local_costmap: /asimov_0/local_costmap/costmap
   cmd_vel: /cmd_vel
   # Nav2 writes only cmd_vel_nav; the adapter relays it to the real /cmd_vel
@@ -57,10 +49,9 @@ topics:
   camera_depth_points: ""
 
 actions:
-  # asimov.launch.py brings up a full obstacle-aware Nav2 stack (costmap from
-  # the projected Mid-360 cloud, planner, controller, bt_navigator) against
-  # the onboard localization's live world -> base_link TF.
-  navigate_to_pose: /asimov_0/navigate_to_pose
+  # Nav2 controller_server (asimov.launch.py): MGG routes are executed here
+  # against the onboard localization's live world -> base_link TF.
+  follow_path: /asimov_0/follow_path
 
 services:
   # Body actions are dispatched directly via /cmd_body to Asimov's native bridge
@@ -81,9 +72,7 @@ perception:
 
 rates:
   state_hz: 5.0
-  map_period_s: 2.0
   camera_period_s: 0.2
-  cloud_period_s: 4.0
 
 upload_timeout_s: 0.5
 drive_timeout_s: 1.5

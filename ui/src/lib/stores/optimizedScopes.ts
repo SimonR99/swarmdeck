@@ -1,17 +1,12 @@
-/** One entry from GET /api/map/optimized: a grid the collaborative solver posed. */
+/** One entry from GET /api/map/optimized: a rasterized replica product. */
 export interface OptimizedScope {
-  /**
-   * `robot:<id>` or `component:<n>` from the SLAM back-end, or
-   * `deployment:<session>`, the server's raster of the replicated keyframes
-   * placed in the surveyed deployment frame. Opaque to the server routes.
-   */
+  /** `component:*` is a verified multi-robot component; `deployment:*` is the surveyed fallback. */
   scope: string;
   robots: string[];
   resolution: number;
   width: number;
   height: number;
   origin: { x: number; y: number };
-  /** Publications of this scope so far; a rebuild advances it, geometry aside. */
   seq?: number;
 }
 
@@ -26,11 +21,10 @@ export function isDeploymentScope(scope: string): boolean {
   return scope.startsWith(DEPLOYMENT_PREFIX);
 }
 
-/** 0 for a verified component, 1 for the deployment composite, else unranked. */
+/** 0 for a verified component, 1 for the deployment fallback, else unranked. */
 function globalRank(entry: OptimizedScope): number | null {
-  if (entry.robots.length < 2) return null;
-  if (isComponentScope(entry.scope)) return 0;
-  if (isDeploymentScope(entry.scope)) return 1;
+  if (isComponentScope(entry.scope)) return entry.robots.length >= 2 ? 0 : null;
+  if (isDeploymentScope(entry.scope)) return entry.robots.length > 0 ? 1 : null;
   return null;
 }
 

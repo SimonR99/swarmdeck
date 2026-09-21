@@ -31,27 +31,12 @@ from ..detect.review import ReviewStore
 from ..events.logger import events
 from ..fleet.departure import departure_order, release_in_turn
 from ..fleet.registry import registry
-from ..mapsvc.service import GridMeta, MapService, map_service
+from ..mapsvc.service import map_service
 from .broadcast import JsonBroadcaster
 from .deployment_raster import deployment_raster_loop
+from .map_routes import costmap_snapshots, reset_costmaps, take_costmap_patches
 
-# Compatibility exports for callers that historically imported map transport
-# constants/helpers from ``api.app``. The route implementation now lives in
-# ``map_routes``; keeping these names here avoids a needless API break while
-# the FastAPI handlers remain thin composition-root wrappers.
-from .map_routes import (
-    CLOUD_SCALE,
-    MAX_UPLOAD_BYTES,
-    _inflate,
-    costmap_snapshots,
-    reset_costmaps,
-    take_costmap_patches,
-)
-
-# 2 adds one optional adapter message, `slam_graph`, carrying a robot's view of a
-# collaborative pose graph. Purely additive: a protocol-1 adapter never sends it
-# and is fully supported, which is the whole point of versioning it rather than
-# redefining `hello`.
+# Protocol 2 optionally carries peer SLAM status; protocol 1 remains accepted.
 PROTOCOL_VERSION = 2
 SUPPORTED_PROTOCOLS = (1, 2)
 
@@ -63,28 +48,16 @@ async def lifespan(_: FastAPI):
     settings_store.load()
     apply_review_radii(settings_store.value)
     load_review()
-    map_service.set_excluded(disabled_robot_ids(settings_store.value))
     tasks = [
         asyncio.create_task(state_loop()),
-        asyncio.create_task(map_loop()),
         asyncio.create_task(network_loop()),
         asyncio.create_task(costmap_loop()),
         asyncio.create_task(session_loop()),
-        # Registration runs here rather than inside each upload — see
-        # MapService.registration_worker. Without this task the transforms in
-        # `auto` mode would never be recomputed at all.
-        asyncio.create_task(map_service.registration_worker()),
-        # The 2D map's fleet-wide raster of the replicated keyframes, rebuilt
-        # off-loop whenever the deployment composite changes.
         asyncio.create_task(deployment_raster_loop()),
     ]
-    from ..mapsvc import graph_bridge
-
-    await graph_bridge.start_worker()
     yield
-    await graph_bridge.stop_worker()
-    for t in tasks:
-        t.cancel()
+    for task in tasks:
+        task.cancel()
 
 
 app = FastAPI(title="SwarmDeck", lifespan=lifespan)
@@ -140,12 +113,10 @@ CAMERA_STALE_S = 3.0
 # two different robots both need their frames.
 _camera_watchers: dict[Any, str] = {}
 
-# How long to wait for adapters to report `reset_done` before clearing anyway. A
-# reset restarts SLAM and re-zeroes an odometry filter on every robot; measured
-# on the four-robot Gazebo stack the slow step is the Gazebo world reset itself.
-# Generous, because the failure mode of waiting too little (clearing the map
-# while adapters still hold the old one) is worse than the failure mode of
-# waiting too long (a spinner stays up).
+# How long to wait for adapters to report `reset_done` before clearing server
+# state. The adapters reset simulator poses, odometry, and local costmaps.
+# Generous, because waiting too little can clear state while an adapter still
+# holds the old local products.
 RESET_TIMEOUT_S = 25.0
 
 # Robots that have been sent `reset` and have not yet answered. Mutated from the
@@ -178,21 +149,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     CONFIG = yaml.safe_load(p.read_text()) if p.exists() else {}
 
     mcfg = CONFIG.get("map", {}) or {}
-    # Rebuild the service so resolution/extent follow the config.
-    new_service = MapService(
-        resolution=float(mcfg.get("resolution", 0.05)),
-        size_m=float(mcfg.get("size_m", 30.0)),
-    )
-    new_service.set_mode(mcfg.get("merge_mode", "static"))
-    # How members disagreeing about a cell is resolved. Default `majority`
-    # so a stale obstacle one robot recorded is erased once others have
-    # driven through it; `occupied` restores the old any-vote-wins rule.
-    new_service.set_conflict_mode(mcfg.get("merge_conflict", "majority"))
+    new_service = type(map_service)()
     for rid, pose in (mcfg.get("start_poses") or {}).items():
         new_service.set_transform(
             rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0)
         )
-
     map_service.__dict__.update(new_service.__dict__)
     reset_costmaps()
     _camera_frames.clear()
@@ -482,14 +443,6 @@ async def state_loop() -> None:
                 await clear_alert(sid)
 
 
-async def map_loop() -> None:
-    """2 Hz patch emission — never re-sends the whole grid (NFR-6)."""
-    while True:
-        await asyncio.sleep(0.5)
-        patch = await asyncio.to_thread(map_service.take_patch)
-        if patch:
-            await broadcast(patch)
-
 
 async def network_loop() -> None:
     """1 Hz per-robot Wi-Fi heatmap patches."""
@@ -502,7 +455,7 @@ async def network_loop() -> None:
 
 
 async def costmap_loop() -> None:
-    """Fan out the latest global/local Nav2 costmap snapshots."""
+    """Fan out local Nav2 costmap snapshots."""
     while True:
         await asyncio.sleep(0.5)
         for patch in take_costmap_patches():
@@ -594,18 +547,14 @@ def cancel_departures() -> None:
 async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
     """Put the simulation back to its start state.
 
-    Two halves that must happen in this order. The adapters reset the things only
-    they can reach — the simulator's model poses, each robot's SLAM map, its
-    odometry filter, its costmaps — and report `reset_done`. Only then does the
-    backend drop what it derived from those robots. Clearing first would race: the
-    server holds each robot's last uploaded grid, and an upload already in flight
-    would restore the map a moment after it was cleared.
+    Adapters reset the simulator's model poses, odometry filter, and local
+    costmaps, then report `reset_done`. Only after that acknowledgement does the
+    backend clear deployment raster and telemetry state. Clearing first would
+    race with an in-flight local product.
 
     Backend state is cleared even when an adapter never answers. A stuck adapter
-    must not leave the operator staring at a map with a spinner over it forever;
-    the robots that failed to confirm are named in the result instead, because a
-    robot whose SLAM did not actually reset will push its old map back within a
-    couple of seconds and the operator needs to know why.
+    must not leave the operator staring at stale state forever; robots that
+    failed to confirm are named in the result.
     """
     cancel_departures()
     global _reset_done, _reset_running
@@ -677,10 +626,6 @@ async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
         silent = sorted(_reset_pending)
         _reset_pending.clear()
 
-        await map_service.reset_async()
-        from ..mapsvc import graph_bridge
-
-        await asyncio.to_thread(graph_bridge.post_reset)
         reset_costmaps()
         await broadcast({"type": "costmap_clear", "robot_id": None})
         await broadcast({"type": "network_clear", "robot_id": None})
@@ -926,188 +871,58 @@ async def get_sim_reset() -> dict[str, Any]:
     return await handler()
 
 
-@app.get("/api/map")
-async def get_map() -> Response:
-    from .map_routes import get_map as handler
-
-    return await handler()
-
-
 @app.get("/api/map/status")
 async def get_map_status() -> dict[str, Any]:
     from .map_routes import get_map_status as handler
-
-    return await handler()
-
-
-@app.get("/api/map/info")
-async def get_map_info() -> dict[str, Any]:
-    from .map_routes import get_map_info as handler
-
     return await handler()
 
 
 @app.post("/api/map/reset/{robot_id}")
 async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Response:
     from .map_routes import reset_robot_map as handler
-
     return await handler(robot_id, request_id)
 
 
 @app.get("/api/map/reset/{robot_id}")
 async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
     from .map_routes import get_robot_map_reset as handler
-
     return await handler(robot_id, request_id)
 
 
 @app.post("/api/map/reset")
 async def reset_all_maps() -> Response:
     from .map_routes import reset_all_maps as handler
-
     return await handler()
-
-
-@app.get("/api/map/local/{robot_id}")
-async def get_local_map(robot_id: str) -> Response:
-    from .map_routes import get_local_map as handler
-
-    return await handler(robot_id)
-
-
-@app.get("/api/map/local/{robot_id}/info")
-async def get_local_map_info(robot_id: str) -> Response:
-    from .map_routes import get_local_map_info as handler
-
-    return await handler(robot_id)
-
-
-@app.get("/api/map/local/{robot_id}/network")
-async def get_local_network(robot_id: str) -> Response:
-    from .map_routes import get_local_network as handler
-
-    return await handler(robot_id)
 
 
 @app.get("/api/map/costmap/{robot_id}/{kind}")
 async def get_costmap(robot_id: str, kind: str) -> Response:
     from .map_routes import get_costmap as handler
-
     return await handler(robot_id, kind)
-
-
-@app.post("/api/adapter/map")
-async def post_map(request: Request) -> Any:
-    from .map_routes import post_map as handler
-
-    return await handler(request)
 
 
 @app.post("/api/adapter/costmap")
 async def post_costmap(request: Request) -> Any:
     from .map_routes import post_costmap as handler
-
-    return await handler(request)
-
-
-@app.post("/api/adapter/global_map")
-async def post_global_map(request: Request) -> Any:
-    from .map_routes import post_global_map as handler
-
-    return await handler(request)
-
-
-@app.post("/api/adapter/cloud")
-async def post_cloud(request: Request) -> Any:
-    from .map_routes import post_cloud as handler
-
-    return await handler(request)
-
-
-@app.post("/api/adapter/scan")
-async def post_scan(request: Request) -> Any:
-    from .map_routes import post_scan as handler
-
-    return await handler(request)
-
-
-@app.post("/api/adapter/keyframe")
-async def post_keyframe(request: Request) -> Any:
-    from .map_routes import post_keyframe as handler
-
-    return await handler(request)
-
-
-@app.post("/api/slam/optimized_map")
-async def post_optimized_map(request: Request) -> Any:
-    from .map_routes import post_optimized_map as handler
-
     return await handler(request)
 
 
 @app.get("/api/map/optimized")
 async def get_optimized_index() -> dict[str, Any]:
     from .map_routes import get_optimized_index as handler
-
     return await handler()
 
 
 @app.get("/api/map/optimized/{scope}")
 async def get_optimized_map(scope: str) -> Response:
     from .map_routes import get_optimized_map as handler
-
     return await handler(scope)
-
-
-@app.post("/api/slam/update")
-async def post_slam_update(request: Request) -> Any:
-    from .map_routes import post_slam_update as handler
-
-    return await handler(request)
-
-
-@app.get("/api/slam/backend")
-async def get_slam_backend() -> Any:
-    from .map_routes import get_slam_backend as handler
-
-    return await handler()
-
-
-@app.put("/api/slam/config")
-async def put_slam_config(request: Request) -> Any:
-    from .map_routes import put_slam_config as handler
-
-    return await handler(request)
-
-
-@app.get("/api/map/nav/{robot_id}")
-async def get_nav_map(request: Request, robot_id: str) -> Response:
-    from .map_routes import get_nav_map as handler
-
-    return await handler(request, robot_id)
 
 
 @app.get("/api/map/gaussians")
 async def get_gaussians(request: Request) -> Response:
     from .reconstruction_routes import get_gaussians as handler
-
     return await handler(request)
-
-
-@app.get("/api/map/cloud")
-async def get_cloud(request: Request) -> Response:
-    from .map_routes import get_cloud as handler
-
-    return await handler(request)
-
-
-@app.get("/api/map/local/{robot_id}/cloud")
-async def get_local_cloud(robot_id: str) -> Response:
-    from .map_routes import get_cloud as handler
-
-    return await handler(
-        Request(scope={"type": "http", "query_string": f"robot_id={robot_id}".encode()})
-    )
 
 
 @app.post("/api/adapter/camera")
@@ -1188,7 +1003,6 @@ async def gui_socket(ws: WebSocket) -> None:
 def gui_snapshot() -> list[dict[str, Any]]:
     """Capture initial GUI state atomically with respect to publications."""
     return [
-        {"type": "map_info", "info": map_service.map_info()},
         {"type": "fleet_change", "robots": fleet_snapshot()},
         session_state(),
         {"type": "settings_state", "settings": settings_store.value},
@@ -1206,7 +1020,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
     events.log(kind, {k: v for k, v in msg.items() if k != "type"})
     if rid:
         registry.attend(rid)
-    if rid and kind in {"set_goal", "return_home", "body_command", "start_explore"}:
+    if rid and kind in {"return_home", "body_command", "start_explore"}:
         from .map_routes import robot_command_error
 
         error = robot_command_error(rid)
@@ -1216,7 +1030,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     if (
         rid
-        and kind in {"set_goal", "return_home", "drive", "body_command"}
+        and kind in {"return_home", "drive", "body_command"}
         and not is_robot_enabled(settings_store.value, rid)
     ):
         return
@@ -1266,147 +1080,19 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             await broadcast_review()
         return
 
-    if kind in ("set_goal", "return_home"):
-        goal = msg.get("payload") or {}
-        onboard_planner = registry.can(rid, "plan_objective") and registry.can(
-            rid, "navigate"
-        )
-        if kind == "return_home" and onboard_planner:
-            from .objective_commands import send_objective
-
-            await send_objective(registry, rid, "return_home")
-            return
-        if kind == "return_home":
-            robot = registry.robots.get(rid)
-            if robot is None or robot.home_pose is None:
-                await raise_alert(
-                    "home_unavailable",
-                    "warn",
-                    "fault",
-                    "Starting position has not been recorded",
-                    rid,
-                )
-                return
-            goal = (
-                dict(robot.home_pose)
-                if robot.coordinate_frame == "merged"
-                else map_service.robot_to_world(rid, robot.home_pose)
-            )
-        expected_transform = goal.get("map_transform") if kind == "set_goal" else None
-        fenced_local_goal = None
-        if expected_transform is not None:
-            try:
-                expected = tuple(
-                    float(expected_transform[name]) for name in ("x", "y", "yaw")
-                )
-            except (KeyError, TypeError, ValueError):
-                return
-            if not all(math.isfinite(value) for value in expected):
-                return
-            with map_service._state_lock:
-                current = map_service.transforms.get(rid, (0.0, 0.0, 0.0))
-                matches = all(
-                    math.isfinite(value) and abs(a - value) <= 1e-9
-                    for a, value in zip(expected, current)
-                )
-                if matches:
-                    tx, ty, yaw = current
-                    c, s = math.cos(yaw), math.sin(yaw)
-                    dx, dy = float(goal["x"]) - tx, float(goal["y"]) - ty
-                    fenced_local_goal = {
-                        key: value
-                        for key, value in goal.items()
-                        if key != "map_transform"
-                    }
-                    fenced_local_goal["x"] = dx * c + dy * s
-                    fenced_local_goal["y"] = -dx * s + dy * c
-                    if "yaw" in goal:
-                        fenced_local_goal["yaw"] = map_service._wrap_yaw(
-                            float(goal["yaw"]) - yaw
-                        )
-            if not matches:
-                await raise_alert(
-                    f"stale_map_goal_{rid}",
-                    "warn",
-                    "fault",
-                    "Map alignment changed; choose the destination again",
-                    rid,
-                )
-                await broadcast({"type": "map_info", "info": map_service.map_info()})
-                return
-            goal = {key: value for key, value in goal.items() if key != "map_transform"}
-        if not registry.can(rid, "navigate"):
-            return
-        taken_by = goal_taken(goal, exclude=rid)
-        if taken_by:
+    if kind == "return_home":
+        if not registry.can(rid, "plan_objective"):
             await raise_alert(
-                f"dupgoal_{rid}",
+                f"objective_unavailable_{rid}",
                 "warn",
                 "fault",
-                f"Goal already assigned to {taken_by}",
+                "Robot does not support plan_objective",
                 rid,
             )
             return
-        robot = registry.robots[rid]
-        local_goal = (
-            goal
-            if robot.coordinate_frame == "merged"
-            else fenced_local_goal or map_service.world_to_robot(rid, goal)
-        )
-        if onboard_planner:
-            from .objective_commands import send_objective
-
-            await send_objective(registry, rid, "navigate", local_goal)
-            return
-        # Pre-compute collision-free global A* path for robots (like Scout)
-        # that lack an onboard global grid planner.
-        start_pose = (
-            robot.pose
-            if robot.coordinate_frame == "merged"
-            else map_service.robot_to_world(rid, robot.pose)
-        )
-        world_goal = (
-            goal
-            if robot.coordinate_frame == "merged"
-            else map_service.robot_to_world(rid, local_goal)
-        )
-        from ..mapsvc.planner import PathPlanningError
-
-        try:
-            planned_world = map_service.plan_path(rid, start_pose, world_goal)
-        except PathPlanningError as exc:
-            await raise_alert(f"no_route_{rid}", "warn", "fault", str(exc), rid)
-            return
-        local_planned = (
-            (
-                planned_world
-                if robot.coordinate_frame == "merged"
-                else [map_service.world_to_robot(rid, pt) for pt in planned_world]
-            )
-            if planned_world
-            else []
-        )
-
-        sent = await registry.send(
-            rid,
-            {
-                "type": "navigate_to",
-                "goal": local_goal,
-                "path": local_planned,
-                **stamps(),
-            },
-        )
-        if sent:
-            # Reserve immediately. Waiting for the adapter's next 5 Hz state
-            # packet leaves a race where back-to-back UI messages can assign
-            # the same destination to multiple robots.
-            robot.goal = local_goal
-            robot.nav_status = "active"
-            robot.mode = "nav"
-            if local_planned:
-                robot.global_planned_path = local_planned
-                robot.planned_path = local_planned
-
+        from .objective_commands import send_objective
+        await send_objective(registry, rid, "return_home")
+        return
     elif kind == "cancel_goal":
         sent = await registry.send(rid, {"type": "cancel_goal", **stamps()})
         if sent and rid in registry.robots:
@@ -1829,8 +1515,6 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             if not det.get("hidden", False):
                 await broadcast({"type": "detection", "detection": det})
 
-    elif kind == "map_meta":
-        pass  # metadata accompanies the HTTP upload
 
     elif kind == "reset_done":
         # The adapter has finished resetting and has dropped its cached
@@ -1848,42 +1532,6 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             if not _reset_pending and _reset_done is not None:
                 _reset_done.set()
 
-    elif kind == "slam_graph":
-        if os.environ.get("SWARMDECK_MISSION_ID"):
-            return False
-        # Optional (protocol 2). A robot running a collaborative back end
-        # reports its own view of the shared pose graph; adapters that do
-        # not run one simply never send this and nothing downstream
-        # changes.
-        rid = msg.get("robot_id")
-        if rid:
-            graph = {
-                "keyframes": int(msg.get("keyframes", 0)),
-                "in_common_frame": bool(msg.get("in_common_frame", False)),
-                "residual": msg.get("residual"),
-                "inter_robot": msg.get("inter_robot", []),
-                "t_mono": msg.get("t_mono"),
-            }
-            map_service.set_slam_graph(rid, graph)
-            # `origin` is this robot's SLAM frame expressed in the
-            # collaborative back end's common frame. In `cslam` mode it
-            # REPLACES grid registration as the source of the merge
-            # transform, which is the whole point of running a joint
-            # pose graph: the transform falls out of the loop closures
-            # instead of being re-estimated from finished maps.
-            common_pose = msg.get("common_pose")
-            if isinstance(common_pose, dict):
-                map_service.set_common_pose(rid, common_pose)
-            origin = msg.get("origin")
-            if isinstance(origin, dict):
-                map_service.set_cslam_origin(
-                    rid,
-                    float(origin.get("x", 0.0)),
-                    float(origin.get("y", 0.0)),
-                    float(origin.get("yaw", 0.0)),
-                    str(origin.get("frame") or ""),
-                )
-            await broadcast({"type": "slam_graph", "robot_id": rid, "graph": graph})
 
     # Unknown types are ignored, not fatal (protocol rule 3).
     return False

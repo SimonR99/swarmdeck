@@ -47,11 +47,7 @@ TRANSPORT_DEFAULTS: dict[str, Any] = {
     "route_progress_min_m": 0.5,
     "rates": {
         "state_hz": 5.0,
-        "map_period_s": 2.0,
-        "nav_map_period_s": 2.0,
-        "cloud_period_s": 4.0,
         "camera_period_s": 0.2,
-        "keyframe_period_s": 2.0,
         "settings_period_s": 5.0,
     },
 }
@@ -191,88 +187,6 @@ class AdapterHelloMixin:
         )
 
 
-def map_cloud_height_limits(band: dict[str, Any] | None) -> tuple[float, float]:
-    """Return the cloud filter limits in the registered map frame.
-
-    Older profiles expressed ``min_z``/``max_z`` directly in the map frame.
-    Hardware profiles can also provide ``floor_z``; in that form the two
-    values are physical heights above the floor, which keeps the requested
-    clearance independent of where SLAM placed the map origin.
-    """
-    band = band or {}
-    min_z = float(band.get("min_z", -1e9))
-    max_z = float(band.get("max_z", 1e9))
-    if "floor_z" in band:
-        floor_z = float(band["floor_z"])
-        min_z += floor_z
-        max_z += floor_z
-    return min_z, max_z
-
-
-def project_occupied_cloud(
-    points_xy: np.ndarray,
-    *,
-    resolution: float = 0.05,
-    padding_m: float = 1.0,
-    max_cells: int = 8_000_000,
-) -> tuple[float, int, int, float, float, np.ndarray] | None:
-    """Project XY returns into an occupied-only 2D grid.
-
-    This is intentionally a projection, not a raytracer: an accumulated SLAM
-    point cloud contains surface returns but does not retain the sensor origin
-    for every point, so cells that are not hit remain UNKNOWN rather than being
-    guessed FREE. The tuple is ``(resolution, width, height, origin_x,
-    origin_y, cells)`` and ``cells`` is row-major ``int8`` occupancy data.
-    """
-    points = np.asarray(points_xy)
-    if points.ndim != 2 or points.shape[1] < 2:
-        return None
-    try:
-        resolution = float(resolution)
-        padding_m = max(0.0, float(padding_m))
-        max_cells = int(max_cells)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(resolution) or resolution <= 0.0 or max_cells <= 0:
-        return None
-
-    xy = np.asarray(points[:, :2], dtype=np.float64)
-    xy = xy[np.isfinite(xy).all(axis=1)]
-    if not len(xy):
-        return None
-
-    # GridMeta/OccupancyGrid use a lower-left origin and half-open cells. Using
-    # the integer lattice here keeps the origin stable at exact resolution
-    # boundaries, including for negative SLAM coordinates.
-    lattice = np.floor(xy / resolution).astype(np.int64)
-    min_cell_x = int(lattice[:, 0].min())
-    max_cell_x = int(lattice[:, 0].max())
-    min_cell_y = int(lattice[:, 1].min())
-    max_cell_y = int(lattice[:, 1].max())
-    padding_cells = int(math.ceil(padding_m / resolution))
-    min_cell_x -= padding_cells
-    max_cell_x += padding_cells
-    min_cell_y -= padding_cells
-    max_cell_y += padding_cells
-
-    width = max_cell_x - min_cell_x + 1
-    height = max_cell_y - min_cell_y + 1
-    if width <= 0 or height <= 0 or width * height > max_cells:
-        return None
-
-    cells = np.full((height, width), -1, dtype=np.int8)
-    gx = lattice[:, 0] - min_cell_x
-    gy = lattice[:, 1] - min_cell_y
-    cells[gy, gx] = 100
-    return (
-        resolution,
-        width,
-        height,
-        min_cell_x * resolution,
-        min_cell_y * resolution,
-        cells,
-    )
-
 
 def yaw_of(q) -> float:
     """Return planar yaw from a ROS quaternion-like object."""
@@ -298,28 +212,6 @@ def stamp_seconds(header) -> float | None:
     return value if value > 0.0 and math.isfinite(value) else None
 
 
-def unique_row_index(keys: np.ndarray) -> np.ndarray:
-    """Indices of the first occurrence of each unique row, without axis=0.
-
-    ``np.unique(..., axis=0)`` builds a structured view and lexsorts it, which
-    on a 32k-point scan costs 39 ms. Packing the integer voxel keys into one
-    linear index and running the ordinary 1-D unique is the same answer in
-    9.6 ms (measured on Botman). At the 9 Hz this runs on /registered_scan the
-    difference is roughly a third of a core.
-    """
-    keys = np.asarray(keys)
-    if keys.ndim != 2 or keys.shape[0] == 0:
-        return np.arange(keys.shape[0])
-    k = keys.astype(np.int64, copy=False)
-    k = k - k.min(axis=0)
-    span = k.max(axis=0) + 1
-    # Fall back when the packed index would overflow int64.
-    if float(np.prod(span.astype(float))) >= 9.0e18:
-        return np.unique(keys, axis=0, return_index=True)[1]
-    lin = k[:, 0]
-    for c in range(1, k.shape[1]):
-        lin = lin * span[c] + k[:, c]
-    return np.unique(lin, return_index=True)[1]
 
 
 def cloud_xyz(msg) -> np.ndarray:
@@ -402,23 +294,6 @@ class AdapterSensorMixin:
             "y": p.position.y,
             "yaw": yaw_of(p.orientation),
         }
-        orientation = p.orientation
-        self._odom_pose7 = np.array(
-            [
-                p.position.x,
-                p.position.y,
-                float(getattr(p.position, "z", 0.0) or 0.0),
-                orientation.x,
-                orientation.y,
-                orientation.z,
-                orientation.w,
-            ],
-            dtype=np.float64,
-        )
-
-    def _on_map(self, msg) -> None:
-        self.grid = msg
-        self._grid_dirty = True
 
     @staticmethod
     def _battery_fraction(value: Any, *, whole_percent: bool = False) -> float | None:

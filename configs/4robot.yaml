@@ -31,7 +31,6 @@ fleet:
   #   generic_2d  1800 samples/rev (0.2 deg), 1 ring, 30 m — same 2D pipeline,
   #               continuous walls.
   #   generic_32  as above plus 33 rings over +/-22.5 deg, so <ns>/scan/points
-  #               carries real 3D structure. Needs slam_backend:=rtabmap.
   #   vlp16       1800 samples/rev (0.2 deg) and 17 rings over +/-15 deg, a
   #               Velodyne VLP-16 plus a ring at elevation 0. The DEFAULT,
   #               because the ARGoS backend's odometry comes from Ultra-Fusion,
@@ -50,10 +49,7 @@ fleet:
     h_samples: 900  # 0.4 deg resolution (15,300 pts/robot vs 30,600) for real-time simulation
 
 map:
-  merge_mode: graph         # pose-graph occupancy; no grid registration
-  size_m: 30.0              # merged grid extent, metres
-  resolution: 0.05
-  start_poses:              # spawn poses; graph mode does not treat these as merges
+  start_poses:
     robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
     robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
     robot_2: {x: 3.0, y: 0.0, yaw: 3.1416}

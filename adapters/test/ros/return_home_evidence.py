@@ -306,7 +306,7 @@ def analyze(
         navigation_frame = authority.get("navigation_frame")
         if (
             not isinstance(navigation_frame, str)
-            or navigation_frame.lstrip("/") != f"{robot_id}/map_frame"
+            or navigation_frame.lstrip("/") != f"{robot_id}/navigation_frame"
         ):
             failed.append("authority navigation_frame does not match robot map frame")
         if not isinstance(authority.get("component_id"), str) or not authority.get(

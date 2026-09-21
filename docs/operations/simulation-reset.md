@@ -80,12 +80,8 @@ COMPOSE_PROFILES=argos python3 deploy/simulation_reset.py \
   --server-url http://127.0.0.1:18080 --expected-robots 4 \
   --compose-file deploy/compose/docker-compose.yml \
   --compose-file deploy/compose/docker-compose.gpu.yml \
-  --compose-file deploy/compose/docker-compose.mgg.yml \
   --compose-file deploy/compose/docker-compose.planning-test.yml \
-  --compose-file deploy/compose/docker-compose.peers.yml \
-  --compose-file deploy/compose/docker-compose.mapping.yml \
-  --compose-file deploy/compose/docker-compose.onboard-planning.yml \
-  --service server --service slam --service sim --service argos \
+  --service server --service sim --service argos \
   --service mgg --service peer0 --service peer1 --service peer2 --service peer3 \
   --service mapping --service mapping-query
 ```
@@ -104,10 +100,10 @@ service are ready after the server restart; a two-minute readiness timeout fails
 the reset. The dashboard follows the same request across backend reconnects for
 up to ten minutes. Each status request is capped at five seconds, so an
 unresponsive replacement server cannot consume that whole monitoring window.
-Include every process with mission-local in-memory state (`slam` as well as the
-server) and every service sharing `sim`'s network namespace. Leaving a peer,
-MGG, or mapping-query container attached to the stopped namespace does not make
-a clean epoch.
+Include every process with mission-local in-memory state (`server`, `sim`,
+peers, MGG and mapping services) and every service sharing `sim`'s network
+namespace. Leaving a peer, MGG, or mapping-query container attached to the
+stopped namespace does not make a clean epoch.
 
 Connected hardware adapters cannot satisfy that count. Old mission data remains
 in the map volumes for inspection; reset does not delete it. Provision storage

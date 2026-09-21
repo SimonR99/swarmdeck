@@ -1,50 +1,16 @@
-"""Shared WebSocket session: command dispatch without a live socket."""
+"""Shared WebSocket session contracts without a live socket."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+
 import pytest
 
-from adapters.session import dispatch_command, _rx, _tx_maps
-
-
-class _Ros2Nav:
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def navigate_to(self, goal):
-        self.calls.append(("nav", goal))
-
-
-class _Ros1Nav:
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def navigate_to(self, goal, path=None):
-        self.calls.append(("nav", goal, path))
-
-
-def test_navigate_to_passes_path_only_when_the_bridge_accepts_it():
-    ros2 = _Ros2Nav()
-    ros1 = _Ros1Nav()
-    goal = {"x": 1.0, "y": 2.0}
-    path = [{"x": 0.0, "y": 0.0}]
-
-    async def run():
-        loop = asyncio.get_running_loop()
-        await dispatch_command(
-            ros2, {"type": "navigate_to", "goal": goal, "path": path}, loop
-        )
-        await dispatch_command(
-            ros1, {"type": "navigate_to", "goal": goal, "path": path}, loop
-        )
-
-    asyncio.run(run())
-    assert ros2.calls == [("nav", goal)]
-    assert ros1.calls == [("nav", goal, path)]
+from adapters.session import _rx, dispatch_command
 
 
 def test_unknown_command_types_are_ignored():
@@ -87,64 +53,22 @@ def test_explore_command_binds_common_run_before_start():
     assert calls == [("run", "shared", ["r0", "r1"]), ("start",)]
 
 
-@pytest.mark.parametrize("onboard", [False, True])
-def test_onboard_session_does_not_use_central_optimizer_or_nav_map(
-    monkeypatch, onboard
-):
-    from adapters import session
-
-    calls = []
-
-    async def offload(loop, bridge, name):
-        calls.append(name)
-
-    async def stop_after_tick(period):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(session, "_offload", offload)
-    monkeypatch.setattr(session.asyncio, "sleep", stop_after_tick)
-    bridge = SimpleNamespace(onboard_mapping=onboard)
-
-    async def run():
-        with pytest.raises(asyncio.CancelledError):
-            await _tx_maps(
-                bridge,
-                None,
-                {
-                    "rates": {
-                        "state_hz": 5,
-                        "map_period_s": 0,
-                        "cloud_period_s": 0,
-                    }
-                },
-            )
-
-    asyncio.run(run())
-    assert ("upload_keyframe" in calls) is not onboard
-    assert ("pull_nav_map" in calls) is not onboard
-    assert "upload_map" in calls  # Optional operator display remains available.
-
-
-def test_home_objective_uses_onboard_home_after_stopping_exploration():
+def test_home_objective_stops_exploration_before_dispatching_home():
     calls = []
     bridge = SimpleNamespace(
         exploration=SimpleNamespace(stop=lambda: calls.append("stop_exploration")),
-        return_home=lambda: calls.append("onboard_home"),
+        return_home=lambda: calls.append("home"),
     )
 
     async def run():
         await dispatch_command(
             bridge,
-            {
-                "type": "plan_objective",
-                "objective": "return_home",
-                "goal": {"x": 999, "y": 999},
-            },
+            {"type": "plan_objective", "objective": "return_home"},
             asyncio.get_running_loop(),
         )
 
     asyncio.run(run())
-    assert calls == ["stop_exploration", "onboard_home"]
+    assert calls == ["stop_exploration", "home"]
 
 
 def test_receive_loop_processes_stop_while_claimed_objective_is_planning():
@@ -223,7 +147,6 @@ def test_receive_loop_processes_stop_while_claimed_objective_is_planning():
 
 
 def test_command_queued_before_reset_cannot_move_after_new_epoch_is_ready():
-    from concurrent.futures import ThreadPoolExecutor
     from autonomy.map_epochs import robot_run_id
 
     mission = "00000000-0000-0000-0000-000000000001"
@@ -241,7 +164,8 @@ def test_command_queued_before_reset_cannot_move_after_new_epoch_is_ready():
 
     def command(epoch):
         return {
-            "type": "navigate_to",
+            "type": "plan_objective",
+            "objective": "navigate",
             "goal": {"x": 2, "y": 0},
             "mission_id": mission,
             "robot_map_epoch": epoch,
@@ -249,10 +173,9 @@ def test_command_queued_before_reset_cannot_move_after_new_epoch_is_ready():
         }
 
     bridge = SimpleNamespace(
-        onboard_mapping=True,
         _goal_lock=threading.RLock(),
         _mapping_authority=SimpleNamespace(current=authority),
-        navigate_to=lambda goal: state.update(goal=goal),
+        plan_objective=lambda objective, goal: state.update(goal=goal),
         stop=lambda: state.update(goal=None),
     )
 
@@ -261,14 +184,13 @@ def test_command_queued_before_reset_cannot_move_after_new_epoch_is_ready():
         loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         blocked = loop.run_in_executor(None, release.wait)
         pending = asyncio.create_task(dispatch_command(bridge, command(0), loop))
-        try:
-            await asyncio.sleep(0)
-            state["epoch"] = 1
-        finally:
-            release.set()
+        await asyncio.sleep(0)
+        state["epoch"] = 1
+        release.set()
         await blocked
         await pending
         assert state["goal"] is None
+
         await dispatch_command(bridge, command(1), loop)
         assert state["goal"] == {"x": 2, "y": 0}
         state["ready"] = False

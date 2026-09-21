@@ -212,7 +212,7 @@ class FakeServer:
             "robot_id": robot_id,
             "mission_id": "mission",
             "component_id": "component",
-            "navigation_frame": f"{robot_id}/map_frame",
+            "navigation_frame": f"{robot_id}/odom",
             "pose": {"x": 0.0, "y": 0.0},
         }
         if self.exploring and self.live_failure == "no_pose":
@@ -556,7 +556,7 @@ def test_verified_merge_continues_the_trial_and_is_recorded():
     module = acceptance_module()
     before = {"robot_0": "c:a", "robot_1": "c:a", "robot_2": "c:b", "robot_3": "c:c"}
     after = {"robot_0": "c:m", "robot_1": "c:m", "robot_2": "c:m", "robot_3": "c:c"}
-    frames = {r: (before[r], f"{r}/map_frame") for r in before}
+    frames = {r: (before[r], f"{r}/odom") for r in before}
     verdict = module.classify_authority_change(
         "mission", before, "mission", after, _live(frames), _evidence(module, frames)
     )
@@ -573,7 +573,7 @@ def test_verified_merge_continues_the_trial_and_is_recorded():
 def test_unchanged_components_are_a_transient_not_a_merge():
     module = acceptance_module()
     components = {"robot_0": "c:a", "robot_1": "c:a"}
-    frames = {r: (components[r], f"{r}/map_frame") for r in components}
+    frames = {r: (components[r], f"{r}/odom") for r in components}
     assert module.classify_authority_change(
         "mission",
         components,
@@ -596,7 +596,7 @@ def test_unchanged_components_are_a_transient_not_a_merge():
 def test_split_mission_or_frame_replacement_still_fails(mission, after, frame_change):
     module = acceptance_module()
     before = {"robot_0": "c:a", "robot_1": "c:a"}
-    frames = {r: (before[r], f"{r}/map_frame") for r in before}
+    frames = {r: (before[r], f"{r}/odom") for r in before}
     live = _live(frames)
     if frame_change:
         live["robot_1"]["navigation_frame"] = "robot_1/other_frame"

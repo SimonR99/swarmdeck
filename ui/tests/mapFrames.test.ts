@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  cloudToWorld,
   decalPose,
   routePositions
 } from '../src/lib/components/map3d/mapFrames.ts';
@@ -15,18 +14,10 @@ import {
 import type { Point, Pose, RobotState } from '../src/lib/types/protocol.ts';
 const transform = { x: 10, y: 20, yaw: Math.PI / 2 };
 
-test('single-robot SLAM cloud is not transformed a second time', () => {
-  const points = new Float32Array([8, 21, 0.5]);
-  cloudToWorld(points, 'world', transform);
-  assert.deepEqual([...points], [8, 21, 0.5]);
-});
 
-test('local robot cloud and costmap land in the same rotated world frame', () => {
-  const points = new Float32Array([1, 2, 0.5]);
-  cloudToWorld(points, 'local', transform);
+test('local costmap decals preserve the raster frame transform', () => {
   const pose = decalPose({width: 2, height: 4, resolution: 1, origin:{x:0,y:0}}, transform);
-  assert.deepEqual([...points], [8, 21, 0.5]);
-  assert.equal(pose.x, points[0]); assert.equal(pose.y, points[1]);
+  assert.equal(pose.x, 8); assert.equal(pose.y, 21);
   assert.equal(pose.yaw, Math.PI / 2);
   assert.equal(pose.width, 2); assert.equal(pose.height, 4);
 });
@@ -167,20 +158,10 @@ test('nothing known about the global map places nobody on it', () => {
   );
 });
 
-test('a costmap on an optimized global raster uses that raster frame, not the surveyed start pose', () => {
+test('a costmap requires transform provenance from the displayed raster header', () => {
   const rasterFrames = { robot_2: { x: -0.02, y: -2.0, yaw: 0.0015 } };
-  const statusTransforms = { robot_2: { x: -13.2, y: 4.0, yaw: -1.5708 } };
-  // The raster header places robot_2 (and so its costmap) with a near-zero yaw.
-  assert.deepEqual(
-    overlayFrameOnGlobalGrid('robot_2', rasterFrames, statusTransforms),
-    rasterFrames.robot_2
-  );
-  // Only the legacy merged map, which carries no raster frames, uses the status
-  // transforms.
-  assert.deepEqual(
-    overlayFrameOnGlobalGrid('robot_2', undefined, statusTransforms),
-    statusTransforms.robot_2
-  );
-  assert.equal(overlayFrameOnGlobalGrid('robot_9', rasterFrames, statusTransforms), undefined);
+  assert.deepEqual(overlayFrameOnGlobalGrid('robot_2', rasterFrames), rasterFrames.robot_2);
+  assert.equal(overlayFrameOnGlobalGrid('robot_2', undefined), undefined);
+  assert.equal(overlayFrameOnGlobalGrid('robot_9', rasterFrames), undefined);
 });
 

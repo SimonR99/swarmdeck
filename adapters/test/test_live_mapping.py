@@ -25,7 +25,7 @@ def bridge():
     state = dict(pose=dict(x=2, y=3, yaw=0), goal=None, planned_path=[])
     return SimpleNamespace(
         id="r0",
-        map_frame="r0/map",
+        navigation_frame="r0/map",
         state=lambda: state,
         _mapping_authority=SimpleNamespace(
             current=lambda: authority,

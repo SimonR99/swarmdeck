@@ -12,8 +12,6 @@ services:
     volumes:
       - ../../server/swarmdeck_server:/app/server/swarmdeck_server:ro
       - ../../autonomy:/app/autonomy:ro
-  slam:
-    ports: !override ["${SWARMDECK_TEST_SLAM_PORT:-18090}:8090"]
   ui:
     image: swarmdeck-ui:planning
     volumes:

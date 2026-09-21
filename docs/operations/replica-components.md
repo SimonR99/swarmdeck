@@ -136,7 +136,6 @@ the all-mission catalogue exceeds that budget.
 
 The SLAM panel uses live peer diagnostics when onboard peers are active. It
 shows keyframe counts, verified reports and current shared-component membership
-instead of the inactive centralized backend's zero counters. Verification
 reports are grouped by mission and unordered robot pair, taking the larger
 count from the two endpoints to avoid counting their mirrored reports twice.
 They are diagnostic outcomes, not a count of unique optimized graph edges.

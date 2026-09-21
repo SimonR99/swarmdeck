@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic indoor world generator.
+"""Deterministic indoor geometry shared by the ARGoS generators.
 
-One seed fixes wall layout, target placement and robot start poses, so two runs
-with the same config are byte-identical (FR-S6, NFR-5, acceptance criterion 11).
-
-    python3 generate_world.py --seed 20260801 --targets 5 -o ../worlds/indoor.sdf
-
-Layout note: the building is deliberately COMPACT and ENCLOSED — 24 x 24 m with
-rooms 6 m across, so every wall sits well inside lidar range. An earlier 40 x 40 m
-world with a handful of thin partitions produced a useless map: from most poses
-there was nothing within sensor range, so SLAM carved a giant free-space starburst
-and had no structure to scan-match against. Enclosure is what makes 2D SLAM and
-map registration work.
+One seed fixes wall layout, target placement and robot start poses, so repeated
+sessions with the same config are byte-identical.
 """
 
 from __future__ import annotations
@@ -292,7 +283,7 @@ def main() -> None:
         _FURNITURE_EMITTERS[kind](i, *args) for kind, i, args in FURNITURE
     )
 
-    tpl = (Path(__file__).parent.parent / "worlds" / "indoor.sdf.jinja").read_text()
+    tpl = (Path(__file__).parent / "indoor.sdf.jinja").read_text()
     out = Path(args.output)
     out.write_text(
         tpl.replace("{{WALLS}}", walls)

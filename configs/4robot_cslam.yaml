@@ -17,7 +17,6 @@
 # Making this correct means unifying the two, not adjusting a constant: either
 # feed cslam's optimised poses back into RTAB-Map as pose priors, or build the
 # merged grid from cslam's own keyframe clouds instead of RTAB-Map's grids.
-# Until one of those exists, `merge_mode: auto` is the accurate path and cslam
 # earns its keep as the loop-closure and monitoring layer.
 #
 # The plumbing below is correct and unit-tested; what is missing is upstream of
@@ -25,7 +24,6 @@
 #
 # Four robots, 3D lidar, RTAB-Map per robot, and Swarm-SLAM across the fleet.
 #
-# `merge_mode: cslam` is the difference from 4robot_3d.yaml. The merge transform
 # comes from the collaborative pose graph's inter-robot loop closures instead of
 # being re-estimated by grid correlation after the fact — which is the entire
 # reason for running a joint back end. Grid registration is demoted to an
@@ -34,7 +32,6 @@
 # Requires the cslam overlay:
 #   make docker-up-cslam
 #
-#   SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml make docker-up-gpu
 #
 # Identical to 4robot.yaml except the lidar profile. `generic_32` publishes a
 # real point cloud on <ns>/scan/points, which is what icp_odometry registers
@@ -57,9 +54,6 @@ fleet:
     profile: generic_32
 
 map:
-  merge_mode: cslam
-  size_m: 30.0
-  resolution: 0.05
   start_poses:
     robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
     robot_1: {x: -3.0, y: 0.0, yaw: 0.0}

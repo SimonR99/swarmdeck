@@ -15,8 +15,7 @@ profiles have additional sensor, ROS-domain and calibration requirements.
 | ARGoS drift | `./scripts/sim-up --drift` | Peer Swarm-SLAM, native MOLA, MGG, and synthetic odometry |
 | ARGoS estimator | `./scripts/sim-up --fast-livo2` | Peer Swarm-SLAM, native MOLA, MGG, and Fast-LIVO2 |
 | ARGoS development fleet | `./scripts/sim-up --dev` | Three robots, DRI rendering, drift odometry, MOLA |
-| Explicit legacy path | `./scripts/sim-up --legacy-cloud --drift` | Central cloud/OctoMap path for comparison |
-| Physical operator stack | `make up-deploy` | `configs/hardware_fleet.yaml`, graph-mode central SLAM |
+| Physical operator stack | `make up-deploy` | Hardware adapters, peer Swarm-SLAM and MOLA |
 
 The drift run is a development workload. It exercises sensor, peer, MOLA, and
 adapter integration but cannot reproduce estimator failures. The estimator run
@@ -41,13 +40,11 @@ the reset supervisor, and persists the exact Compose service set for `--status`,
 ```
 
 The mapping worker is persistent and native. The launcher sets
-`SWARMDECK_MOLA_PLANNER_MAPS=true`, `SWARMDECK_PLANNER_MAP_PROVIDER=mola`, and
-`SWARMDECK_MGG_MAP_BACKEND=mola_snapshot`; these are also the defaults in the
-MOLA Compose overlays. It also sets the simulation capture provider to
-`simulation`, creates a fresh mission/domain epoch, and keeps a reset
-supervisor for lifecycle recovery. The indexed query polls every 0.5 seconds
-and rejects snapshots older than 3 seconds. `--legacy-cloud` is the explicit
-fallback. Advanced direct Compose usage is recorded in the archived
+`SWARMDECK_SLAM_BACKEND=cslam`, `SWARMDECK_MOLA_PLANNER_MAPS=true`, and
+`SWARMDECK_PLANNER_MAP_PROVIDER=mola`. The folded base Compose file also sets
+the simulation capture provider to `simulation`, creates a fresh mission/domain
+epoch, and keeps a reset supervisor for lifecycle recovery. The indexed query
+polls every 0.5 seconds. Advanced direct Compose usage is recorded in the
 [decentralized autonomy record](../archive/decentralized-autonomy.md); it must
 reproduce those mission, domain, capture-provider, and map-authority settings.
 A sparse cold-start scan cannot certify the whole robot body volume, and
@@ -101,28 +98,26 @@ verifies the vendored signing key, release signatures and package hashes.
 Ubuntu security updates and mutable base/Python dependencies mean this is not
 a bit-for-bit OS lock.
 
-Use `make docker-ps`, `curl -fsS http://localhost:8090/health`, and the UI
-status panels to check the services. For an onboard run, confirm the
-mission, component, graph revision, geometry revision, navigation frame, and
-source timestamp agree before interpreting a planner result. Rejected or stale
+Use `make docker-ps`, `curl -fsS http://localhost:8080/api/config`, and the UI
+status panels to check the services. For an onboard run, confirm the mission,
+component, graph revision, geometry revision, navigation frame, and source
+timestamp agree before interpreting a planner result. Rejected or stale
 authority must not be repaired by relabeling a grid frame.
 
-The normal ARGoS launcher composes the peer, mapping, and onboard-planning
-services and selects MOLA as MGG's map authority. The explicit `--legacy-cloud`
-launcher mode retains the former central cloud/OctoMap path for comparison and
-recovery. MOLA consumes the peer snapshot and does not optimize poses or publish
-competing TF edges. MGG consumes an exact, mission-pinned map authority. A
-missing or stale shared transform blocks the dependent operation rather than
-assuming that two local frames coincide.
+The normal ARGoS launcher composes peer Swarm-SLAM, MOLA, indexed query, MGG,
+and the controller as one stack. MOLA consumes peer snapshots and does not
+optimize poses or publish competing TF edges. MGG consumes an exact,
+mission-pinned map authority. A missing or stale shared transform blocks the
+dependent operation rather than assuming that two local frames coincide.
 
 ## Frames and ownership
 
 Adapters capture points in a sensor frame and associate them with a pose at the
-capture timestamp. The local odometry and navigation frames remain robot-owned.
-Peer Swarm-SLAM can establish a verified component frame and correction. The
-same correction identity and map revision flow into the MOLA product and
-indexed query. MGG plans in the configured robot navigation frame; Nav2 handles
-local obstacle avoidance and the adapter owns the final command boundary.
+capture timestamp. The navigation frame is the robot's continuous odometry
+frame. Peer Swarm-SLAM corrections are data, not TF edges. The same correction
+identity and map revision flow into the MOLA product and indexed query. MGG
+plans in that frame; Nav2 handles trajectory tracking and local obstacles, and
+the adapter owns the final command boundary.
 
 The server stores replicas, events, keyframes, and catalogue metadata for the
 operator. It receives peer and MOLA revisions as replicas without becoming the

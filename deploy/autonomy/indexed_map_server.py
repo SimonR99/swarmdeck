@@ -353,8 +353,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--maps-root", type=Path, default=Path("/maps"))
     parser.add_argument("--mission-id", default=os.environ.get("SWARMDECK_MISSION_ID"))
     parser.add_argument("--poll-s", type=float, default=0.5)
-    # See docker-compose.mapping.yml: a serial decode of every peer's new
-    # product must fit inside this bound.
+    # See the mapping-query service in deploy/compose/docker-compose.yml: a
+    # serial decode of every peer's new product must fit inside this bound.
     parser.add_argument("--max-snapshot-age-s", type=float, default=15.0)
     # A string default is parsed like a command-line value, so a malformed
     # environment value is reported by argparse rather than as a traceback.

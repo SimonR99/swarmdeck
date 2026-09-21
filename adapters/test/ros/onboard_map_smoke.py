@@ -35,14 +35,14 @@ def main() -> None:
     bridge = RobotBridge.__new__(RobotBridge)
     bridge.id = "probe"
     bridge.node = node
-    bridge.map_frame = "probe/map_frame"
+    bridge.navigation_frame = "probe/navigation_frame"
     bridge.onboard_mapping = True
     bridge._onboard_map_warned_at = 0.0
-    bridge.pub_global_map = node.create_publisher(
-        OccupancyGrid, "/probe/global_map", qos
+    bridge.pub_local_costmap = node.create_publisher(
+        OccupancyGrid, "/probe/local_costmap", qos
     )
     node.create_subscription(OccupancyGrid, "/probe/map", bridge._on_map, qos)
-    node.create_subscription(OccupancyGrid, "/probe/global_map", received.append, qos)
+    node.create_subscription(OccupancyGrid, "/probe/local_costmap", received.append, qos)
     source = node.create_publisher(OccupancyGrid, "/probe/map", qos)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
@@ -63,7 +63,7 @@ def main() -> None:
         assert not received, "a grid from another frame reached Nav2"
 
         aligned = OccupancyGrid()
-        aligned.header.frame_id = bridge.map_frame
+        aligned.header.frame_id = bridge.navigation_frame
         aligned.header.stamp.sec = 12
         aligned.header.stamp.nanosec = 34
         aligned.info.resolution = 0.2
@@ -78,7 +78,7 @@ def main() -> None:
             executor.spin_once(timeout_sec=0.05)
         assert received, "aligned onboard grid was not republished"
         forwarded = received[-1]
-        assert forwarded.header.frame_id == "probe/map_frame"
+        assert forwarded.header.frame_id == "probe/navigation_frame"
         assert (forwarded.header.stamp.sec, forwarded.header.stamp.nanosec) == (
             12,
             34,

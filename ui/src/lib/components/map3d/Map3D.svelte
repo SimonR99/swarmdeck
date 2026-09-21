@@ -15,7 +15,6 @@
    * - 3D tactical terrain grid, costmap, and network heatmaps
    */
   import { onMount, untrack } from 'svelte';
-  import { CloudSnapshotCache } from './cloudSnapshot';
   import * as THREE from 'three';
   import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -27,7 +26,6 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
-  import { cloudToWorld } from './mapFrames';
   import {
     ReplicaTacticalLoader,
     ReplicaRevisionTracker,
@@ -58,7 +56,7 @@
     showPlans = true,
     showNetwork = false,
     showCostmap = false,
-    costmapKind = 'global',
+    costmapKind = 'local',
     trails = new Map<string, { x: number; y: number }[]>(),
     onCameraInteraction,
     onCursorChange
@@ -72,7 +70,7 @@
     showPlans?: boolean;
     showNetwork?: boolean;
     showCostmap?: boolean;
-    costmapKind?: 'global' | 'local';
+    costmapKind?: 'local';
     trails?: Map<string, { x: number; y: number }[]>;
     onCameraInteraction?: () => void;
     onCursorChange?: (coords: { x: number; y: number } | null) => void;
@@ -251,11 +249,8 @@
   let worker: Worker | null = null;
   let pending: AbortController | null = null;
   let generation = 0;
-  let mounted = $state(false);
   let lastScope: string | null = null;
-  let lastCloudRevision = '';
-  let cloudEtag = '';
-  const cloudCache = new CloudSnapshotCache();
+  let mounted = $state(false);
   const replicaLoader = new ReplicaTacticalLoader();
   const replicaRevision = new ReplicaRevisionTracker();
   let replicaNeedsRebuild = false;
@@ -279,7 +274,6 @@
       robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
       replicaRevision.clear();
       replicaNeedsRebuild = true;
-      cloudEtag = '';
       gaussianEtag = '';
       liveReplica = null;
       scene?.layers.invalidate();
@@ -290,30 +284,17 @@
   let gaussianEtag = '';
   let firstCloud = true;
 
-  function scope() {
-    return mapStore.viewMode === 'local' && mapStore.viewRobot
-      ? `?robot_id=${encodeURIComponent(mapStore.viewRobot)}`
-      : '';
-  }
-
   function gaussianScope() {
-    if (tacticalReplica) {
-      return `?session_id=${encodeURIComponent(tacticalReplica.sessionId)}`
-        + `&component_id=${encodeURIComponent(tacticalReplica.componentId)}`;
-    }
-    return scope();
-  }
-
-  function cloudScope() {
-    const selection = scope();
-    return `${selection}${selection ? '&' : '?'}source=${mapStore.mapSource}`;
+    if (!tacticalReplica) return '';
+    return `?session_id=${encodeURIComponent(tacticalReplica.sessionId)}`
+      + `&component_id=${encodeURIComponent(tacticalReplica.componentId)}`;
   }
 
   function sourceScope() {
     if (!tacticalReplica && replicaTactical.autoStatus === 'waiting-global') {
       return 'blocked:global-waiting-for-component';
     }
-    return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : `live:${cloudScope()}`;
+    return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : 'replica:none';
   }
 
   async function refreshLiveReplica() {
@@ -411,104 +392,37 @@
   }
 
   async function fetchCloud() {
-    if (!scene || !worker || !active || document.hidden || pending) return;
+    if (!scene || !worker || !active || document.hidden || pending || !tacticalReplica) return;
     if (waitingForGlobalComponent) return;
     const controller = new AbortController();
     pending = controller;
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     const id = ++generation;
-    const selection = tacticalReplica ? { ...tacticalReplica } : null;
-    const currentScope = selection ? replicaSelectionKey(selection) : cloudScope();
-    const revision = lastCloudRevision;
+    const selection = { ...tacticalReplica };
+    const currentScope = replicaSelectionKey(selection);
     try {
-      if (selection) {
-        const forceRebuild = replicaNeedsRebuild;
-        const loaded = await replicaLoader.load(
-          selection,
-          controller.signal,
-          forceRebuild ? null : replicaRevision.current
-        );
-        if (!loaded) {
-          if (acceptsReplicaResult(currentScope, tacticalReplica, id, generation)) error = null;
-          return;
-        }
-        if (!scene || !acceptsReplicaResult(
-          loaded.sourceKey, tacticalReplica, id, generation
-        )) return;
-        const transition = replicaRevision.transition(loaded);
-        const data = await prepareCloud(id, controller, loaded.positions, loaded.owners, loaded.rgb);
-        if (!scene || !acceptsReplicaResult(
-          loaded.sourceKey, tacticalReplica, id, generation
-        )) return;
-        const resetView = transition === 'selection' || transition === 'frame';
-        displayTerrain(data, loaded.ownerIds, Boolean(loaded.rgb), resetView);
-        replicaRevision.commit(loaded);
-        replicaCloud = {
-          view: loaded.view,
-          partial: loaded.partial,
-          frameKey: loaded.frameKey
-        };
-        replicaNeedsRebuild = false;
-        error = null;
+      const loaded = await replicaLoader.load(
+        selection,
+        controller.signal,
+        replicaNeedsRebuild ? null : replicaRevision.current
+      );
+      if (!loaded) {
+        if (acceptsReplicaResult(currentScope, tacticalReplica, id, generation)) error = null;
         return;
       }
-      const { response, raw } = await cloudCache.fetch(
-        `/api/map/cloud${currentScope}`, cloudEtag, controller.signal
-      );
-      if (response.status === 304) return;
-      if (!response.ok) throw new Error(`Cloud unavailable (${response.status})`);
-      const total = Number(response.headers.get('X-Cloud-Points') ?? 0);
-      const scale = Number(response.headers.get('X-Cloud-Scale') ?? 0.01);
-      const format = response.headers.get('X-Cloud-Format') ?? 'xyz16';
-      const rgbPresent = response.headers.get('X-Cloud-RGB') === '1';
-      if (
-        !Number.isInteger(total) ||
-        total < 0 ||
-        total > 2000000 ||
-        !Number.isFinite(scale) ||
-        scale <= 0
-      )
-        throw new Error('Invalid cloud metadata');
-      const names = (response.headers.get('X-Cloud-Robots') ?? '').split(',').filter(Boolean);
-      if (!raw) return;
-      if (id !== generation || !scene) return;
-      const xyzBytes = format === 'xyz32' ? 12 : 6;
-      if (raw.byteLength !== total * (xyzBytes + 1 + (rgbPresent ? 3 : 0)))
-        throw new Error('Invalid cloud payload');
-      const xyz = new DataView(raw.buffer, raw.byteOffset, total * xyzBytes);
-      const owners = raw.subarray(total * xyzBytes, total * (xyzBytes + 1));
-      const rgb = rgbPresent ? raw.subarray(total * (xyzBytes + 1)) : undefined;
-      const keep = names.map((id) => fleet.isEnabled(id));
-      let kept = 0;
-      for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
-      const positions = new Float32Array(kept * 3),
-        keptOwners = new Uint8Array(kept);
-      const keptRgb = rgb ? new Uint8Array(kept * 3) : undefined;
-      for (let i = 0, j = 0; i < total; i++) {
-        if (!keep[owners[i]]) continue;
-        for (let k = 0; k < 3; k++)
-          positions[j * 3 + k] =
-            format === 'xyz32'
-              ? xyz.getFloat32(i * 12 + k * 4, true)
-              : xyz.getInt16(i * 6 + k * 2, true) * scale;
-        keptOwners[j] = owners[i];
-        if (keptRgb && rgb) keptRgb.set(rgb.subarray(i * 3, i * 3 + 3), j * 3);
-        j++;
-      }
-      if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
-        cloudToWorld(positions, response.headers.get('X-Cloud-Frame'),
-          mapStore.status?.transforms[mapStore.viewRobot]);
-      }
-      const data = await prepareCloud(id, controller, positions, keptOwners, keptRgb);
-      if (id !== generation || !scene || currentScope !== cloudScope()) return;
-      cloudEtag = revision === lastCloudRevision ? response.headers.get('ETag') ?? '' : '';
-      displayTerrain(data, names, rgbPresent, firstCloud);
-      robotsOnCloud = names.filter((_, i) => keep[i]);
+      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
+      const transition = replicaRevision.transition(loaded);
+      const data = await prepareCloud(id, controller, loaded.positions, loaded.owners, loaded.rgb);
+      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
+      displayTerrain(data, loaded.ownerIds, Boolean(loaded.rgb), transition === 'selection' || transition === 'frame');
+      replicaRevision.commit(loaded);
+      replicaCloud = { view: loaded.view, partial: loaded.partial, frameKey: loaded.frameKey };
+      replicaNeedsRebuild = false;
       error = null;
-    } catch (e) {
-      if (!controller.signal.aborted && id === generation)
-        error = e instanceof Error ? e.message : String(e);
-      controller.abort(); // Stop sibling chunk downloads after a failed snapshot.
+    } catch (cause) {
+      if (!controller.signal.aborted && id === generation) {
+        error = cause instanceof Error ? cause.message : String(cause);
+      }
     } finally {
       window.clearTimeout(timeout);
       if (pending === controller) pending = null;
@@ -582,7 +496,6 @@
     }
     pending?.abort();
     pending = null;
-    cloudEtag = '';
     if (tacticalReplica) replicaNeedsRebuild = true;
     void fetchCloud();
   }
@@ -603,46 +516,26 @@
 
   $effect(() => {
     const currentScope = sourceScope();
-    const enabled = fleet.robots
-      .map((r) => `${r.robot_id}:${fleet.isEnabled(r.robot_id)}`)
-      .join(',');
     if (!mounted || !active) return;
-    const localTransform = mapStore.viewRobot
-      ? mapStore.status?.transforms[mapStore.viewRobot]
-      : null;
-    const key = tacticalReplica
-      ? currentScope
-      : `${currentScope}|${enabled}|${scope() ? JSON.stringify(localTransform) : ''}`;
-    if (key === lastCloudRevision) return;
-    lastCloudRevision = key;
-    if (currentScope !== lastScope) {
-      lastScope = currentScope;
-      generation++;
-      pending?.abort();
-      pending = null;
-      cloudEtag = '';
-      firstCloud = true;
-      replicaRevision.clear();
-      replicaCloud = null;
-      replicaNeedsRebuild = false;
-      gaussianPending?.abort();
-      gaussianPending = null;
-      gaussianEtag = '';
-      gaussianBuffer = null;
-      scene?.terrain.clear();
-      scene?.gaussians.clear();
-      points = 0;
-      voxels = 0;
-      gaussianCount = 0;
-      void fetchCloud();
-      if (renderMode === 'gaussians') void fetchGaussians();
-    } else {
-      // Registration and fleet visibility updates replace terrain in place.
-      // They are not a new map: retain the camera, clipping height and scene
-      // while the next cloud is prepared. Do not abort an in-flight build.
-      cloudEtag = '';
-      void fetchCloud();
-    }
+    if (currentScope === lastScope) return;
+    lastScope = currentScope;
+    generation++;
+    pending?.abort();
+    pending = null;
+    replicaRevision.clear();
+    replicaCloud = null;
+    replicaNeedsRebuild = false;
+    gaussianPending?.abort();
+    gaussianPending = null;
+    gaussianEtag = '';
+    gaussianBuffer = null;
+    scene?.terrain.clear();
+    scene?.gaussians.clear();
+    points = 0;
+    voxels = 0;
+    gaussianCount = 0;
+    void fetchCloud();
+    if (renderMode === 'gaussians') void fetchGaussians();
   });
 
   // Pointer & RTS Mouse Interaction
@@ -695,7 +588,7 @@
         onCursorChange?.(tacticalReplica ? null : { x: groundHit.x, y: groundHit.y });
 
         // Update 3D goal cursor reticle position
-        if (navigation.goalMode && (!tacticalReplica || liveTactical)) {
+        if (navigation.goalMode && Boolean(tacticalReplica && liveTactical)) {
           scene.layers.cursorReticle.visible = true;
           scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
         } else {
@@ -715,7 +608,6 @@
       canvas.releasePointerCapture(e.pointerId);
     } catch {}
     dragging = false;
-
     if (!dragged && e.button === 0 && e.type !== 'pointercancel') {
       handleClick(e);
     }
@@ -765,15 +657,7 @@
           scene.render();
           return;
         }
-        const eligible = fleet.selected.filter((id) => fleet.can(id, 'navigate'));
-        for (const id of eligible) {
-          actions.setGoal(id, { x: hit.x, y: hit.y });
-        }
-        if (eligible.length > 0) {
-          navigation.finishGoal({ x: hit.x, y: hit.y });
-        } else {
-          navigation.cancelGoalMode();
-        }
+        navigation.cancelGoalMode();
         scene.layers.cursorReticle.visible = false;
         scene.render();
         return;
@@ -984,7 +868,7 @@
 <div class="relative h-full w-full select-none overflow-hidden bg-[#1e242d]">
   <canvas
     bind:this={canvas}
-    class="h-full w-full touch-none {navigation.goalMode && !tacticalReplica
+    class="h-full w-full touch-none {navigation.goalMode && tacticalReplica
       ? 'cursor-crosshair'
       : dragging
         ? 'cursor-grabbing'
@@ -1101,7 +985,6 @@
     </div>
 
     {#if renderMode !== 'gaussians'}
-      <!-- Color Mode Selector -->
       <div
         class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
              bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
@@ -1198,7 +1081,7 @@
   </div>
 
   <!-- Goal Navigation Mode Banner -->
-  {#if navigation.goalMode && !tacticalReplica}
+  {#if navigation.goalMode && tacticalReplica}
     {@const canGoal = fleet.selected.filter((id) => fleet.can(id, 'navigate')).length}
     <div
       class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border

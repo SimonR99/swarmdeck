@@ -355,7 +355,7 @@ export function drawNetworkHeatmap(
   // Global map mode: render network heatmaps for all active robots
   for (const layer of mapStore.networkLayers) {
     if (!fleet.isEnabled(layer.robotId)) continue;
-    const tf = mapStore.status?.transforms[layer.robotId];
+    const tf = mapStore.info?.transforms?.[layer.robotId];
     const width =
       (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
     const height =
@@ -424,7 +424,7 @@ export function drawCostmap(
   // use the selected robot's map frame already.
   const useRobotTransform = mapStore.viewMode === 'global';
   const tf = useRobotTransform
-    ? overlayFrameOnGlobalGrid(robotId, mapStore.info?.transforms, mapStore.status?.transforms)
+    ? overlayFrameOnGlobalGrid(robotId, mapStore.info?.transforms)
     : undefined;
   if (tf) {
     const originGrid = mapStore.viewToGrid(tf.x, tf.y);

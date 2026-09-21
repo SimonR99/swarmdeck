@@ -137,7 +137,7 @@ class PeerCoordinator:
             if value["robot_id"] != self.bridge.id:
                 return
             frame = str(value["navigation_frame"]).lstrip("/")
-            if frame != self.bridge.map_frame.lstrip("/"):
+            if frame != self.bridge.navigation_frame.lstrip("/"):
                 return
             if not accepts_authority_update(
                 value, self.raw_authority, self.mapping_authority.expected_mission

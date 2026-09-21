@@ -7,7 +7,7 @@
 #
 # Quick Reference:
 #   make help                  Show all available targets and options
-#   make up-server             Start Web UI + Server + SLAM back-end
+#   make up-server             Start Web UI + Server
 #   make up-argos              Start ARGoS simulation (software Vulkan)
 #   make up-argos-gpu          Start ARGoS simulation (NVIDIA GPU)
 #   make up-argos-bistro-gpu   Start ARGoS Bistro scenario (NVIDIA GPU)
@@ -50,7 +50,6 @@ COMPOSE       ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-c
 GPU_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
 DRI_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
 ZENOH_COMPOSE ?= -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
-CSLAM_COMPOSE ?= $(GPU_COMPOSE) -f deploy/compose/docker-compose.cslam.yml
 
 # Environment hygiene: prevent host ROS variables from poisoning non-ROS Python backends
 CLEANENV = env -u PYTHONPATH -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH
@@ -101,8 +100,6 @@ help:
 	@echo "  make docker-test-launch  Validate all ROS 2 launch files across robots"
 	@echo ""
 	@echo "Testing & Quality:"
-	@echo "  make test                Run server unit tests, SLAM tests, and UI checks"
-	@echo "  make test-slam           Run collaborative SLAM tests only"
 	@echo "  make test-ui             Check Svelte types and run 3D map regressions"
 	@echo "  make visual-test         Capture RGB/Depth/LiDAR contact sheet from ARGoS"
 	@echo "  make visual-test-bistro  Capture contact sheet from Bistro environment"
@@ -123,14 +120,7 @@ ui-build:
 	cd ui && npm run build
 
 server:
-	cd server && $(CLEANENV) SWARMDECK_SLAM_URL=http://127.0.0.1:8090 .venv/bin/python -m swarmdeck_server
-
-slam:
-	cd slam && $(CLEANENV) SWARMDECK_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python -m swarmdeck_slam --host 127.0.0.1 --port 8090
-
-install-slam:
-	cd slam && uv venv --allow-existing --python 3.12 .venv && \
-	  uv pip install --python .venv/bin/python -e ../adapters/protocol -e ".[dev]"
+	cd server && $(CLEANENV) .venv/bin/python -m swarmdeck_server
 
 mock:
 	cd adapters/adapter_mock && $(CLEANENV) ../../server/.venv/bin/python mock_adapter.py --robots $(N)
@@ -140,20 +130,18 @@ demo:
 	@$(MAKE) -j3 server mock ui
 
 # ------------------------------------------------------------------------------
-# 3. Core Docker Stack (Server + Web UI + SLAM backend)
 # ------------------------------------------------------------------------------
 build-server:
-	$(COMPOSE) build server ui slam
+	$(COMPOSE) build server ui
 
 up-server:
-	$(COMPOSE) up --build -d server ui slam
+	$(COMPOSE) up --build -d server ui
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
-	@echo "SLAM back-end:    http://localhost:8090/status"
 
 down-server:
-	$(COMPOSE) stop server ui slam
-	$(COMPOSE) rm -f server ui slam
+	$(COMPOSE) stop server ui
+	$(COMPOSE) rm -f server ui
 
 build-mock:
 	$(COMPOSE) --profile mock build mock
@@ -167,7 +155,6 @@ down-mock:
 	$(COMPOSE) --profile mock rm -f mock
 
 # ------------------------------------------------------------------------------
-# 4. Simulation Bring-Up (ARGoS 3 / Fast-LIVO2 / SLAM / Nav2 / adapter_sim)
 # ------------------------------------------------------------------------------
 build-argos:
 	$(COMPOSE) --profile argos build argos sim fast_livo2
@@ -217,14 +204,9 @@ build-deploy:
 
 up-deploy:
 	SWARMDECK_CONFIG=/app/configs/hardware_fleet.yaml \
-	  SWARMDECK_SLAM_REGISTRATION_MODE=graph \
-	  SWARMDECK_SLAM_ANCHOR_ROBOT=aslan_0 \
-	  SWARMDECK_SLAM_CAPTURE_DIR=/app/sessions/captures/hardware-live \
-	  SWARMDECK_SLAM_RESTORE_CAPTURE=true \
-	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router slam
+	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
-	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
 	@echo "Deploy robot:     make deploy ROBOT=<botman|aslan|scout|spot|asimov|all>"
 
@@ -272,20 +254,14 @@ local-ai-down:
 docker-up-gpu: up-argos-gpu
 	@echo "Backend API:      http://localhost:8080/api/config"
 
-docker-up-cslam:
-	SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
-	  docker compose $(CSLAM_COMPOSE) --profile gazebo up --build -d
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
-
 docker-down:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down
+	$(COMPOSE) --profile argos --profile mock --profile agent down
 
 docker-logs:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent logs -f
+	$(COMPOSE) --profile argos --profile mock --profile agent logs -f
 
 docker-ps:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent ps
+	$(COMPOSE) --profile argos --profile mock --profile agent ps
 
 docker-test:
 	$(COMPOSE) build server
@@ -330,4 +306,4 @@ tunnel:
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log} argos/build
-	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE) --profile argos --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true

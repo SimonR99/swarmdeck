@@ -29,12 +29,12 @@ class OdometryTfBridge(Node):
     def __init__(self) -> None:
         super().__init__("odom_to_tf")
         self.declare_parameter("odom_topic", "/laser_odometry")
-        self.declare_parameter("parent_frame", "map")
-        self.declare_parameter("child_frame", "os_lidar")
+        self.declare_parameter("navigation_frame", "odom")
+        self.declare_parameter("child_frame", "base_link")
         self.declare_parameter("planar", True)
         self.declare_parameter("use_receive_time", False)
 
-        self._parent_frame = str(self.get_parameter("parent_frame").value)
+        self._parent_frame = str(self.get_parameter("navigation_frame").value)
         self._child_frame = str(self.get_parameter("child_frame").value)
         self._planar = bool(self.get_parameter("planar").value)
         self._use_receive_time = bool(self.get_parameter("use_receive_time").value)

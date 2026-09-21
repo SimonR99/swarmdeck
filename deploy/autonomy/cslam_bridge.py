@@ -143,7 +143,6 @@ class Bridge(Node):
             "server_url": "",
             "store_root": "/maps",
             "max_range_m": 30.0,
-            "navigation_frame": "robot_0/map_frame",
             "sensor_domain_id": -1,
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
@@ -161,8 +160,8 @@ class Bridge(Node):
             "peer_platforms": "{}",
             "peer_pose_topic_template": "/{robot}/ground_truth",
             "peer_pose_frame": "world",
-            "peer_mask_pose_tolerance_s": 0.05,
             "peer_mask_margin_m": 0.15,
+            "peer_mask_pose_tolerance_s": 0.05,
         }
         for key, value in params.items():
             self.declare_parameter(key, value)
@@ -172,7 +171,6 @@ class Bridge(Node):
         self.base, self.odom_frame = p["base_frame"], p["odom_frame"]
         self.max_range = p["max_range_m"]
         self.sensor_ns = p["sensor_namespace"].strip("/")
-        self.navigation_frame = p["navigation_frame"]
         sensor_domain = int(p["sensor_domain_id"])
         peer_domain = self.context.get_domain_id()
         if sensor_domain < 0:
@@ -1093,12 +1091,9 @@ class Bridge(Node):
             and source_reset_stamp is not None
         ):
             try:
-                transform = self.tf.lookup_transform(
-                    self.odom_frame, self.navigation_frame, Time()
-                )
-                local_navigation = np.asarray(
-                    pose_matrix(transform_pose(transform.transform))
-                )
+                # Corrections are data, never a second TF authority. The
+                # navigation/planning frame is the continuous odometry frame.
+                local_navigation = np.eye(4)
                 # Advertise the newest product the MOLA worker has published,
                 # paired with the frame state of the revision it was built
                 # from; a revision without a product is never advertised.
@@ -1114,7 +1109,7 @@ class Bridge(Node):
                         participants=list(self.core.robot_names.values()),
                         robot_map_epoch=self.core.map_epoch,
                         run_id=self.core.run_id,
-                        navigation_frame=self.navigation_frame,
+                        navigation_frame=self.odom_frame,
                         planning_frame=self.odom_frame,
                         T_local_navigation=local_navigation,
                         home_keyframe_id=self.core.key(0).stable_id,

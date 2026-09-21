@@ -1,24 +1,37 @@
-import type { MapInfo } from '../types/protocol';
+export interface RasterSnapshotInfo {
+  resolution: number;
+  width: number;
+  height: number;
+  origin: { x: number; y: number };
+  seq: number;
+  transforms?: Record<string, { x: number; y: number; yaw: number }>;
+}
 
-/** Image response metadata takes precedence over a potentially stale index. */
-export function mapSnapshotInfo(headers: Headers, fallback: MapInfo): MapInfo {
-  if (!headers.has('X-Map-Resolution')) return fallback; // Older server compatibility.
-  const value = (name: string) => headers.has(name) ? Number(headers.get(name)) : NaN;
-  const resolution = value('X-Map-Resolution');
-  const width = value('X-Map-Width'), height = value('X-Map-Height');
-  const x = value('X-Map-Origin-X'), y = value('X-Map-Origin-Y');
-  if (!Number.isFinite(resolution) || resolution <= 0
-    || !Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0
-    || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Invalid map snapshot geometry');
-  let transforms: MapInfo['transforms'] = undefined;
+/** Parse geometry and transform provenance from an optimized raster response. */
+export function mapSnapshotInfo(headers: Headers, fallback: RasterSnapshotInfo): RasterSnapshotInfo {
+  const value = (name: string, previous: number) => {
+    const raw = headers.get(name);
+    if (raw === null) return previous;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) throw new Error(`Invalid ${name}`);
+    return parsed;
+  };
+  let transforms: RasterSnapshotInfo['transforms'] = undefined;
   const encoded = headers.get('X-Map-Transforms');
   if (encoded !== null) {
-    const parsed = JSON.parse(encoded) as Record<string, { x: number; y: number; yaw: number }>;
-    if (!parsed || typeof parsed !== 'object' || Object.values(parsed).some((pose) =>
-      !pose || ![pose.x, pose.y, pose.yaw].every(Number.isFinite))) {
-      throw new Error('Invalid map snapshot transforms');
-    }
-    transforms = parsed;
+    const parsed = JSON.parse(encoded) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid X-Map-Transforms');
+    transforms = parsed as RasterSnapshotInfo['transforms'];
   }
-  return { ...fallback, resolution, width, height, origin: { x, y }, transforms };
+  return {
+    resolution: value('X-Map-Resolution', fallback.resolution),
+    width: value('X-Map-Width', fallback.width),
+    height: value('X-Map-Height', fallback.height),
+    origin: {
+      x: value('X-Map-Origin-X', fallback.origin.x),
+      y: value('X-Map-Origin-Y', fallback.origin.y)
+    },
+    seq: value('X-Map-Seq', fallback.seq),
+    transforms
+  };
 }

@@ -22,7 +22,7 @@ footprint:
   - [-0.662, -0.389]
   - [-0.662, 0.389]
 
-map_frame: map
+navigation_frame: map
 # /laser_odometry says its child is os_lidar, but live comparison against
 # /registered_scan proves that pose uses axes rotated pi from raw os_lidar.
 # The odom bridge publishes map -> aslan_base_link and Nav2 publishes the
@@ -32,22 +32,15 @@ lidar_height_m: 0.630
 
 # Same Bunker envelope and SuperOdometry map origin as Botman: nominal chassis
 # height 0.400 m, with the requested 0.150..1.800 m physical obstacle band.
-map_cloud_height_band:
-  floor_z: -0.630
-  min_z: 0.150
-  max_z: 1.800
 retain_free_space: true
 
 topics:
   odom: /laser_odometry
-  map: ""
-  map_cloud: /registered_scan
-  # Nav2's planner_server publishes its global route in the robot namespace.
+  # MGG route in the robot navigation frame.
   plan: /aslan_0/plan
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /aslan_0/local_plan
   # Nav2 costmaps are visualization-only snapshots.
-  global_costmap: /aslan_0/global_costmap/costmap
   local_costmap: /aslan_0/local_costmap/costmap
   cmd_vel: /cmd_vel
   battery: /bunker_status
@@ -61,23 +54,19 @@ topics:
   camera_info: /oak/stereo/camera_info
   camera_color_info: /oak/rgb/camera_info
   # Nav2 never publishes to the physical driver. The adapter relays this
-  # isolated output only while its own NavigateToPose goal is active.
+  # isolated output only while its own goal action goal is active.
   nav_cmd_vel: /aslan_0/cmd_vel_nav
 
 actions:
-  navigate_to_pose: /aslan_0/navigate_to_pose
+  # Nav2 controller_server on the robot: MGG routes are executed here.
+  follow_path: /aslan_0/follow_path
 
 perception:
   depth_max_age_s: 1.0
 
-# Under merge_mode: graph, the server performs trajectory-based pose-graph SLAM
-# from 3D keyframe uploads rather than synchronous 2D grid image registration.
 rates:
   state_hz: 5.0
-  map_period_s: 4.0
-  cloud_period_s: 4.0
   camera_period_s: 0.2
-  keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45
 battery_voltage_min: 23.0
@@ -92,11 +81,3 @@ exploration:
     body_height_m: 0.4
     bounds_min: [-60.0, -60.0, -3.0]
     bounds_max: [60.0, 60.0, 3.0]
-
-# Match delayed registered scans to raw RGB pixels using lens distortion + TF.
-# This OAK driver leaves RGB CameraInfo.frame_id empty; pin its optical frame.
-map_color:
-  enabled: true
-  camera_frame: oak_rgb_camera_optical_frame
-  max_age_s: 0.05
-  history_s: 2.0

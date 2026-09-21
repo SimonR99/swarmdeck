@@ -131,7 +131,7 @@ def test_a_stale_previous_index_is_ignored_rather_than_trusted():
 
 def test_route_points_accepts_planner_paths_dicts_and_pairs():
     plan = PlannerPath(
-        "r0/map_frame",
+        "r0/navigation_frame",
         1,
         (
             PlannerPose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
@@ -309,7 +309,7 @@ def _sim_bridge(sim_module, **cfg):
     return bridge
 
 
-def _plan(frame="r0/map_frame", revision=1):
+def _plan(frame="r0/navigation_frame", revision=1):
     poses = tuple(PlannerPose(0.5 * i, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) for i in range(21))
     return PlannerPath(frame, revision, poses)
 
@@ -417,28 +417,6 @@ def test_sim_tick_restarts_the_clock_for_a_replacement_route(sim_module, clock):
     first.cancel_goal_async.assert_not_called()
 
 
-def test_sim_tick_never_fires_without_an_active_follow_path_goal(sim_module, clock):
-    bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
-    generation, handle = _submit(bridge, _plan())
-
-    # An operator cancel retires the route: nav_status is no longer active.
-    bridge.cancel()
-    _rock(bridge, clock, 60.0)
-    assert bridge.nav_status == "cancelled"
-    assert bridge._nav_failure_reason is None
-
-    # A NavigateToPose goal retains no route, so nothing is supervised.
-    bridge.nav_client = MagicMock()
-    bridge.nav_client.server_is_ready.return_value = True
-    bridge.nav_client.send_goal_async.return_value = _ImmediateFuture(
-        _accepted_handle()
-    )
-    bridge.navigate_to({"x": 5.0, "y": 0.0})
-    assert bridge.nav_status == "active"
-    _rock(bridge, clock, 60.0)
-    assert bridge.nav_status == "active"
-    assert bridge._nav_failure_reason is None
 
 
 def test_sim_tick_waits_for_the_controller_to_accept_the_goal(sim_module, clock):
@@ -520,7 +498,7 @@ def test_sim_watchdog_failure_reaches_exploration_recovery(sim_module, clock):
     bridge.node.get_clock().now().nanoseconds = 1_000_000_000
     _mock_bridge, explorer = rig()
     explorer.bridge = bridge
-    explorer.frame = "r0/map_frame"
+    explorer.frame = "r0/navigation_frame"
     bridge.exploration = explorer
     replacement_request = Future()
     explorer.replan_client.call_async.return_value = replacement_request
@@ -532,7 +510,7 @@ def test_sim_watchdog_failure_reaches_exploration_recovery(sim_module, clock):
         explorer.pending.set_result(NS(success=True, message=""))
         explorer.on_path(
             planner_msg(
-                frame="r0/map_frame",
+                frame="r0/navigation_frame",
                 stamp=2,
                 points=[(0.5 * i, 0.0, 0.0) for i in range(21)],
             )
@@ -567,7 +545,7 @@ def test_sim_watchdog_failure_reaches_exploration_recovery(sim_module, clock):
     with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
         explorer.on_path(
             planner_msg(
-                frame="r0/map_frame",
+                frame="r0/navigation_frame",
                 stamp=3,
                 points=[(2.5 + 0.5 * i, 0.5, 0.0) for i in range(11)],
             )

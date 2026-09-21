@@ -1,4 +1,4 @@
-"""Launch one namespaced Nav2 stack against that robot's live SLAM map."""
+"""Launch one namespaced Nav2 trajectory controller and local costmap."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -88,28 +88,6 @@ def generate_launch_description() -> LaunchDescription:
             + [("cmd_vel", controller_cmd_vel_topic)],
         },
     )
-    planner = Node(
-        package="nav2_planner",
-        executable="planner_server",
-        name="planner_server",
-        **common,
-    )
-    behaviors = Node(
-        package="nav2_behaviors",
-        executable="behavior_server",
-        name="behavior_server",
-        **{
-            **common,
-            "remappings": common["remappings"]
-            + [("cmd_vel", controller_cmd_vel_topic)],
-        },
-    )
-    navigator = Node(
-        package="nav2_bt_navigator",
-        executable="bt_navigator",
-        name="bt_navigator",
-        **common,
-    )
     velocity_smoother = Node(
         package="nav2_velocity_smoother",
         executable="velocity_smoother",
@@ -124,13 +102,7 @@ def generate_launch_description() -> LaunchDescription:
         },
     )
     bounded_startup = LaunchConfiguration("bounded_startup")
-    managed_nodes = [
-        "controller_server",
-        "planner_server",
-        "behavior_server",
-        "bt_navigator",
-        "velocity_smoother",
-    ]
+    managed_nodes = ["controller_server", "velocity_smoother"]
     startup = Node(
         package="swarmdeck_nav",
         executable="lifecycle_startup",
@@ -195,9 +167,6 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("output_cmd_vel_topic", default_value="cmd_vel"),
             controller,
-            planner,
-            behaviors,
-            navigator,
             velocity_smoother,
             lifecycle,
             startup,

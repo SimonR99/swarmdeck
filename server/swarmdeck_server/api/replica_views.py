@@ -173,9 +173,9 @@ def deployment_placements(session_id: str | None) -> dict[str, dict[str, Any]]:
 
     A robot is placed only when both halves are known: the map service holds a
     transform for its navigation frame (a surveyed start pose, or an accepted
-    registration) and its latest live mapping authority names the component
-    that frame is expressed in. The latest authority is used without a
-    freshness cut so a momentary telemetry gap does not move or remove a
+    deployment placement) and its latest live mapping authority names the
+    component that frame is expressed in. The latest authority is used without
+    a freshness cut so a momentary telemetry gap does not move or remove a
     member's geometry; the live overlay applies its own freshness budget to
     robot poses. A robot whose adapter already reports in the merged frame has
     the identity placement. This assumes the live ``navigation_frame`` is the

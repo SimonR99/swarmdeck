@@ -17,7 +17,7 @@ BOUNDED_OPTIONS = {
 
 
 def _mapping_service(name: str) -> dict:
-    compose = yaml.safe_load((COMPOSE_DIR / "docker-compose.mapping.yml").read_text())
+    compose = yaml.safe_load((COMPOSE_DIR / "docker-compose.yml").read_text())
     return compose["services"][name]
 
 

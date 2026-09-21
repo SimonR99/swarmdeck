@@ -70,7 +70,7 @@ class InertBridge:
         self.node = node
         self.id = "probe"
         self.cfg = {}
-        self.map_frame = "map"
+        self.navigation_frame = "map"
         self._mapping_authority = authority
         self._goal_lock = threading.RLock()
         self._goal_generation = 0

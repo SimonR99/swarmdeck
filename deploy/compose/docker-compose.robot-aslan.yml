@@ -150,7 +150,7 @@ services:
       start_period: 15s
     restart: unless-stopped
 
-  # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
+  # SuperOdometry publishes /laser_odometry but not continuous odometry -> base TF. Despite
   # naming os_lidar as the message child, its pose is the physical-forward
   # frame; aslan.launch.py adds the measured pi-yaw edge to raw os_lidar.
   # Same host-side bridge Aslan already runs as swarmdeck-aslan-odom-tf.
@@ -211,7 +211,7 @@ services:
       # needs the same enlarged segment as the writer. See the lidar service.
       FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     # publish_odom_tf:=false because the odom_tf service above already
-    # broadcasts map -> os_lidar. Same split as Botman: keep one bridge
+    # broadcasts continuous navigation -> os_lidar. Same split as Botman: keep one bridge
     # independent of Nav2 so costmaps still get a pose if Nav2 restarts,
     # and keep Nav2 from starting a second broadcaster for that same edge.
     command:
@@ -229,8 +229,8 @@ services:
           export FASTRTPS_DEFAULT_PROFILES_FILE=/app/swarmdeck/deploy/dds/fastdds_udp_only.xml &&
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/aslan_0/follow_path' &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /aslan_0/controller_server | grep -q '^active'
       interval: 20s
       timeout: 12s
       retries: 12

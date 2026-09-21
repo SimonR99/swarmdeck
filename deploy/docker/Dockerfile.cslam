@@ -29,6 +29,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Swarm-SLAM's C++ front end links librtabmap and rtabmap_conversions
+# (cslam/package.xml); the rest are its other declared ROS dependencies. No
+# RTAB-Map SLAM or odometry node runs in this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git \
       python3-pip python3-vcstool python3-numpy python3-scipy \
@@ -40,7 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-jazzy-pcl-conversions \
       ros-jazzy-perception-pcl \
       ros-jazzy-tf2-ros \
-      ros-jazzy-rtabmap-odom ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-util \
+      ros-jazzy-rtabmap ros-jazzy-rtabmap-msgs ros-jazzy-rtabmap-conversions \
+      ros-jazzy-cv-bridge ros-jazzy-image-transport ros-jazzy-image-geometry \
+      ros-jazzy-laser-geometry ros-jazzy-message-filters ros-jazzy-pluginlib \
+      ros-jazzy-pcl-ros ros-jazzy-diagnostic-msgs ros-jazzy-stereo-msgs \
+      ros-jazzy-tf2-eigen \
     && rm -rf /var/lib/apt/lists/*
 
 # TEASER++ with Python bindings — the lidar registration back end. Built before

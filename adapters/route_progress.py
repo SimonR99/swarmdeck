@@ -270,7 +270,7 @@ def route_progress_tick(bridge, now: float | None = None) -> bool:
     FollowPath plan (``_follow_path_display``) and counts as active only while
     it still owns the current goal generation, ``nav_status`` is ``active``
     and the controller has accepted the goal. Anything else, including an
-    operator NavigateToPose goal, leaves the watchdog reset.
+    operator PointGoalAction goal, leaves the watchdog reset.
     """
     watchdog = bridge_route_watchdog(bridge)
     if not watchdog.enabled:

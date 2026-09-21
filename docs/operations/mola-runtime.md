@@ -23,7 +23,6 @@ The native planner product adds occupied/free voxels and terrain samples to the
 point-geometry layer. Both the MOLA provider and the existing indexed provider
 use the same terrain-query implementation. In the simulation MOLA path, MGG
 reads this immutable native grid directly for graph/grid work, without an
-OctoMap conversion. Occupied-only collision checks retain measured surface
 heights; strict queries and missing height evidence retain full voxel bounds.
 Unknown cells remain unknown. The independent raw-cloud/depth mapper is disabled. The robot
 peer overlay remains hardware opt-in and keeps its planner-product defaults
@@ -34,7 +33,6 @@ guide](replica-components.md).
 ## Worker deployment
 
 Build `deploy/docker/Dockerfile.mapping` and use either the simulation
-`docker-compose.mapping.yml` overlay or the robot-local `peer_mola_mapping`
 service. Both require the active `SWARMDECK_MISSION_ID`; old missions on the map
 volume are not selected implicitly. Commands are in
 [current stack operations](current-stack.md), with the historical direct Compose
@@ -67,7 +65,6 @@ The subprocess protocol has a versioned ready event, correlated requests,
 explicit `replace` and `pose_only` modes, and checked revision/artifact responses.
 Timeout, process death, and malformed output invalidate resident state. A later
 request can rebuild from immutable chunks. There is no silent fallback to the
-legacy importer; `--mode oneshot` selects that compatibility path explicitly.
 Removing a component releases its resident context.
 
 | Limit | Default |
@@ -328,14 +325,10 @@ PYTHONPATH=. timeout 90s python3 tests/deployment/mola_planner_acceptance.py \
 Replay writes MOLA products into that copy. It does not run ROS or send robot
 commands. Omit the last two options for the synthetic acceptance fixture.
 
-The normal simulation launcher selects the direct MGG snapshot backend and the
-MOLA query provider. The former live cloud-fed OctoMap path remains available
-only through the explicit `--legacy-cloud` launcher mode. Physical robot
-profiles still require an explicit peer-mapping/MOLA overlay after their
-capture, calibration, and frame contracts are qualified:
-
+The normal simulation launcher selects native MOLA products and the `mola`
+query provider. Physical ROS 2 profiles enable the `peer_mapping` profile after
+their capture, calibration, and frame contracts are qualified:
 ```bash
-export SWARMDECK_MGG_MAP_BACKEND=mola_snapshot
 export SWARMDECK_PLANNER_MAP_PROVIDER=mola
 export SWARMDECK_MOLA_PLANNER_MAPS=true
 export SWARMDECK_MISSION_ID='replace-with-canonical-mission-uuid'
@@ -344,14 +337,10 @@ export SWARMDECK_MAP_QUERY_POLL_S=0.5
 export SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S=3
 ```
 
-`SWARMDECK_MGG_MAP_BACKEND=mola_snapshot` is the simulation default. The MGG
-launch accepts `mola_snapshot` and `cloud_octomap`. With `mola_snapshot`, each
-planner instance reads exactly one
-peer root, `${SWARMDECK_MAPS_ROOT}/${SWARMDECK_MISSION_ID}/${ROBOT_ID}`. The
-mission must be a canonical UUID, the robot ID must match the launcher's simple
-identifier grammar, and the maps root must be absolute. There is no search for
-the newest mission and no fallback to raw clouds when the selected snapshot is
-missing or invalid.
+Each MGG planner reads exactly one peer root,
+`${SWARMDECK_MAPS_ROOT}/${SWARMDECK_MISSION_ID}/${ROBOT_ID}`. The mission must
+be a canonical UUID, the robot ID must match the launcher's simple identifier
+grammar, and the maps root must be absolute.
 
 The onboard compose overlay supplies `SWARMDECK_MAPS_ROOT=/maps` and mounts the
 shared `peer_maps` volume read-only in the MGG service. The mapping worker owns
@@ -368,8 +357,6 @@ under the key it planned with a second or two earlier; a source invalidation
 drops those retained indexes with the current one.
 
 MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
-validation, even when `SWARMDECK_INDEXED_MAP_QUERY=0`. That switch controls only
-the legacy cloud backend. MGG's voxel index is useful for graph construction,
 but its 20 cm voxel centers cannot resolve the simulation fleet's 15 cm step
 limit. The final query uses MOLA's exact surface heights and checks the entire
 route.

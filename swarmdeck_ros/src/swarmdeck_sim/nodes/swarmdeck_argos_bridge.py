@@ -11,10 +11,10 @@ what the "SDB2" magic is for.
 
 Three things here are load-bearing and easy to get wrong.
 
-**Frame names.** They are the ones `swarmdeck_slam/launch/slam.launch.py`
-already publishes static transforms for: `<ns>/base_link/lidar`,
-`<ns>/base_link/imu`, `<ns>/base_link/camera`. Inventing `<ns>/lidar_link`
-instead does not fail: the messages publish, SLAM subscribes, and every scan is
+**Frame names.** They are the static sensor frames used by the ARGoS
+experiment: `<ns>/base_link/lidar`, `<ns>/base_link/imu`, and
+`<ns>/base_link/camera`. Inventing `<ns>/lidar_link` instead does not fail:
+the messages publish, the peer mapper subscribes, and every scan is
 silently dropped by the TF message filter, which reports only that its queue is
 full.
 

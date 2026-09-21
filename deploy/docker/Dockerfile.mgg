@@ -8,8 +8,7 @@ ARG MGG_REV=7004cd47c9197a44ab89d4ee1d7023418c957141
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \
-    ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros \
-    ros-jazzy-nav2-msgs ros-jazzy-slam-toolbox \
+    ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros ros-jazzy-nav2-msgs \
     ros-jazzy-rclpy \
     ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
     && rm -rf /var/lib/apt/lists/*

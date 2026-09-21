@@ -5,7 +5,8 @@
 #
 # Default lifecycle: sync -> override -> build -> reset stack -> up -> verify.
 # Reset means `docker compose down --remove-orphans`; it never moves a physical
-# robot or resets SLAM. Real adapters do not expose the simulator-only reset.
+# robot or resets the vendor's native localization. Real adapters do not expose
+# the simulator-only reset.
 
 set -Eeuo pipefail
 
@@ -129,7 +130,7 @@ sync_repo() {
     -a --partial -e "$RSYNC_RSH"
     --exclude=.git/ --exclude=.deploy/ --exclude=.env --exclude=.env.*
     --exclude=__pycache__/ --exclude='*.pyc' --exclude='*.pre-duck-map-*'
-    --exclude=sessions/ --exclude=server/.venv/ --exclude=slam/.venv/ --exclude=ui/node_modules/
+    --exclude=sessions/ --exclude=server/.venv/ --exclude=ui/node_modules/
     --exclude=ui/dist/ --exclude=swarmdeck_ros/build/
     --exclude=swarmdeck_ros/install/ --exclude=swarmdeck_ros/log/
     --exclude=.aslan_ros/ --exclude=.aslan_pip/ --exclude=.spot_pip/

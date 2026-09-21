@@ -1,27 +1,23 @@
 # Simulation
 
-SwarmDeck's simulated fleet runs on [ARGoS3](https://github.com/beltrame/argos3),
-in a fork that adds a Filament-based photorealism medium, a Jolt physics engine,
-and the sensors needed to drive an external SLAM stack. The Gazebo Harmonic path
-it replaced is still in the tree as an A/B control; see
-[Legacy Gazebo backend](#legacy-gazebo-backend).
+in a fork that adds a Filament-based photorealism medium and a Jolt physics
+engine. The simulator publishes sensor data and continuous odometry; peer
+Swarm-SLAM and native MOLA provide the single mapping pipeline.
 
 For the current timestamp contract, adapter/estimator optimizations, reproducible
 benchmarks, and tuning tradeoffs, see [Simulation performance](../operations/simulation-performance.md).
 
 ## Why
 
-Three limits of the Gazebo stack are what this change addresses.
 
 **Camera images were not photographs.** The detection pipeline (prompted YOLOE,
 depth projection, operator review) is a headline feature, and the classes in
 `adapters/perception/catalog.py` were calibrated on real photographs. Flat-shaded
 SDF primitives are not the input that catalog describes.
 
-**Odometry drift was a model, not a measurement.** An EKF fused simulated wheel
-encoders with a simulated gyro. It cannot slip a wheel against an obstacle, lose
-a scan to geometric degeneracy, or fail to converge, and the collaborative SLAM
-back-end in `slam/` exists precisely to survive those failures.
+**Odometry drift was a model, not a measurement.** The `drift` mode is useful
+for fast control-path smoke runs. Sensor-backed runs use Fast-LIVO2, while
+peer Swarm-SLAM remains the only corrected-pose authority.
 
 **Lidar fidelity was CPU-bound.** Without an NVIDIA runtime, `gpu_lidar`
 raytraced on the CPU at roughly 0.58x real time, which is why the mapping lidar
@@ -44,15 +40,18 @@ cameras.
 └─────────────────────────────────────────────┘
         │                              │
         ▼                              ▼
-┌─ sim container (Jazzy) ──┐   ┌─ fast_livo2 (ROS 2) ───┐
-│ swarmdeck_argos_bridge   │   │ fast_livo_link.py      │
-│  /clock /ns/scan/points  │   │ fast_livo_node × N     │
-│  /ns/odom /ns/imu /ns/tf │   │ ROS_DOMAIN_ID 43       │
-│  /ns/camera/*            │   └────────────────────────┘
-│ pointcloud_to_laserscan  │
-│ slam_toolbox · Nav2      │
-│ adapter_sim ────────────►│ server :8080, slam :8090, mediamtx
-└──────────────────────────┘
+┌─ sim container (Jazzy) ─────────────────────┐
+│ swarmdeck_argos_bridge                       │
+│  /clock /ns/scan/points /ns/odom /ns/imu     │
+│  /ns/camera/* /ns/tf                         │
+│ adapter_sim ────────────────► server :8080  │
+└─────────────────────────────────────────────┘
+        │
+        ▼
+┌─ peer + MOLA + MGG services ────────────────┐
+│ peer Swarm-SLAM → MOLA products → MGG       │
+│ FollowPath controller and local costmap      │
+└─────────────────────────────────────────────┘
 ```
 
 Three containers around one volume. The split is not incidental: Fast-LIVO2
@@ -199,7 +198,6 @@ Three consequences worth stating plainly:
 - **No EKF.** `robot_localization` is not launched on this path. The pose
   arrives already fused and the bridge is the only publisher of
   `odom -> base_link`; a filter on top would add latency and double-count the
-  IMU. `slam.launch.py`'s `odometry_source:=ekf` keeps the old path for Gazebo.
 - **`alignment="none"`.** Each robot's estimate starts at its own origin, as a
   real robot's does. `alignment="ground_truth"` would put the whole fleet in a
   shared frame, which is exactly what `swarmdeck-slam` exists to recover.
@@ -217,7 +215,6 @@ homogeneous fleet and a fixed, invisible bias on three quarters of this one.
 
 ## The bumper scan
 
-Gazebo carried a second, dedicated lidar at a fixed 0.15 m for
 `<ns>/proximity_scan`, which `nav2_params.yaml` documents as the only source
 that sees a rubber duck (0.33 m) or a neighbour's chassis (0.28 m). An ARGoS
 robot has one lidar, so the bumper scan is a second `pointcloud_to_laserscan`
@@ -271,7 +268,6 @@ path rather than as a conflict.
 `--seconds` is wall-clock rather than simulation time, deliberately, because it
 bounds how long an operator waits. The consequence under this backend is worth
 knowing: at a real-time factor of 0.09 the same ten minutes buys about a
-ninth of the simulated driving it bought under Gazebo, so the maps are thinner
 when the bootstrap ends. `EXPLORE_SECONDS=0` skips it entirely.
 
 ## Host requirements
@@ -341,13 +337,3 @@ cmake -S argos -B argos/build -DCMAKE_BUILD_TYPE=Release && cmake --build argos/
 `-DARGOS_BUILD_JOLT=ON` is not optional: the generated experiment asks for a
 `<jolt>` engine and a `<mesh>` collision entity, and both live in that plugin.
 
-## Legacy Gazebo backend
-
-`sim_backend:=gazebo`, or `docker compose --profile gazebo`. It still runs, and
-is kept for one purpose: comparing against it. It renders `gpu_lidar` on the CPU
-at ~0.58x real time and its odometry is an EKF over simulated wheels and gyro
-rather than a real front-end.
-
-`configs/4robot.yaml` now selects the 17-ring `vlp16` profile that the estimator
-needs, which is expensive under Gazebo's CPU raytracing;
-`configs/baseline_legacy.yaml` keeps the cheap 360-sample planar one.

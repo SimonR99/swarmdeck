@@ -5,7 +5,6 @@ import { VoxelTerrain } from './voxelTerrain';
 import { Robot3DManager } from './robot3d';
 import { Map3DLayers } from './map3dLayers';
 import type { MapRobot } from '../map2d/mapLayers';
-import type { MapInfo } from '$lib/types/protocol';
 
 export class Map3DScene {
   public canvas: HTMLCanvasElement;

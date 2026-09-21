@@ -2,15 +2,11 @@ import type { Point, Pose, RobotState } from '../../types/protocol.ts';
 
 export type FrameTransforms = Record<string, Pose> | undefined;
 
-/** What the global view knows about who belongs on the grid it displays. */
+/** What the displayed replica raster knows about who belongs on the canvas. */
 export interface GlobalMapMembership {
-  /** True while the global canvas shows a server-rasterized optimized grid. */
   showingOptimizedGrid: boolean;
-  /** `robots` of that grid's catalogue entry (GET /api/map/optimized), when listed. */
   optimizedRobots?: readonly string[] | null;
-  /** `X-Map-Transforms` of the displayed raster, keyed by robot id. */
   transforms: FrameTransforms;
-  /** The SLAM merged map's membership from GET /api/map/status. */
   globalMembers?: readonly string[] | null;
 }
 
@@ -32,20 +28,14 @@ export function globalMapMembers(membership: GlobalMapMembership): string[] {
 }
 
 /**
- * The rigid transform that places a robot-local overlay (its Nav2 costmap, in
- * its own map frame) on the global canvas. A server-rasterized optimized grid
- * carries every member's frame in `X-Map-Transforms`, the same transform the
- * robots themselves are projected with; only the legacy SLAM merged map,
- * which sends no such header, falls back to the status transforms, which are
- * the surveyed start poses in the deployment frame and rotate an overlay by a
- * whole start yaw when applied to a component raster.
+ * The rigid transform that places a robot-local overlay on the displayed
+ * raster. Transform provenance is accepted only from that raster response.
  */
 export function overlayFrameOnGlobalGrid(
   robotId: string,
-  rasterFrames: FrameTransforms,
-  statusTransforms: Record<string, Pose> | undefined
+  rasterFrames: FrameTransforms
 ): Pose | undefined {
-  return rasterFrames?.[robotId] ?? statusTransforms?.[robotId];
+  return rasterFrames?.[robotId];
 }
 
 export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {

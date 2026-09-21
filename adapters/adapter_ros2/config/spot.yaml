@@ -32,23 +32,17 @@ footprint:
 # triangle and footprint must follow body, not the lidar, or Spot looks a
 # quarter-turn off the map. /lio_sam/mapping/odometry is odom_link ->
 # odom_mapping; the adapter pose is the TF lookup, not that message.
-map_frame: map
+navigation_frame: map
 base_frame: body
 lidar_height_m: 0.500
 
 # LIO-SAM starts the map at the first lidar pose. The payload lidar is near
 # 0.500 m above the floor, which is the current
 # map-frame floor reference; calibrate floor_z if the live SLAM origin differs.
-map_cloud_height_band:
-  floor_z: -0.500
-  min_z: 0.150
-  max_z: 1.800
 retain_free_space: true
 
 topics:
   odom: /lio_sam/mapping/odometry
-  map: ""                 # LIO-SAM publishes no OccupancyGrid
-  map_cloud: /lio_sam/mapping/cloud_registered
   # LIO-SAM's path is an odometry/history trail, not Spot's Trajectory route.
   # Clearpath's Trajectory action does not expose a planned-path topic.
   plan: ""
@@ -67,13 +61,11 @@ topics:
   camera_depth_points: ""
   nav_cmd_vel: ""
   # Spot uses its trajectory stack rather than Nav2; no costmap topics.
-  global_costmap: ""
   local_costmap: ""
 
 # Click-to-pose is Clearpath /trajectory, the same action
 # spot_high_level_controller uses. Goals are TF'd map -> body.
 actions:
-  navigate_to_pose: ""
   trajectory: /trajectory
 
 # A point goal has no requested final yaw. Differential mode decomposes it into
@@ -135,10 +127,7 @@ perception:
 
 rates:
   state_hz: 5.0
-  map_period_s: 4.0
-  cloud_period_s: 4.0
   camera_period_s: 0.2
-  keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45
 

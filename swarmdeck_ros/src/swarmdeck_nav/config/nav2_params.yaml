@@ -1,61 +1,25 @@
-# Nav2, one stack per robot namespace.
-# TF frame IDs are rewritten per namespace by nav.launch.py. ROS topics remain
-# relative so the node namespace scopes them to one robot.
-#
-# The GUI never sends Nav2-shaped commands — the adapter maps the protocol's
-# planner-agnostic navigate_to onto a NavigateToPose action (FR-N8), so a ROS 1
-# robot running move_base accepts the identical command.
-
-bt_navigator:
-  ros__parameters:
-    global_frame: <robot_namespace>/map_frame
-    robot_base_frame: <robot_namespace>/base_link
-    odom_topic: odom
-    bt_loop_duration: 10
-    default_server_timeout: 20
-    navigators: ["navigate_to_pose"]
-    navigate_to_pose:
-      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
-
+# Nav2 trajectory tracking for one robot. The planner is MGG; this stack only
+# follows FollowPath trajectories and maintains live local collision data.
 controller_server:
   ros__parameters:
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
-    progress_checker_plugins: ["progress_checker"]
-    goal_checker_plugins: ["goal_checker"]
-    controller_plugins: ["FollowPath"]
-
+    progress_checker_plugins: [progress_checker]
+    goal_checker_plugins: [goal_checker]
+    controller_plugins: [FollowPath]
     progress_checker:
-      # Exploration paths can begin with a skid-steer turn. Translation-only
-      # progress needs enough time for that turn, especially when four
-      # controller loops share the host. Rotation itself must not reset the
-      # watchdog indefinitely: a robot oscillating in place still needs to
-      # enter the adapter's bounded recovery attempts.
-      plugin: "nav2_controller::SimpleProgressChecker"
+      plugin: nav2_controller::SimpleProgressChecker
       required_movement_radius: 0.2
       movement_time_allowance: 20.0
-
     goal_checker:
-      plugin: "nav2_controller::SimpleGoalChecker"
+      plugin: nav2_controller::SimpleGoalChecker
       xy_goal_tolerance: 0.25
-      # The dashboard sets points (x/y), not final orientations. The adapter
-      # supplies a neutral quaternion because NavigateToPose requires one;
-      # accept any heading so the robot stops at the point without a final turn.
       yaw_goal_tolerance: 3.2
       stateful: true
-
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      # Reverse stays available for backing out, but only slowly. With a
-      # symmetric 0.6 m/s the critics are indifferent between nose-first and
-      # tail-first, and PreferForward (scale 1.0) cannot break the tie: from
-      # the grouped start, where MGG's first paths pass through parked
-      # neighbours it cannot see, DWB swung the robots through full-speed
-      # reverse arcs up to 4 m off the validated corridor and they wedged on
-      # kerbs (three cold starts failed; measured 2026-09-17). At 0.15 m/s,
-      # the wedge-escape speed, turning toward the path is always cheaper.
+      plugin: dwb_core::DWBLocalPlanner
       min_vel_x: -0.15
       max_vel_x: 0.6
       max_vel_theta: 1.2
@@ -72,21 +36,16 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      critics:
-        ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-         "PathAlign", "PathDist", "GoalDist", "PreferForward"]
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist, PreferForward]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
       GoalAlign.scale: 24.0
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
-      # Prefer driving nose-first, while retaining reverse as a valid fallback
-      # when turning would be less safe or the forward corridor is blocked.
       PreferForward.scale: 1.0
       PreferForward.penalty: 1.0
       RotateToGoal.scale: 32.0
-
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -98,104 +57,11 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.05
-      # Overridden per robot by session.launch.py. `footprint` wins wherever it
-      # parses to a valid polygon; robot_radius is the fallback for a stack that
-      # passes neither. The key must EXIST here to be overridable at all —
-      # RewrittenYaml only rewrites keys already present in this file.
       robot_radius: 0.3
       footprint: "[]"
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: [obstacle_layer, inflation_layer]
       obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: true
-        observation_sources: scan proximity_scan
-        scan:
-          # Costmap plugins live below local_costmap/global_costmap; an
-          # unqualified topic resolves under that child namespace and silently
-          # misses the robot sensor publisher.
-          topic: /<robot_namespace>/scan
-          max_obstacle_height: 2.0
-          clearing: true
-          marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 16.0
-          obstacle_max_range: 14.0
-        proximity_scan:
-          topic: /<robot_namespace>/proximity_scan
-          clearing: true
-          marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 4.0
-          obstacle_max_range: 3.8
-          # NOT optional, and its absence is silent. nav2 defaults a source's
-          # max_obstacle_height to 0.0, and ObservationBuffer keeps a hitpoint
-          # only while min < z < max — so an omitted value discards every
-          # return from this sensor while the layer still reports it as an
-          # enabled, marking source.
-          #
-          # This bumper scans at 0.15 m and is the ONLY sensor that sees the
-          # things the mapping lidar cannot: a rubber duck tops out at 0.33 m,
-          # and every chassis in the fleet has structure at 0.15 m while the
-          # 2D scan planes (0.45 / 0.72 / 0.97 m) sit above almost all of it.
-          # With this missing, robots drove through ducks and each other.
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0
-      inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        # Inflation exceeds the robot radius so robots keep clear of each other
-        # as well as walls (FR-N6).
-        inflation_radius: 0.55
-
-global_costmap:
-  global_costmap:
-    ros__parameters:
-      update_frequency: 1.0
-      publish_frequency: 1.0
-      global_frame: <robot_namespace>/map_frame
-      robot_base_frame: <robot_namespace>/base_link
-      # Overridden per robot by session.launch.py. `footprint` wins wherever it
-      # parses to a valid polygon; robot_radius is the fallback for a stack that
-      # passes neither. The key must EXIST here to be overridable at all —
-      # RewrittenYaml only rewrites keys already present in this file.
-      robot_radius: 0.3
-      footprint: "[]"
-      resolution: 0.05
-      # NOT rolling -- same contract as hardware (botman_nav2_params.yaml).
-      #
-      # This used to roll, to "plan before a collaborative map arrives". That
-      # concern is real but it is handled on the server, not here:
-      # MapService.nav_grid falls back to the robot's OWN raytraced grid when
-      # it is unmerged or a singleton, precisely so the static layer
-      # initializes immediately. So a static map is available as soon as the
-      # robot has uploaded anything, merged or not.
-      #
-      # What rolling cost instead was full-map planning. The window follows the
-      # robot, so the planner only ever saw 40 x 40 m -- while the maps being
-      # served measured 66.0 x 58.4 m (botman_0) and 56.9 x 45.6 m (aslan_0)
-      # live on 2026-08-25. Any goal past ~20 m fell outside the costmap and
-      # the global planner returned no path, while the rolling LOCAL costmap
-      # kept working: "local planning works, no full path" exactly.
-      #
-      # With a static_layer and rolling_window false, nav2 resizes the layered
-      # costmap to the incoming map's size, origin and resolution, so the two
-      # values below apply only before the first map arrives. Local costmaps
-      # stay live-sensor only.
-      rolling_window: false
-      width: 40
-      height: 40
-      track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
-        # Collaborative occupancy, warped into this robot's map_frame by the
-        # adapter. Must not be /<ns>/map: that is the onboard SLAM grid the
-        # operator still sees per-robot, and two publishers on one topic would
-        # flicker Nav2 between unmerged and merged geometry.
-        map_topic: /<robot_namespace>/global_map
-      obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
+        plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
         observation_sources: scan proximity_scan
         scan:
@@ -203,63 +69,26 @@ global_costmap:
           max_obstacle_height: 2.0
           clearing: true
           marking: true
-          data_type: "LaserScan"
+          data_type: LaserScan
           raytrace_max_range: 16.0
           obstacle_max_range: 14.0
         proximity_scan:
           topic: /<robot_namespace>/proximity_scan
           clearing: true
           marking: true
-          data_type: "LaserScan"
+          data_type: LaserScan
           raytrace_max_range: 4.0
           obstacle_max_range: 3.8
-          # NOT optional, and its absence is silent. nav2 defaults a source's
-          # max_obstacle_height to 0.0, and ObservationBuffer keeps a hitpoint
-          # only while min < z < max — so an omitted value discards every
-          # return from this sensor while the layer still reports it as an
-          # enabled, marking source.
-          #
-          # This bumper scans at 0.15 m and is the ONLY sensor that sees the
-          # things the mapping lidar cannot: a rubber duck tops out at 0.33 m,
-          # and every chassis in the fleet has structure at 0.15 m while the
-          # 2D scan planes (0.45 / 0.72 / 0.97 m) sit above almost all of it.
-          # With this missing, robots drove through ducks and each other.
           min_obstacle_height: 0.0
           max_obstacle_height: 2.0
       inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
+        plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 3.0
         inflation_radius: 0.55
-
-planner_server:
-  ros__parameters:
-    expected_planner_frequency: 1.0
-    planner_plugins: ["GridBased"]
-    GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.5
-      use_astar: false
-      allow_unknown: true
-
-behavior_server:
-  ros__parameters:
-    local_frame: <robot_namespace>/odom
-    global_frame: <robot_namespace>/map_frame
-    robot_base_frame: <robot_namespace>/base_link
-    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
-    spin:
-      plugin: "nav2_behaviors::Spin"
-    backup:
-      plugin: "nav2_behaviors::BackUp"
-    drive_on_heading:
-      plugin: "nav2_behaviors::DriveOnHeading"
-    wait:
-      plugin: "nav2_behaviors::Wait"
-
 velocity_smoother:
   ros__parameters:
     smoothing_frequency: 20.0
-    feedback: "OPEN_LOOP"
+    feedback: OPEN_LOOP
     scale_velocities: false
     velocity_timeout: 1.0
     max_velocity: [0.6, 0.0, 1.2]
@@ -267,5 +96,5 @@ velocity_smoother:
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
     deadband_velocity: [0.0, 0.0, 0.0]
-    odom_topic: "odom"
+    odom_topic: odom
     odom_duration: 0.1

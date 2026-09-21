@@ -78,31 +78,21 @@ SwarmDeck standardizes coordinate frames across heterogeneous robots:
 
 | Frame | Scope | Description |
 |---|---|---|
-| shared/world | Fleet | Backend/UI merged frame, normally anchored to the reference robot. |
-| `map` | Robot | Local SLAM frame. |
-| `odom` | Robot | Continuous odometry frame. |
+| shared/world | Deployment | Display-only placement for replicas. |
+| `robot/odom` | Robot | Continuous navigation and planning frame. |
 | `base_link` | Robot | Chassis frame. |
 | sensor frames | Robot | Camera, lidar, and IMU frames. |
 
-### Transform and tangent conventions
+### Transform and correction conventions
 
-- **Direction**: Every transform `T_a_b` maps coordinates in frame `b` into frame `a` ($p_a = T_{a\_b} \cdot p_b$).
-- **Tangent vector ordering**: GTSAM `Pose3` tangent vectors and information matrices are **rotation first** ($\omega_x, \omega_y, \omega_z, v_x, v_y, v_z$).
+- **Direction**: Every transform `T_a_b` maps coordinates in frame `b` into
+  frame `a` ($p_a = T_{a\_b} \cdot p_b$).
+- **Navigation**: MGG plans in each robot's continuous odometry frame.
+- **Corrections**: Peer Swarm-SLAM publishes `T_component_navigation` as data;
+  it never creates a competing map-to-odometry TF edge.
+- **Products**: MOLA consumes peer snapshots and publishes the occupancy
+  products queried by MGG. `SWARMDECK_SLAM_BACKEND=cslam` is the only backend.
 
-### 2D map merging modes
-
-- `graph`: (default in `4robot.yaml`, `2robot.yaml`, `hardware_fleet.yaml`) Trajectory-based
-  pose graph optimization in `slam/`. Occupancy grids are rendered from optimized poses,
-  guaranteeing that maps cannot disagree with trajectories.
-- `static`: Applies configured start transforms.
-- `auto`: (legacy 2D grid stitcher) Correlates signed occupied/free grids over SE(2) with
-  strict ambiguity and yaw guards. Retained as an independent diagnostic cross-check.
-- `cslam`: (legacy Swarm-SLAM / RTAB-Map overlay) Consumes external collaborative graph
-  summaries.
-
-The archived [collaborative mapping plan](../archive/collaborative-mapping-plan.md)
-and [collaborative SLAM analysis](../archive/collaborative-slam.md) hold the full
-design details for this central service.
 
 ### Safety boundary
 

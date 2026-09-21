@@ -40,20 +40,3 @@ services:
               count: all
               capabilities: [gpu]
 
-  # The legacy backend's own GPU settings, unchanged.
-  gazebo:
-    environment:
-      # Explicit "0" rather than an empty value: mesa parses this variable as a
-      # boolean and an empty string falls through to its default, which is the
-      # sort of thing that silently un-fixes itself later.
-      LIBGL_ALWAYS_SOFTWARE: "0"
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: all
-      __GLX_VENDOR_LIBRARY_NAME: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]

@@ -36,7 +36,7 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
         )
 
     node = NS(create_publisher=publisher, create_subscription=lambda *args: None)
-    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="r0/map_frame"), {})
+    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="r0/navigation_frame"), {})
     now = [0.0]
     coordinator.clock = lambda: now[0]
     mission = str(uuid.uuid4())
@@ -51,7 +51,7 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
             "component_id": "component:test",
             "solution_order": [order, 0],
             "correction_revision": order,
-            "navigation_frame": "r0/map_frame",
+            "navigation_frame": "r0/navigation_frame",
             "T_component_navigation": [
                 [1, 0, 0, map_x],
                 [0, 1, 0, 0],
@@ -117,7 +117,7 @@ def test_authority_freshness_path_generation_and_correction(monkeypatch):
         ),
         create_subscription=lambda *args: None,
     )
-    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="map"), {})
+    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="map"), {})
     now = [0.0]
     coordinator.clock = lambda: now[0]
     plan = PlannerPath(
@@ -191,7 +191,7 @@ def test_completion_requires_current_run_all_peers_and_one_verified_component(
     bridge = NS(
         node=node,
         id="r0",
-        map_frame="map",
+        navigation_frame="map",
         exploration=NS(status="locally_exhausted", active=False),
     )
     coordinator = PeerCoordinator(bridge, {})
@@ -254,7 +254,7 @@ def test_reordered_authority_preserves_newer_reservation_and_freshness(monkeypat
             )
         ),
     )
-    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="map"), {})
+    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="map"), {})
     now = [0.0]
     coordinator.clock = lambda: now[0]
     mission = str(uuid.uuid4())
@@ -370,7 +370,7 @@ def test_stale_authority_and_report_do_not_create_fleet_completion(monkeypatch):
     bridge = NS(
         node=node,
         id="r0",
-        map_frame="map",
+        navigation_frame="map",
         exploration=NS(status="locally_exhausted", active=False),
     )
     coordinator = PeerCoordinator(bridge, {})
@@ -440,7 +440,7 @@ def test_stale_lease_retains_and_validates_one_plan_authority_binding(monkeypatc
             )
         ),
     )
-    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="map"), {})
+    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="map"), {})
     now = [0.0]
     coordinator.clock = lambda: now[0]
     mission = str(uuid.uuid4())
@@ -561,7 +561,7 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
             create_subscription=lambda *args: None,
         )
         value = PeerCoordinator(
-            NS(node=node, id=robot, map_frame="map"),
+            NS(node=node, id=robot, navigation_frame="map"),
             {"deployment_start_pose": start},
         )
         value.clock = lambda: now[0]

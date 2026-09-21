@@ -5,7 +5,6 @@
 # does -- and using a SIMULATION config for that (configs/4robot.yaml) is a
 # specific, silent failure worth naming: it declares robots robot_0..robot_3 and
 # elects robot_0 as the merge reference. No such robot ever registers, so every
-# real robot is permanently a NON-reference robot, and in merge_mode: auto that
 # means every single map/cloud ingest re-runs grid registration -- measured at
 # 2.44 s per call (adapters/adapter_ros2/config/bunker.yaml:107).
 #
@@ -26,9 +25,6 @@ map:
   # this to `auto` to get merging "for free" -- that is the 2.44 s/ingest
   # regression that stalled adapters. Until two robots close a verified loop,
   # the merged map stays empty and each robot's own map is the truth.
-  merge_mode: graph
-  size_m: 40.0
-  resolution: 0.05
   start_poses: {}
 
 alerts:

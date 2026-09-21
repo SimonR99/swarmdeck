@@ -5,7 +5,6 @@
 #
 # WHY THIS EXISTS SEPARATELY FROM THE SIM OVERLAYS
 # ------------------------------------------------
-# `docker-compose.cslam.yml` and `docker-compose.dlio.yml` share the Gazebo
 # container's network AND IPC namespaces. That works because every "robot" is a
 # container on one machine, and it is the only reason Fast DDS can move data
 # between them — it discovers over UDP but carries payloads through /dev/shm,

@@ -349,7 +349,7 @@ def test_the_polygon_inscribes_tighter_than_the_circle(platform):
 
 
 def test_every_platform_fits_a_door_once_modelled_as_a_rectangle():
-    """DOOR is a HALF-width in generate_world.py, so the opening is 2.2 m."""
+    """DOOR is a half-width in indoor_geometry.py, so the opening is 2.2 m."""
     opening = 2 * 1.1
     for name in ROBOT_PROFILES:
         spec = robot_spec(name)

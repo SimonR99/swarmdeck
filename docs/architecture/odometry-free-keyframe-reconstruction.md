@@ -54,7 +54,6 @@ walls, doorways, shelves, and other stable structure.
 Current packets carry `ground_z`, `min_height`, and `max_height`; those
 producer-measured limits override the legacy fallback independently for each
 keyframe. This matters for mixed platforms whose lidars sit at different
-heights. Legacy Gazebo captures use an explicit `--min-z 0.08 --max-z 2.20`.
 
 Each prepared cloud stores two coarse representations:
 
@@ -88,7 +87,6 @@ capture gap is at most 60 seconds. Candidate transforms must fit deliberately
 generous Bunker kinematic bounds. These constraints use elapsed time and robot
 physics, not a reported displacement.
 
-The 60-second value is measured, not arbitrary. Gazebo suppresses keyframes
 during turns and produced valid 10--42 second gaps in `3d-run-01`, with less
 than one metre of true displacement. The former 10-second cutoff split that
 run into 20 fragments and enabled a globally consistent 180-degree corridor
@@ -162,7 +160,6 @@ scan chain simply by being sampled densely.
 
 ## Four-robot coordinated results (2026-08-30)
 
-`coordinated-gt-run-10` is a clean four-robot Gazebo capture produced by the
 joint frontier planner. Ground truth was recorded in a separate evaluation
 process and was never subscribed to by the planner or reconstruction service.
 The final cold replay contains 288 calibrated keyframes:
@@ -200,9 +197,7 @@ The capture also exposed three aliasing edge cases now covered by regressions:
   high-score alias to a later fragment. Coarse starts still never seed ICP or
   enter the pose graph as factors.
 
-## Gazebo ground-truth results (2026-08-26)
 
-`3d-run-01` contains 239 keyframes from two robots and surveyed Gazebo poses.
 The reconstruction uses no saved pose or odometry:
 
 - 235 keyframes form the verified two-robot component; four weak tail scans
@@ -219,7 +214,6 @@ fragment-pair connection, 51 intra-fragment loops are accepted, and all 282
 keyframes form one visually coherent component. This is a structural check,
 not a metric accuracy claim, because the capture has no ground truth.
 
-A fresh run, `gazebo-odomfree-20260826`, was then generated after the initial
 algorithm and thresholds were chosen. It contains 221 calibrated keyframes and
 9,982 synchronized truth poses from a ten-minute exploration:
 
@@ -240,7 +234,6 @@ right release gate.
 
 ### Severe odometry-fault replay (2026-08-27)
 
-The same fresh Gazebo keyframes were copied into a deterministic fault-injection
 dataset. The compressed point-cloud and descriptor body of every packet is
 byte-identical to the clean capture; only `t_odom_base` differs. Each robot has
 an independent fault history containing sample jitter (0.12 m / 4 degrees),
@@ -277,9 +270,6 @@ robot-frame error. Its merged map contains many rotated copies of the building.
 
 The reproducible inputs and outputs are:
 
-- `sessions/analysis/datasets/gazebo-odom-jitter-20260827/`;
-- `sessions/analysis/gazebo-odom-jitter-20260827/`;
-- `sessions/analysis/gazebo-odom-jitter-production-hessian-20260827/`.
 
 ## Hardware result (2026-08-26)
 
@@ -355,7 +345,6 @@ Create a repeatable odometry-jitter/slip/reset replay from any saved capture:
 
 ```bash
 .venv/bin/python tools/inject_odometry_faults.py \
-  ../sessions/captures/gazebo-odomfree-20260826 \
   --output ../sessions/analysis/datasets/my-odometry-fault-test \
   --seed 20260827
 ```

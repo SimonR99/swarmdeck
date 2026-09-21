@@ -458,10 +458,6 @@ def test_rendered_onboard_compose_uses_one_resettable_ros_domain():
     compose = repo / "deploy" / "compose"
     files = [
         "docker-compose.yml",
-        "docker-compose.mgg.yml",
-        "docker-compose.peers.yml",
-        "docker-compose.mapping.yml",
-        "docker-compose.onboard-planning.yml",
     ]
     command = ["docker", "compose", "-p", "reset-contract"]
     for name in files:

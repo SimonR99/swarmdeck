@@ -39,7 +39,7 @@
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
-  import { postGlobalRasterGoal, usesLiveComponentGoal } from './globalGoal';
+  import { postGlobalRasterGoal } from './globalGoal';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import ReplicaCatalogueSelector from '$lib/components/replicas/ReplicaCatalogueSelector.svelte';
   import ReplicaCatalogueAuto from '$lib/components/replicas/ReplicaCatalogueAuto.svelte';
@@ -91,7 +91,7 @@
   let showPlans = $state(true);
   let showNetwork = $state(false);
   let showCostmap = $state(false);
-  let costmapKind = $state<'global' | 'local'>('global');
+  let costmapKind = $state<'local'>('local');
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
 
@@ -592,33 +592,28 @@
       return;
     }
 
-    // Point navigation is deliberately armed first to prevent accidental goals
-    // while the operator pans or inspects the map.
     const g = gridOf(clickX, clickY);
     const world = mapStore.gridToWorld(g.gx, g.gy);
     if (!world) return;
     const targets = qualifiedNavigateTargets();
     const scope = mapStore.globalOptimizedScope;
-    if (usesLiveComponentGoal(mapStore.viewMode, scope)) {
-      // A verified component raster: the click is a component-frame point,
-      // fenced by the displayed solution order like a 3D pick.
-      for (const id of targets) {
-        void postGlobalRasterGoal(id, scope, world).catch((reason) => {
-          session.addAlert({
-            id: `raster_goal_${id}`,
-            level: 'warn',
-            kind: 'fault',
-            robot_id: id,
-            message: `Goal on the merged map refused: ${reason instanceof Error ? reason.message : String(reason)}`,
-            t_wall: Date.now() / 1000,
-            acknowledged: false
-          });
-        });
-      }
-      if (targets.length) navigation.finishGoal(world);
+    if (!scope) {
+      navigation.cancelGoalMode();
       return;
     }
-    for (const id of targets) actions.setGoal(id, world, mapStore.info?.transforms?.[id]);
+    for (const id of targets) {
+      void postGlobalRasterGoal(id, scope, world).catch((reason) => {
+        session.addAlert({
+          id: `raster_goal_${id}`,
+          level: 'warn',
+          kind: 'fault',
+          robot_id: id,
+          message: `Goal on the raster refused: ${reason instanceof Error ? reason.message : String(reason)}`,
+          t_wall: Date.now() / 1000,
+          acknowledged: false
+        });
+      });
+    }
     if (targets.length) navigation.finishGoal(world);
   }
 
@@ -644,7 +639,7 @@
       : fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null
   );
   const viewedCostmap = $derived(
-    mapStore.costmapLayer(viewedCostmapRobotId, costmapKind)
+    mapStore.costmapLayer(viewedCostmapRobotId, 'local')
   );
   const resetRobotBlocked = $derived(
     resetPending || !resetRobot
@@ -793,28 +788,14 @@
           <span class="flex items-center gap-2"><Wifi class="h-3.5 w-3.5" /> Network heatmap</span>
           <span class="font-semibold {showNetwork ? 'text-accent' : 'text-fg-dim'}">{showNetwork ? 'ON' : 'OFF'}</span>
         </button>
-        <div class="mt-1 rounded-[--radius-control] bg-surface-2/60 px-1.5 py-1">
-          <button
-            class="flex h-8 w-full items-center justify-between rounded-[--radius-control] px-0 text-fg-muted hover:bg-surface-2"
-            title="Read-only Nav2 planner costmap for the selected robot"
-            onclick={() => (showCostmap = !showCostmap)}
-          >
-            <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Navigation costmap</span>
-            <span class="font-semibold {showCostmap ? 'text-accent' : 'text-fg-dim'}">{showCostmap ? 'ON' : 'OFF'}</span>
-          </button>
-          {#if showCostmap}
-            <div class="flex gap-1 border-t border-border pt-1">
-              <button
-                class="h-7 flex-1 rounded-[--radius-control] text-[9px] {costmapKind === 'global' ? 'bg-surface text-fg' : 'text-fg-dim hover:bg-surface'}"
-                onclick={() => (costmapKind = 'global')}
-              >Global</button>
-              <button
-                class="h-7 flex-1 rounded-[--radius-control] text-[9px] {costmapKind === 'local' ? 'bg-surface text-fg' : 'text-fg-dim hover:bg-surface'}"
-                onclick={() => (costmapKind = 'local')}
-              >Local</button>
-            </div>
-          {/if}
-        </div>
+        <button
+          class="mt-1 flex h-9 w-full items-center justify-between rounded-[--radius-control] bg-surface-2/60 px-1.5 text-fg-muted hover:bg-surface-2"
+          title="Read-only local controller costmap for the selected robot"
+          onclick={() => (showCostmap = !showCostmap)}
+        >
+          <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Local costmap</span>
+          <span class="font-semibold {showCostmap ? 'text-accent' : 'text-fg-dim'}">{showCostmap ? 'ON' : 'OFF'}</span>
+        </button>
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           aria-pressed={show3D}
@@ -835,31 +816,14 @@
 
         <div class="my-2 border-t border-border"></div>
         <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
-          Map estimate
+          Map raster
         </div>
-        <div class="mb-1 flex gap-1">
-          <button
-            class="flex h-9 flex-1 items-center justify-center rounded-[--radius-control] px-1.5
-                   {mapStore.mapSource === 'slam'
-                     ? 'bg-surface-2 text-fg'
-                     : 'text-fg-muted hover:bg-surface-2'}"
-            title="The grid each robot's own SLAM package built, in its own frame"
-            onclick={() => void mapStore.setMapSource('slam')}
-          >
-            Robot SLAM
-          </button>
-          <button
-            class="flex h-9 flex-1 items-center justify-center rounded-[--radius-control] px-1.5
-                   {mapStore.mapSource === 'optimized'
-                     ? 'bg-surface-2 text-fg'
-                     : 'text-fg-muted hover:bg-surface-2'}"
-            title={mapStore.globalOptimizedLabel
-              ? `Keyframe occupancy posed by the collaborative solver. Showing: ${mapStore.globalOptimizedLabel}.`
-              : 'Keyframe occupancy posed by the collaborative solver. Falls back to Robot SLAM until that grid exists.'}
-            onclick={() => void mapStore.setMapSource('optimized')}
-          >
-            Optimised
-          </button>
+        <div class="mb-1 rounded-[--radius-control] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
+          {#if mapStore.globalOptimizedLabel}
+            Showing {mapStore.globalOptimizedLabel}
+          {:else}
+            Waiting for a replica raster
+          {/if}
         </div>
         {#if mapStore.unmergedRobots.length}
           <div class="mb-1 rounded-[--radius-control] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">

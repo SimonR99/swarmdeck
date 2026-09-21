@@ -23,9 +23,6 @@ fleet:
     profile: vlp16
 
 map:
-  merge_mode: graph         # pose-graph occupancy; no grid registration
-  size_m: 120.0             # merged grid extent for the Bistro street network
-  resolution: 0.05
   # Shared street deployment on the crown of the road. The street is cambered
   # into a gutter along the west kerb (x near -14.9): at x = -14 the Scout slid
   # 0.4 m west after every spawn and came to rest against the kerb, where its

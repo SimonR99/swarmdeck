@@ -12,7 +12,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-import websockets
 
 
 def json_request(base_url, path, body=None, timeout=5.0):
@@ -301,6 +300,7 @@ async def verify_stopped(args, robot_ids):
 
 
 async def run(args):
+    import websockets
     fleet = simulation_fleet(args)
     robot_ids = {robot["robot_id"] for robot in fleet}
     ws_url = (

@@ -203,7 +203,6 @@ def main():
                 "SWARMDECK_INTER_ROBOT_CLOSURES": "true",
                 "SWARMDECK_SERVER_URL": "",
                 "SWARMDECK_MAP_STORE": str(directory / "maps"),
-                "SWARMDECK_NAVIGATION_FRAME": f"{robot}/odom",
             }
             stream = (directory / f"peer{index}.log").open("w")
             streams.append(stream)

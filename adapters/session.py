@@ -8,7 +8,6 @@ this loop looks up by name; missing methods are skipped.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import time
 from collections.abc import Callable
@@ -64,17 +63,17 @@ async def _offload(loop: asyncio.AbstractEventLoop, bridge: Any, name: str) -> A
 def command_matches_map_epoch(bridge, msg):
     kind = msg.get("type")
     moving = (
-        kind in {"navigate_to", "plan_objective", "body_command"}
+        kind in {"plan_objective", "body_command"}
         or (kind == "explore" and msg.get("enabled") is True)
         or (
             kind == "drive"
             and (msg.get("linear", 0) != 0 or msg.get("angular", 0) != 0)
         )
     )
-    if not moving or not getattr(bridge, "onboard_mapping", False):
-        return True
     reader = getattr(bridge, "_mapping_authority", None)
-    authority = None if reader is None else reader.current()
+    if not moving or reader is None:
+        return True
+    authority = reader.current()
     return authority is not None and (
         msg.get("mission_id") == authority["mission_id"]
         and msg.get("robot_map_epoch") == authority["robot_map_epoch"]
@@ -118,9 +117,7 @@ async def dispatch_command(
                         exploration.start()
             else:
                 exploration.stop()
-            return
         if kind in (
-            "navigate_to",
             "plan_objective",
             "cancel_goal",
             "drive",
@@ -162,41 +159,23 @@ async def dispatch_command(
 
             pending.add_done_callback(completed)
             return
-        if getattr(bridge, "onboard_mapping", False):
-            _emit(bridge, "warning", "Onboard objective planner is unavailable")
-            return
-        if objective == "return_home":
-            fn = getattr(bridge, "return_home", None)
+        if objective in ("return_home", "navigate"):
+            fn = getattr(
+                bridge, "return_home" if objective == "return_home" else "plan_objective", None
+            )
             if callable(fn):
-                await loop.run_in_executor(None, fn)
-        elif objective == "navigate":
-            fn = getattr(bridge, "plan_objective", None)
-            if callable(fn):
-                await loop.run_in_executor(None, fn, objective, msg.get("goal", {}))
-    elif kind == "navigate_to":
-        fn = bridge.navigate_to
-        goal = msg.get("goal", {})
-        try:
-            takes_path = len(inspect.signature(fn).parameters) > 1
-        except (TypeError, ValueError):
-            takes_path = False
+                # The epoch check and the call share one lock hold on the
+                # worker thread; holding the lock across an await would block
+                # the callback that advances the epoch.
+                def run_if_current():
+                    with getattr(bridge, "_goal_lock", nullcontext()):
+                        if not command_matches_map_epoch(bridge, msg):
+                            return None
+                        if objective == "return_home":
+                            return fn()
+                        return fn(objective, msg.get("goal", {}))
 
-        def navigate_if_current():
-            with getattr(bridge, "_goal_lock", nullcontext()):
-                if not command_matches_map_epoch(bridge, msg):
-                    return
-                planner = getattr(bridge, "objective_planner", None)
-                claim = getattr(planner, "claim_objective", None)
-                execute = getattr(planner, "execute_claimed", None)
-                if not callable(claim) or not callable(execute):
-                    return fn(goal, msg.get("path")) if takes_path else fn(goal)
-                owned = claim("navigate", goal)
-            # Planning can block on MGG; never hold the cancellation lock while
-            # computing. execute_claimed checks the generation reserved above.
-            if owned is not None:
-                return execute(owned)
-
-        await loop.run_in_executor(None, navigate_if_current)
+                await loop.run_in_executor(None, run_if_current)
     elif kind == "cancel_goal":
         (getattr(bridge, "cancel_goal", None) or bridge.cancel)()
     elif kind == "drive":
@@ -263,29 +242,10 @@ async def _tx_maps(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
     rates = cfg["rates"]
     tick = 1.0 / float(rates["state_hz"])
     loop = asyncio.get_running_loop()
-    last_map = 0.0
-    last_cloud = 0.0
     last_settings = 0.0
-    last_nav_map = 0.0
     while True:
         now = time.monotonic()
-        if now - last_map > float(rates["map_period_s"]):
-            meta = await _offload(loop, bridge, "upload_map")
-            if meta:
-                await send(meta)
-            await _offload(loop, bridge, "upload_scan")
-            last_map = time.monotonic()
         await _offload(loop, bridge, "upload_costmaps")
-        if now - last_cloud > float(rates["cloud_period_s"]):
-            await _offload(loop, bridge, "upload_cloud")
-            last_cloud = time.monotonic()
-        if not getattr(bridge, "onboard_mapping", False):
-            await _offload(loop, bridge, "upload_keyframe")
-        if not getattr(bridge, "onboard_mapping", False) and now - last_nav_map > float(
-            rates.get("nav_map_period_s", rates.get("map_period_s", 2.0))
-        ):
-            await _offload(loop, bridge, "pull_nav_map")
-            last_nav_map = time.monotonic()
         extra = getattr(bridge, "session_maps_tick", None)
         if callable(extra):
             await extra(now, send, loop)

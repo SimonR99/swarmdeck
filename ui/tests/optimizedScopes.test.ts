@@ -36,9 +36,9 @@ test('with merges off only the deployment composite qualifies for the global vie
   assert.equal(selectGlobalOptimizedScope(scopes)?.scope, `deployment:${session}`);
 });
 
-test('single-robot and unknown scopes never reach the global view', () => {
+test('single-robot components are excluded but deployment fallback remains eligible', () => {
   assert.equal(selectGlobalOptimizedScope([scope('component:0', ['robot_0'])]), undefined);
-  assert.equal(selectGlobalOptimizedScope([scope(`deployment:${session}`, ['robot_0'])]), undefined);
+  assert.equal(selectGlobalOptimizedScope([scope(`deployment:${session}`, ['robot_0'])])?.scope, `deployment:${session}`);
   assert.equal(selectGlobalOptimizedScope([scope('fleet:x', ['robot_0', 'robot_1'])]), undefined);
   assert.equal(selectGlobalOptimizedScope([]), undefined);
 });

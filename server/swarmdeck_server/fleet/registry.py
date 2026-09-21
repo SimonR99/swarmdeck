@@ -356,11 +356,12 @@ class Registry:
 
     async def send(self, robot_id: str, msg: dict[str, Any]) -> bool:
         moving = (
-            msg.get("type") in {"navigate_to", "plan_objective", "body_command"}
-            or (msg.get("type") == "explore" and msg.get("enabled"))
+            msg.get("type") in {"plan_objective", "body_command"}
             or (
-                msg.get("type") == "drive" and (msg.get("linear") or msg.get("angular"))
+                msg.get("type") == "drive"
+                and (msg.get("linear") or msg.get("angular"))
             )
+            or (msg.get("type") == "explore" and msg.get("enabled"))
         )
         if moving and self.command_guard and self.command_guard(robot_id):
             return False

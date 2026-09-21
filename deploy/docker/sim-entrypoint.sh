@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Start the ROS side of the simulated fleet, then adapter_sim.
-#
-# The simulator itself is NOT started here: `launch_argos:=false` leaves it to
-# the `argos` service, which is the container with Vulkan and no ROS. What this
-# does start is the world and experiment generation, the bridge that ARGoS
-# dials, and the per-robot SLAM and Nav2 stacks.
+# Start the ROS side of the ARGoS simulated fleet, then its adapter.
 set -eo pipefail
 
 # ROS setup scripts reference optional unbound vars; disable nounset while sourcing.
@@ -19,22 +14,10 @@ BACKEND_HOST="${BACKEND_HOST:-server}"
 BACKEND_PORT="${BACKEND_PORT:-8080}"
 CONFIG="${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
 RUNTIME_DIR="${RUNTIME_DIR:-/run/swarmdeck}"
-SIM_BACKEND="${SWARMDECK_SIM_BACKEND:-argos}"
-# Must outlast session.launch.py's staggered per-robot bringup, or the adapter
-# starts advertising robots whose SLAM is not active yet.
+# Must outlast staggered per-robot bringup before adapter discovery.
 ADAPTER_DELAY="${ADAPTER_DELAY:-60}"
-SLAM_BACKEND="${SLAM_BACKEND:-toolbox}"
-GRID_3D="${GRID_3D:-false}"
 TARGETS="${SWARMDECK_TARGETS:-10}"
-# external = Ultra-Fusion. drift = ARGoS's synthetic model, ~4x faster and
-# correspondingly less faithful; see docs/architecture/simulation.md. With
-# drift the generated experiment declares no <external_estimator>, so the
-# ultrafusion service is simply not needed.
 ODOMETRY="${SWARMDECK_ODOMETRY:-fast_livo2}"
-# Seconds of reactive exploration after startup, to bootstrap the maps before
-# the operator takes over. 0 leaves the fleet stationary until a goal arrives
-# or the operator presses Explore. Read by adapter_sim, which owns the process;
-# exported below so it reaches that process rather than the launch file.
 EXPLORE_SECONDS="${EXPLORE_SECONDS:-0}"
 export EXPLORE_SECONDS
 
@@ -60,18 +43,14 @@ rm -f "${RUNTIME_DIR}/session.argos" "${RUNTIME_DIR}/indoor.gltf" \
       "${RUNTIME_DIR}/indoor.bin" "${RUNTIME_DIR}/indoor_collision.gltf" \
       "${RUNTIME_DIR}/indoor_collision.bin"
 
-echo "[sim] launching session config=${CONFIG} backend=${SIM_BACKEND}" \
-     "slam_backend=${SLAM_BACKEND} explore_seconds=${EXPLORE_SECONDS}"
+echo "[sim] launching session config=${CONFIG}"
 ros2 launch swarmdeck_bringup session.launch.py \
   "config:=${CONFIG}" \
-  "sim_backend:=${SIM_BACKEND}" \
   "runtime_dir:=${RUNTIME_DIR}" \
   "launch_argos:=false" \
   "targets:=${TARGETS}" \
   "odometry:=${ODOMETRY}" \
   "headless:=true" \
-  "slam_backend:=${SLAM_BACKEND}" \
-  "grid_3d:=${GRID_3D}" \
   &
 LAUNCH_PID=$!
 
@@ -96,9 +75,6 @@ ADAPTER_ARGS=(--host "${BACKEND_HOST}" --port "${BACKEND_PORT}")
 if [ -n "${SWARMDECK_ROBOT_COUNT:-}" ]; then
   ADAPTER_ARGS+=(--robots "${SWARMDECK_ROBOT_COUNT}")
 fi
-# The adapter resets a simulation it did not start, and the two backends reset
-# differently. It cannot probe for the difference cheaply, so it is told.
-export SWARMDECK_SIM_BACKEND="${SIM_BACKEND}"
 python3 /app/adapters/adapter_sim/adapter_sim.py "${ADAPTER_ARGS[@]}" &
 ADAPTER_PID=$!
 

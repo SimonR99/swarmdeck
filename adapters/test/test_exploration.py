@@ -37,23 +37,23 @@ def test_exploration_uses_configured_stable_planning_frame(monkeypatch):
     )
     node = Mock()
     node.create_client.return_value = Mock()
-    bridge = NS(id="r0", map_frame="r0/map_frame", node=node)
+    bridge = NS(id="r0", navigation_frame="r0/navigation_frame", node=node)
 
     explorer = MggExploration(bridge, {})
 
     assert explorer.frame == "r0/odom"
     with pytest.raises(ValueError, match="configured MGG planning frame"):
-        MggExploration(bridge, {"frame": "r0/map_frame"})
+        MggExploration(bridge, {"frame": "r0/navigation_frame"})
 
 
 def rig():
     bridge = Mock()
-    bridge.onboard_mapping = False
+    bridge._mapping_authority = None
     bridge._goal_lock = RLock()
     bridge.objective_planner = None
     # Explicit callables avoid Python 3.14's executor shutdown waiting forever
     # on a dynamically-created Mock child after dispatch_command offloads it.
-    bridge.navigate_to = Mock()
+    bridge.plan_objective = Mock()
     bridge.follow_path = Mock()
     bridge.id = "r"
     bridge.cfg = {"link_timeout_s": 5}
@@ -411,7 +411,7 @@ def test_manual_goal_preempts_exploration():
     explorer.start()
     goal = {"x": 3, "y": 4}
     received = []
-    bridge.navigate_to = received.append
+    bridge.plan_objective = lambda _objective, goal: received.append(goal)
 
     async def run():
         class InlineLoop:
@@ -424,7 +424,9 @@ def test_manual_goal_preempts_exploration():
                 return future
 
         await dispatch_command(
-            bridge, {"type": "navigate_to", "goal": goal}, InlineLoop()
+            bridge,
+            {"type": "plan_objective", "objective": "navigate", "goal": goal},
+            InlineLoop(),
         )
 
     asyncio.run(run())

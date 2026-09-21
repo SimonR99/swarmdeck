@@ -7,7 +7,6 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
-import zlib
 import numpy as np
 import pytest
 from starlette.requests import Request
@@ -21,8 +20,6 @@ from autonomy.reconstruction import (
     ReconstructionBackend,
     ResourceBudget,
 )
-from swarmdeck_server.mapsvc.service import MapService
-from swarmdeck_server.mapsvc.output import merged_cloud
 
 spec = importlib.util.spec_from_file_location(
     "umami", Path(__file__).parents[2] / "scripts/reconstruction/umami.py"
@@ -42,18 +39,6 @@ def test_projection_rejects_occluded_behind_and_out_of_image_points():
     _, mask = colorize_points(points, rgb, k, np.eye(4), depth=np.full((3, 3), 0.5))
     assert not mask.any()
 
-
-def test_colors_follow_same_voxels_and_clear_with_cloud():
-    service = MapService()
-    points = np.array([[0, 0, 0], [0.01, 0, 0], [1, 0, 0]], dtype=np.float32)
-    rgb = np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8)
-    service.set_cloud("r", points, rgb=rgb, register=False)
-    rgb[:] = 0
-    xyz, owners, names, colors = merged_cloud(service, robot_id="r", include_rgb=True)
-    assert names == ["r"] and len(xyz) == 2
-    assert colors.tolist() == [[128, 128, 0], [0, 0, 255]]
-    service.set_cloud("r", points, register=False)
-    assert merged_cloud(service, robot_id="r", include_rgb=True)[3] is None
 
 
 def test_pose_export_inverts_camera_pose_and_preserves_metric_depth(tmp_path):
@@ -395,35 +380,6 @@ def test_job_publication_is_served_with_source_metadata_and_stale_rejection(
     assert Path(after_stale.path).read_bytes() == target.read_bytes()
 
 
-def test_cloud_float_transport_preserves_far_coordinates_and_rgb(monkeypatch):
-    from swarmdeck_server.api import map_routes
-
-    service = MapService()
-    service.set_cloud(
-        "r",
-        np.array([[1000, 2, 3]], dtype=np.float32),
-        rgb=np.array([[255, 0, 0]], dtype=np.uint8),
-        register=False,
-    )
-    monkeypatch.setattr(map_routes, "map_service", service)
-    request = Request(
-        {"type": "http", "query_string": b"robot_id=r&format=xyz32", "headers": []}
-    )
-    response = asyncio.run(map_routes.get_cloud(request))
-    assert response.status_code == 200
-    assert response.headers["X-Cloud-Frame"] == "local"
-    raw = zlib.decompress(response.body)
-    assert np.frombuffer(raw, dtype="<f4", count=3).tolist() == [1000, 2, 3]
-    assert list(raw[13:]) == [255, 0, 0]
-    request = Request(
-        {
-            "type": "http",
-            "query_string": b"robot_id=r&format=xyz32",
-            "headers": [(b"if-none-match", response.headers["etag"].encode())],
-        }
-    )
-    assert asyncio.run(map_routes.get_cloud(request)).status_code == 304
-
 
 def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
     from types import SimpleNamespace as NS
@@ -456,116 +412,6 @@ def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
     ]
 
 
-def test_local_slam_fallback_keeps_world_frame_metadata(monkeypatch):
-    from swarmdeck_server.api import map_routes
-    from swarmdeck_server.mapsvc import graph_bridge
-    import urllib.request
-    from io import BytesIO
-
-    service = MapService()
-    monkeypatch.setattr(map_routes, "map_service", service)
-    monkeypatch.setattr(graph_bridge, "SLAM_URL", "http://unused")
-    body = zlib.compress(np.array([800, 2100, 50], dtype="<i2").tobytes() + bytes([0]))
-
-    class Upstream(BytesIO):
-        headers = {
-            "X-Cloud-Points": "1",
-            "X-Cloud-Robots": "r",
-            "X-Cloud-Scale": "0.01",
-        }
-
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: Upstream(body))
-    response = asyncio.run(
-        map_routes.get_cloud(
-            Request({"type": "http", "headers": [], "query_string": b"robot_id=r"})
-        )
-    )
-    assert response.headers["X-Cloud-Frame"] == "world"
-    assert response.body == body
-
-
-@pytest.mark.parametrize("source", ["optimized", "slam"])
-def test_cloud_source_selects_reconstruction_even_with_live_scan(monkeypatch, source):
-    from io import BytesIO
-    import urllib.request
-    from swarmdeck_server.api import map_routes
-    from swarmdeck_server.mapsvc import graph_bridge
-
-    service = MapService()
-    service.set_cloud("r", np.array([[1, 2, 3]], dtype=np.float32), register=False)
-    monkeypatch.setattr(map_routes, "map_service", service)
-    monkeypatch.setattr(graph_bridge, "SLAM_URL", "http://slam")
-    body = zlib.compress(np.array([800, 2100, 50], dtype="<i2").tobytes() + bytes([0]))
-    calls = []
-
-    class Upstream(BytesIO):
-        headers = {
-            "X-Cloud-Points": "1",
-            "X-Cloud-Robots": "r",
-            "X-Cloud-Scale": "0.01",
-            "X-Cloud-Frame": "world",
-        }
-
-    def upstream(url, **kwargs):
-        calls.append(url)
-        return Upstream(body)
-
-    monkeypatch.setattr(urllib.request, "urlopen", upstream)
-    response = asyncio.run(
-        map_routes.get_cloud(
-            Request(
-                {
-                    "type": "http",
-                    "headers": [],
-                    "query_string": f"robot_id=r&source={source}".encode(),
-                }
-            )
-        )
-    )
-    assert response.status_code == 200
-    if source == "optimized":
-        assert calls == ["http://slam/cloud?robot_id=r"]
-        assert response.body == body
-        assert response.headers["X-Cloud-Frame"] == "world"
-    else:
-        assert calls == []
-        assert np.frombuffer(
-            zlib.decompress(response.body), dtype="<f4", count=3
-        ).tolist() == [1, 2, 3]
-        assert response.headers["X-Cloud-Frame"] == "local"
-
-
-def test_optimized_cloud_keeps_live_fallback_when_reconstruction_is_empty(monkeypatch):
-    from io import BytesIO
-    import urllib.request
-    from swarmdeck_server.api import map_routes
-    from swarmdeck_server.mapsvc import graph_bridge
-
-    service = MapService()
-    service.set_cloud("r", np.array([[1, 2, 3]], dtype=np.float32), register=False)
-    monkeypatch.setattr(map_routes, "map_service", service)
-    monkeypatch.setattr(graph_bridge, "SLAM_URL", "http://slam")
-
-    class Empty(BytesIO):
-        headers = {"X-Cloud-Points": "0"}
-
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **kw: Empty(zlib.compress(b""))
-    )
-    response = asyncio.run(
-        map_routes.get_cloud(
-            Request(
-                {
-                    "type": "http",
-                    "headers": [],
-                    "query_string": b"robot_id=r&source=optimized",
-                }
-            )
-        )
-    )
-    assert response.status_code == 200
-    assert response.headers["X-Cloud-Points"] == "1"
-    assert response.headers["X-Cloud-Frame"] == "local"
 
 
 @pytest.mark.parametrize(

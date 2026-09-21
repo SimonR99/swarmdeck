@@ -166,19 +166,17 @@ class Supervisor:
         prune_volume: str = "",
         prune_image: str = "",
         robot_ids: list[str] | None = None,
-        backend: str = "unavailable",
     ):
         self.prune_volume, self.prune_image = prune_volume, prune_image
         self.root, self.env_file = root, env_file
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
         self._status_lock = Lock()
-        self.backend = backend
         self.robot_services = {
             robot: f"peer{index}" for index, robot in enumerate(robot_ids or [])
         }
         required = {"mgg", "mapping", "mapping-query", *self.robot_services.values()}
-        if backend != "mola" or not required.issubset(services):
+        if not required.issubset(services):
             self.robot_services = {}
         # Publish the complete writable protocol tree before advertising a
         # heartbeat: a root server must never win creation of requests/ first.
@@ -204,7 +202,6 @@ class Supervisor:
                 "version": 1,
                 "pid": os.getpid(),
                 "updated_at_ns": time.time_ns(),
-                "backend": self.backend,
                 "supported_robot_ids": list(self.robot_services),
                 "mission_id": read_deployment_env(self.env_file).get(
                     "SWARMDECK_MISSION_ID"
@@ -552,7 +549,7 @@ class Supervisor:
             if request["robot_id"] not in self.robot_services:
                 raise RuntimeError(
                     f"robot-local reset unavailable for {request['robot_id']} "
-                    f"on backend {self.backend}"
+                    "because the CSLAM peer is not active"
                 )
             current = read_deployment_env(self.env_file)
             if request["mission_id"] != current.get("SWARMDECK_MISSION_ID"):
@@ -715,7 +712,6 @@ def main() -> None:
     parser.add_argument("--poll", type=float, default=0.5)
     parser.add_argument("--server-url", default="http://127.0.0.1:8080")
     parser.add_argument("--expected-robots", type=int, default=0)
-    parser.add_argument("--backend", default="unavailable")
     parser.add_argument("--robot-id", action="append", default=[])
     parser.add_argument(
         "--prune-maps-volume",
@@ -775,7 +771,6 @@ def main() -> None:
         args.prune_maps_volume,
         args.prune_maps_image,
         args.robot_id,
-        args.backend,
     )
     # A second supervisor could otherwise claim a request after a stale timeout
     # while the first one is still changing the same Compose project.

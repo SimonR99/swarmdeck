@@ -197,30 +197,6 @@ export interface DetectionClass {
   min_score?: number;
 }
 
-export interface MapInfo {
-  resolution: number;
-  width: number;
-  height: number;
-  origin: Point;
-  seq: number;
-  transforms?: Record<string, Pose>;
-}
-
-export interface MapPatch {
-  type: 'map_patch';
-  seq: number;
-  resolution: number;
-  origin: Point;
-  width?: number;
-  height?: number;
-  x0: number;
-  y0: number;
-  w: number;
-  h: number;
-  /** base64(zlib(int8[])) row-major, -1 unknown / 0 free / 100 occupied */
-  data: string;
-  transforms?: Record<string, Pose>;
-}
 
 /** Incremental robot-local Wi-Fi quality grid; 255 means no sample. */
 export interface NetworkPatch {
@@ -239,7 +215,7 @@ export interface NetworkPatch {
   data: string;
 }
 
-export type CostmapKind = 'global' | 'local';
+export type CostmapKind = 'local';
 
 /** Full read-only Nav2 planner-cost overlay, encoded top-down for canvas blitting. */
 export interface CostmapPatch {
@@ -316,7 +292,7 @@ export interface CslamDisagreement {
 export interface MapStatus {
   mode: 'static' | 'auto' | 'cslam';
   reference: string | null;
-  transforms: Record<string, Pose>;
+  // Raster transforms are response provenance, never status fallback data.
   registrations: Record<string, MapRegistration>;
   global_members: string[];
   view_by_robot: Record<string, 'global' | 'local'>;
@@ -467,7 +443,6 @@ export interface SimResetSupervisorStatus {
 
 export type ServerMessage =
   | RobotState
-  | MapPatch
   | NetworkPatch
   | CostmapPatch
   | { type: 'network_clear'; robot_id: string | null }
@@ -481,13 +456,11 @@ export type ServerMessage =
   | { type: 'settings_state'; settings: AppSettings }
   | ({ type: 'detection_review' } & DetectionReview)
   | { type: 'slam_graph'; robot_id: string; graph: SlamGraph }
-  | SimReset
-  | { type: 'map_info'; info: MapInfo };
+  | SimReset;
 
 /* ---------- GUI → server ---------- */
 
 export type ClientMessage =
-  | { type: 'set_goal'; robot_id: string; payload: Point & { map_transform?: Pose } }
   | { type: 'cancel_goal'; robot_id: string }
   | { type: 'return_home'; robot_id: string }
   | { type: 'drive'; robot_id: string; payload: { linear: number; angular: number } }

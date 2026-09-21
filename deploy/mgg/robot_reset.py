@@ -43,12 +43,7 @@ def quiesce(node, robot, deadline):
     from action_msgs.srv import CancelGoal
     from geometry_msgs.msg import Twist
 
-    # Discovery is incremental: seeing the controller alone does not mean the
-    # navigator is visible yet. Both must be cancelled to prevent replanning.
-    required = {
-        f"/{robot}/{action}/_action/cancel_goal"
-        for action in ("follow_path", "navigate_to_pose")
-    }
+    required = {f"/{robot}/follow_path/_action/cancel_goal"}
     while time.monotonic() < deadline:
         services = dict(node.get_service_names_and_types())
         if all(
@@ -57,7 +52,7 @@ def quiesce(node, robot, deadline):
             break
         rclpy.spin_once(node, timeout_sec=0.1)
     else:
-        raise TimeoutError(f"navigation action servers unavailable for {robot}")
+        raise TimeoutError(f"trajectory action server unavailable for {robot}")
     with ExitStack() as resources:
         publisher = node.create_publisher(Twist, f"/{robot}/cmd_vel", 1)
         resources.callback(node.destroy_publisher, publisher)
@@ -82,72 +77,29 @@ def quiesce(node, robot, deadline):
 
 
 class SourceResetter:
-    """Borrow a supervisor node and retain its source clients across map runs."""
+    """Quiesce navigation and clear the live local costmap for a new epoch."""
 
     def __init__(self, node, robot):
         from nav2_msgs.srv import ClearEntireCostmap
-        from slam_toolbox.srv import Reset
-        from std_srvs.srv import Empty
 
         self.node, self.robot = node, robot
-        self.candidates = tuple(
-            (node.create_client(kind, name), wire, kind)
-            for name, wire, kind in (
-                (f"/{robot}/slam_toolbox/reset", "slam_toolbox/srv/Reset", Reset),
-                (f"/{robot}/rtabmap/reset", "std_srvs/srv/Empty", Empty),
-            )
-        )
-        self.clears = tuple(
-            node.create_client(ClearEntireCostmap, f"/{robot}/{layer}")
-            for layer in (
-                "global_costmap/clear_entirely_global_costmap",
-                "local_costmap/clear_entirely_local_costmap",
-            )
+        self.clear = node.create_client(
+            ClearEntireCostmap,
+            f"/{robot}/local_costmap/clear_entirely_local_costmap",
         )
 
     def reset(self, deadline, *, quiesced=False):
         import rclpy
         from nav2_msgs.srv import ClearEntireCostmap
-        from slam_toolbox.srv import Reset
 
         node, robot = self.node, self.robot
         if not quiesced:
             quiesce(node, robot, deadline)
-        while time.monotonic() < deadline:
-            available = dict(node.get_service_names_and_types())
-            selected = next(
-                (
-                    (client, kind)
-                    for client, wire, kind in self.candidates
-                    if wire in available.get(client.srv_name, [])
-                ),
-                None,
-            )
-            if selected is not None:
-                break
-            rclpy.spin_once(node, timeout_sec=0.1)
-        else:
-            raise TimeoutError(
-                f"no supported active local SLAM reset service for {robot}"
-            )
-        client, kind = selected
-        request = kind.Request()
-        # These clients exist before any reset request. A new ephemeral client
-        # could lose its first destructive reply to Fast DDS discovery races.
-        # Neither SLAM backend's reset is replayable after an ambiguous ACK.
-        if kind is Reset:
-            request.pause_new_measurements = False
-        reply = call(node, client, request, deadline)
-        if kind is Reset and reply.result != Reset.Response.RESULT_SUCCESS:
-            raise RuntimeError(
-                f"local SLAM reset refused by {client.srv_name}: {reply.result}"
-            )
-        for client in self.clears:
-            call(node, client, ClearEntireCostmap.Request(), deadline, idempotent=True)
+        call(node, self.clear, ClearEntireCostmap.Request(), deadline, idempotent=True)
         rclpy.spin_once(node, timeout_sec=0.1)
         stamp = node.get_clock().now().nanoseconds
         if stamp <= 0:
-            raise RuntimeError("simulation clock unavailable after local SLAM reset")
+            raise RuntimeError("simulation clock unavailable after local costmap reset")
         return {
             "source_reset_stamp": {
                 "sec": stamp // 1_000_000_000,

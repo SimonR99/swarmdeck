@@ -70,8 +70,8 @@ STUBBED_ROS_MODULES = [
     # Not imported at module scope — the SLAM reset resolves whichever back end
     # is running through importlib. Stubbed anyway, because without them that
     # lookup silently finds nothing and the reset "fails" for the wrong reason.
-    "slam_toolbox",
-    "slam_toolbox.srv",
+    "peer_slam",
+    "peer_slam.srv",
     "std_srvs",
     "std_srvs.srv",
 ]
@@ -88,7 +88,7 @@ def sim_module():
         yield importlib.import_module("adapter_sim")
     finally:
         sys.path.remove(str(REPO / "adapters" / "adapter_sim"))
-        for name in ("adapter_sim", "sim_cslam", "sim_reset"):
+        for name in ("adapter_sim", "sim_cslam"):
             sys.modules.pop(name, None)
         for name, value in saved.items():
             if value is None:

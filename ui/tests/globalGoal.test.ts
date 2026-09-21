@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import {
   componentGoal,
   postGlobalRasterGoal,
-  usesLiveComponentGoal
+  usesLiveRasterGoal
 } from '../src/lib/components/map2d/globalGoal.ts';
 
-test('only a verified component raster in the global view takes the live goal path', () => {
-  assert.equal(usesLiveComponentGoal('global', 'component:abc'), true);
-  assert.equal(usesLiveComponentGoal('global', 'deployment:session'), false);
-  assert.equal(usesLiveComponentGoal('global', null), false);
-  assert.equal(usesLiveComponentGoal('local', 'component:abc'), false);
+test('every displayed optimized raster uses the live goal path', () => {
+  assert.equal(usesLiveRasterGoal('global', 'component:abc'), true);
+  assert.equal(usesLiveRasterGoal('global', 'deployment:session'), true);
+  assert.equal(usesLiveRasterGoal('local', 'deployment:session'), true);
+  assert.equal(usesLiveRasterGoal('global', null), false);
 });
 
 test('a raster click becomes a component-frame goal at the robot height, heading toward it', () => {

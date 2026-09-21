@@ -50,6 +50,9 @@ def generate_launch_description():
     robot = names[index]
     peer_domain = int(os.environ["ROS_DOMAIN_ID"])
     sensor_domain = int(os.environ.get("SWARMDECK_SENSOR_DOMAIN_ID", peer_domain))
+    backend = os.environ.get("SWARMDECK_SLAM_BACKEND", "cslam").strip().lower()
+    if backend != "cslam":
+        raise ValueError("SWARMDECK_SLAM_BACKEND must be cslam")
     if not 1 <= peer_domain <= 232:
         raise ValueError("Use a dedicated nonzero ROS_DOMAIN_ID for each mission")
     if not 0 <= sensor_domain <= 232:
@@ -131,9 +134,6 @@ def generate_launch_description():
                 "sensor_namespace": ns,
                 "sensor_domain_id": sensor_domain,
                 "use_sim_time": sim_time,
-                "navigation_frame": os.environ.get(
-                    "SWARMDECK_NAVIGATION_FRAME", f"{ns}/map_frame"
-                ),
                 "base_frame": os.environ.get("SWARMDECK_BASE_FRAME", f"{ns}/base_link"),
                 "odom_frame": os.environ.get("SWARMDECK_ODOM_FRAME", f"{ns}/odom"),
                 "cloud_topic": os.environ.get(

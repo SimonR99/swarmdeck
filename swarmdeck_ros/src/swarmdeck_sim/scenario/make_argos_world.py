@@ -17,11 +17,9 @@ Two products, from one mesh builder:
    the objects the detector is asked to find. These are static and committed;
    regenerate with `--props`.
 
-The floor plan, the furniture and the target placement all come from
-`generate_world.py`, which the Gazebo backend also reads, so a run of one
-backend is comparable with a run of the other. Nothing here is random: the
-same seed produces a byte-identical file, which `tests/integration/`
-asserts (NFR-5).
+The floor plan, furniture and target placement are shared with the procedural
+ARGoS session builder in `indoor_geometry.py`. The same seed produces a
+byte-identical file.
 
 Deliberately dependency-free. The mesh builder below is a few hundred lines of
 struct packing rather than a trimesh import, because this runs inside the ROS
@@ -29,8 +27,7 @@ image, where every added dependency is paid for on every build, and because a
 hand-rolled writer emits bytes in an order that cannot drift between library
 versions.
 
-    python3 make_argos_world.py --seed 20260801 -o ../worlds/indoor.gltf
-    python3 make_argos_world.py --props ../../../../argos/assets/props
+    python3 make_argos_world.py --seed 20260801 -o indoor.gltf
 """
 
 from __future__ import annotations
@@ -46,8 +43,8 @@ from typing import Sequence
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-# The floor plan is shared with the Gazebo backend; see the module docstring.
-from generate_world import FURNITURE, LAYOUT, WALL_H  # noqa: E402
+# The floor plan is shared with the ARGoS session builder.
+from indoor_geometry import FURNITURE, LAYOUT, WALL_H  # noqa: E402
 
 Vec3 = tuple[float, float, float]
 

@@ -36,7 +36,6 @@ def test_protocol_remains_cross_uid_accessible_under_restrictive_umask(tmp_path,
                 [],
                 ["mgg", "mapping", "mapping-query", "peer0"],
                 robot_ids=["robot_0"],
-                backend="mola",
             )
         else:
             PlannerSupervisor(
@@ -164,7 +163,7 @@ def deployment(tmp_path, monkeypatch):
         "deploy.simulation_reset.urllib.request.urlopen", fleet_response
     )
 
-    def supervisor(backend="mola"):
+    def supervisor():
         return Harness(
             root,
             env,
@@ -172,7 +171,6 @@ def deployment(tmp_path, monkeypatch):
             ["sim", "mgg", "mapping", "mapping-query", "peer0", "peer1", "peer2"],
             "http://server",
             robot_ids=names,
-            backend=backend,
         )
 
     def submit(robot="robot_1", request_id=None):
@@ -261,16 +259,8 @@ def test_recovery_after_deadline_fails_without_another_reset(deployment):
     assert d.epochs["robot_1"] == 0
 
 
-def test_hardware_and_unconfigured_robot_boundaries_are_unavailable(deployment):
+def test_unconfigured_robot_boundary_is_unavailable(deployment):
     d = deployment
-    d.submit()
-    supervisor = d.supervisor("hardware")
-    supervisor.supervisor_heartbeat()
-    heartbeat = json.loads((d.root / "supervisor.json").read_text())
-    assert heartbeat["supported_robot_ids"] == []
-    assert supervisor.poll_robots()
-    assert d.status()["ok"] is False
-    assert "unavailable" in d.status()["error"]
     d.submit("unknown_robot")
     assert d.supervisor().poll_robots()
     assert d.status("unknown_robot")["ok"] is False
@@ -371,19 +361,12 @@ def test_local_source_ack_is_durable_and_interrupted_ack_never_replays(
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("backend", ["slam_toolbox", "rtabmap"])
-def test_local_mapper_reset_uses_actual_service_ack_and_ros_clock(monkeypatch, backend):
+def test_local_costmap_reset_uses_actual_service_ack_and_ros_clock(monkeypatch):
     from deploy.mgg import robot_reset
 
-    reset = SimpleNamespace(
-        Request=SimpleNamespace, Response=SimpleNamespace(RESULT_SUCCESS=0)
-    )
-    empty = SimpleNamespace(Request=SimpleNamespace)
     clear = SimpleNamespace(Request=SimpleNamespace)
     for name, attributes in {
         "rclpy": {"spin_once": lambda *args, **kwargs: None},
-        "slam_toolbox.srv": {"Reset": reset},
-        "std_srvs.srv": {"Empty": empty},
         "nav2_msgs.srv": {"ClearEntireCostmap": clear},
     }.items():
         module = ModuleType(name)
@@ -397,19 +380,11 @@ def test_local_mapper_reset_uses_actual_service_ack_and_ros_clock(monkeypatch, b
 
     def call(node, client, request, deadline, *, idempotent=False):
         calls.append((client.srv_name, request))
-        return SimpleNamespace(result=0)
+        return SimpleNamespace()
 
     monkeypatch.setattr(robot_reset, "call", call)
-    wire = (
-        "slam_toolbox/srv/Reset" if backend == "slam_toolbox" else "std_srvs/srv/Empty"
-    )
     node = SimpleNamespace(
         create_client=lambda kind, name: SimpleNamespace(srv_name=name),
-        destroy_client=lambda client: None,
-        get_service_names_and_types=lambda: [
-            (f"/robot_1/{backend}/reset", [wire]),
-            ("/robot_2/slam_toolbox/reset", ["slam_toolbox/srv/Reset"]),
-        ],
         get_clock=lambda: SimpleNamespace(
             now=lambda: SimpleNamespace(nanoseconds=4_000_000_005)
         ),
@@ -419,21 +394,16 @@ def test_local_mapper_reset_uses_actual_service_ack_and_ros_clock(monkeypatch, b
     assert result == {"source_reset_stamp": {"sec": 4, "nanosec": 5}}
     assert quiescences == ["robot_1"]
     assert [name for name, request in calls] == [
-        f"/robot_1/{backend}/reset",
-        "/robot_1/global_costmap/clear_entirely_global_costmap",
         "/robot_1/local_costmap/clear_entirely_local_costmap",
     ]
-    source.reset(time.monotonic() + 1, quiesced=True)
-    assert quiescences == ["robot_1"]
-    if backend == "slam_toolbox":
-        assert calls[0][1].pause_new_measurements is False
-        monkeypatch.setattr(
-            robot_reset, "call", lambda *args: SimpleNamespace(result=1)
+    bad_node = SimpleNamespace(
+        create_client=lambda kind, name: SimpleNamespace(srv_name=name),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0)),
+    )
+    with pytest.raises(RuntimeError, match="simulation clock unavailable"):
+        robot_reset.SourceResetter(bad_node, "robot_1").reset(
+            time.monotonic() + 1, quiesced=True
         )
-        with pytest.raises(RuntimeError, match="refused"):
-            source.reset(time.monotonic() + 1)
-    with pytest.raises(TimeoutError, match="no supported"):
-        source.reset(time.monotonic() - 1)
 
 
 @pytest.mark.parametrize("idempotent", [False, True])
@@ -475,44 +445,20 @@ def test_lost_ros_reply_replays_only_idempotent_operations(monkeypatch, idempote
         assert len(effects) == 1
 
 
-def test_persistent_source_clients_keep_destructive_replies_across_resets(monkeypatch):
+def test_persistent_local_costmap_client_keeps_replies_across_resets(monkeypatch):
     from deploy.mgg import robot_reset
 
-    clock, effects = [0.0], []
-    reset = SimpleNamespace(
-        Request=SimpleNamespace, Response=SimpleNamespace(RESULT_SUCCESS=0)
-    )
-    empty = SimpleNamespace(Request=SimpleNamespace)
+    effects = []
     clear = SimpleNamespace(Request=SimpleNamespace)
     rclpy = ModuleType("rclpy")
     rclpy.spin_once = lambda *args, **kwargs: None
-    rclpy.spin_until_future_complete = (
-        lambda node, future, timeout_sec: clock.__setitem__(
-            0, clock[0] + (timeout_sec if not future.done() else 0)
-        )
-    )
+    rclpy.spin_until_future_complete = lambda node, future, timeout_sec: None
     monkeypatch.setitem(sys.modules, "rclpy", rclpy)
-    for name, attributes in {
-        "slam_toolbox.srv": {"Reset": reset},
-        "std_srvs.srv": {"Empty": empty},
-        "nav2_msgs.srv": {"ClearEntireCostmap": clear},
-    }.items():
-        module = ModuleType(name)
-        module.__dict__.update(attributes)
-        monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(robot_reset.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(robot_reset, "quiesce", lambda *args: None)
-
     def create_client(kind, name):
-        response_reader_ready_at = clock[0] + 2
-
         def send(request):
             effects.append(name)
             future = Future()
-            # The server knows the request writer before the response reader;
-            # its first reply is lost if that reader has not been discovered.
-            if clock[0] >= response_reader_ready_at:
-                future.set_result(SimpleNamespace(result=0))
+            future.set_result(SimpleNamespace())
             return future
 
         return SimpleNamespace(
@@ -524,35 +470,26 @@ def test_persistent_source_clients_keep_destructive_replies_across_resets(monkey
 
     node = SimpleNamespace(
         create_client=create_client,
-        destroy_client=lambda client: None,
-        get_service_names_and_types=lambda: [
-            ("/robot_1/slam_toolbox/reset", ["slam_toolbox/srv/Reset"]),
-        ],
         get_clock=lambda: SimpleNamespace(
             now=lambda: SimpleNamespace(nanoseconds=9_000_000_001)
         ),
     )
+    nav2 = ModuleType("nav2_msgs.srv")
+    nav2.ClearEntireCostmap = clear
+    monkeypatch.setitem(sys.modules, "nav2_msgs.srv", nav2)
     source = robot_reset.SourceResetter(node, "robot_1")
-    # Discovery happens during normal supervisor operation, before the first
-    # operator request, not after that request has consumed its deadline.
-    clock[0] = 10
-    for quiesced in (True, False):
-        assert source.reset(clock[0] + 1, quiesced=quiesced) == {
+    for _ in range(2):
+        assert source.reset(time.monotonic() + 1, quiesced=True) == {
             "source_reset_stamp": {"sec": 9, "nanosec": 1},
         }
-        clock[0] += 1
-    assert (
-        effects
-        == [
-            "/robot_1/slam_toolbox/reset",
-            "/robot_1/global_costmap/clear_entirely_global_costmap",
-            "/robot_1/local_costmap/clear_entirely_local_costmap",
-        ]
-        * 2
-    )
+    assert effects == [
+        "/robot_1/local_costmap/clear_entirely_local_costmap",
+    ] * 2
 
 
-def test_quiesce_waits_for_navigator_before_cancelling_only_target(monkeypatch):
+def test_quiesce_waits_for_trajectory_controller_before_cancelling_target(
+    monkeypatch,
+):
     from deploy.mgg import robot_reset
 
     clock, effects = [0.0], []
@@ -574,14 +511,9 @@ def test_quiesce_waits_for_navigator_before_cancelling_only_target(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(robot_reset.time, "monotonic", lambda: clock[0])
     controller = "/robot_1/follow_path/_action/cancel_goal"
-    navigator = "/robot_1/navigate_to_pose/_action/cancel_goal"
-    unrelated = "/robot_2/navigate_to_pose/_action/cancel_goal"
 
     def services():
-        names = [controller, unrelated]
-        if clock[0] > 0:
-            names.append(navigator)
-        return [(name, ["action_msgs/srv/CancelGoal"]) for name in names]
+        return [(controller, ["action_msgs/srv/CancelGoal"])]
 
     def create_client(kind, name):
         def send(request):
@@ -607,115 +539,6 @@ def test_quiesce_waits_for_navigator_before_cancelling_only_target(monkeypatch):
         destroy_publisher=lambda publisher: None,
     )
     robot_reset.quiesce(node, "robot_1", 1)
-    assert effects == [controller, navigator, "/robot_1/cmd_vel"]
+    assert effects == [controller, "/robot_1/cmd_vel"]
 
 
-@pytest.mark.parametrize("proof", ["valid", "wrong_run", "expired"])
-def test_manual_quiescence_proof_is_scoped_to_live_exact_run(
-    tmp_path, monkeypatch, proof
-):
-    from deploy.mgg import robot_reset
-
-    effects = []
-    reset_type = SimpleNamespace(
-        Request=SimpleNamespace, Response=SimpleNamespace(RESULT_SUCCESS=0)
-    )
-    cancel_type = SimpleNamespace(
-        Request=SimpleNamespace, Response=SimpleNamespace(ERROR_NONE=0)
-    )
-    for name, attributes in {
-        "rclpy": {
-            "spin_once": lambda *args, **kwargs: None,
-            "spin_until_future_complete": lambda *args, **kwargs: None,
-        },
-        "slam_toolbox.srv": {"Reset": reset_type},
-        "std_srvs.srv": {"Empty": SimpleNamespace(Request=SimpleNamespace)},
-        "nav2_msgs.srv": {
-            "ClearEntireCostmap": SimpleNamespace(Request=SimpleNamespace)
-        },
-        "action_msgs.srv": {"CancelGoal": cancel_type},
-        "geometry_msgs.msg": {"Twist": SimpleNamespace},
-    }.items():
-        module = ModuleType(name)
-        module.__dict__.update(attributes)
-        monkeypatch.setitem(sys.modules, name, module)
-
-    def create_client(kind, name):
-        def send(request):
-            effects.append(name)
-            future = Future()
-            future.set_result(SimpleNamespace(result=0, return_code=0))
-            return future
-
-        return SimpleNamespace(
-            srv_name=name, wait_for_service=lambda **kwargs: True, call_async=send
-        )
-
-    node = SimpleNamespace(
-        create_client=create_client,
-        destroy_client=lambda client: None,
-        create_publisher=lambda *args: SimpleNamespace(
-            get_subscription_count=lambda: 1,
-            publish=lambda message: effects.append("/robot_0/cmd_vel"),
-        ),
-        destroy_publisher=lambda publisher: None,
-        get_service_names_and_types=lambda: [
-            ("/robot_0/slam_toolbox/reset", ["slam_toolbox/srv/Reset"]),
-            (
-                "/robot_0/follow_path/_action/cancel_goal",
-                ["action_msgs/srv/CancelGoal"],
-            ),
-            (
-                "/robot_0/navigate_to_pose/_action/cancel_goal",
-                ["action_msgs/srv/CancelGoal"],
-            ),
-        ],
-        get_clock=lambda: SimpleNamespace(
-            now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)
-        ),
-    )
-    source = robot_reset.SourceResetter(node, "robot_0")
-    maps, root = tmp_path / "maps", tmp_path / "reset"
-    claim_map_epoch(maps, MISSION, "robot_0")
-    claim_map_epoch(maps, MISSION, "robot_0")
-    epoch = json.loads((maps / MISSION / "robot_0" / "map-epoch.json").read_text())
-    supervisor = PlannerSupervisor(
-        root,
-        MISSION,
-        ["robot_0"],
-        maps,
-        lambda robot, deadline, **kwargs: source.reset(deadline, **kwargs),
-    )
-    directory = root / "robots" / "robot_0"
-    desired = {
-        "version": 1,
-        "request_id": str(uuid4()),
-        "robot_id": "robot_0",
-        "mission_id": MISSION,
-        "state": "running",
-        "map_epoch": epoch["map_epoch"],
-    }
-    status = {
-        **desired,
-        "phase": "starting",
-        "quiesced": True,
-        "run_id": epoch["run_id"],
-        "deadline_at_ns": time.time_ns() + 60_000_000_000,
-    }
-    if proof == "wrong_run":
-        status["run_id"] = str(uuid4())
-    elif proof == "expired":
-        status["deadline_at_ns"] = time.time_ns() - 1
-    atomic_json(directory / "mgg-request.json", desired)
-    atomic_json(directory / "status.json", status)
-    supervisor.prepare_source("robot_0", epoch)
-    cancellations = [name for name in effects if name.endswith("/cancel_goal")]
-    assert cancellations == (
-        []
-        if proof == "valid"
-        else [
-            "/robot_0/follow_path/_action/cancel_goal",
-            "/robot_0/navigate_to_pose/_action/cancel_goal",
-        ]
-    )
-    assert ("/robot_0/cmd_vel" in effects) is (proof != "valid")

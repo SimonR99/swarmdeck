@@ -40,16 +40,12 @@ def generate_launch_description():
     return LaunchDescription(
         module.robot_nodes(
             os.environ["SWARMDECK_ROBOT_ID"],
-            config["map_frame"],
+            config["navigation_frame"],
             topics["odom"],
-            planner["cloud_topic"],
             "/tf",
             "/tf_static",
             os.environ.get("MGG_PARAMS_FILE", str(here / "config/hardware.yaml")),
             False,
             planner_overrides=hardware_settings(config),
-            base_frame=config["base_frame"],
-            depth_topic=topics.get("camera_depth", ""),
-            info_topic=topics.get("camera_info", ""),
         )
     )

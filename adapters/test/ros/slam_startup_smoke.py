@@ -30,7 +30,7 @@ def main() -> int:
     rclpy.init()
     server = rclpy.create_node("swarmdeck_slam_startup_fixture_server")
     client_node = rclpy.create_node("swarmdeck_slam_startup_fixture_client")
-    namespace = "/swarmdeck_fixture/slam_toolbox"
+    namespace = "/swarmdeck_fixture/peer_slam"
     state = [State.PRIMARY_STATE_UNCONFIGURED]
     transitions: list[int] = []
 
@@ -70,8 +70,8 @@ def main() -> int:
     bridge._service_clients = {}
     failures: list[str] = []
     recovery = SlamToolboxStartup(
-        bridge._slam_toolbox_state,
-        bridge._change_slam_toolbox_state,
+        bridge._peer_slam_state,
+        bridge._change_peer_slam_state,
         failures.append,
         deadline_s=8.0,
         backoff_s=0.05,
@@ -89,8 +89,8 @@ def main() -> int:
 
         transitions.clear()
         active_check = SlamToolboxStartup(
-            bridge._slam_toolbox_state,
-            bridge._change_slam_toolbox_state,
+            bridge._peer_slam_state,
+            bridge._change_peer_slam_state,
             failures.append,
             deadline_s=3.0,
         ).run_once()
@@ -99,8 +99,8 @@ def main() -> int:
 
         state[0] = State.PRIMARY_STATE_INACTIVE
         inactive_check = SlamToolboxStartup(
-            bridge._slam_toolbox_state,
-            bridge._change_slam_toolbox_state,
+            bridge._peer_slam_state,
+            bridge._change_peer_slam_state,
             failures.append,
             deadline_s=3.0,
             backoff_s=0.05,

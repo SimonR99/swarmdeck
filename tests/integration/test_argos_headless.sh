@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # The ARGoS backend runs headless, deterministically, and produces sensor data.
 #
-# The companion to test_sim_headless.sh, which covers the legacy Gazebo path.
 # Neither the ROS stack nor Ultra-Fusion is involved: the capture step binds the
 # bridge socket itself and speaks the protocol, so what this proves is that the
 # simulator, the world, the robot plugins and the render all work. Whether ROS

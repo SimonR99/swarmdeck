@@ -26,7 +26,7 @@ class FollowPathSink:
         self.node = node
         self.id = "probe"
         self.cfg = {"link_timeout_s": 60}
-        self.map_frame = "map"
+        self.navigation_frame = "map"
         self.paths = paths
         self.cancellations = cancellations
         self._goal_generation = 0

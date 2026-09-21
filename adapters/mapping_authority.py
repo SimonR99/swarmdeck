@@ -31,7 +31,7 @@ def planning_frame(bridge):
     """Return the explicitly configured MGG frame, defaulting to the UI frame."""
     template = os.environ.get(PLANNING_FRAME_TEMPLATE_ENV)
     if template is None:
-        value = getattr(bridge, "map_frame", "")
+        value = getattr(bridge, "navigation_frame", "")
     else:
         if template.count("{robot}") != 1:
             raise ValueError("invalid planning frame template")
@@ -258,20 +258,6 @@ class MappingAuthority:
         return None if value is None else authority_for_frame(value, frame)
 
     def _discard_map_uploads(self):
-        for name in (
-            "grid",
-            "_cloud",
-            "_cloud_points",
-            "_cloud_rgb",
-            "_cloud_snapshot",
-            "_scan_points",
-            "_scan_origin",
-        ):
-            if hasattr(self.bridge, name):
-                setattr(self.bridge, name, None)
-        for name in ("_grid_dirty", "_cloud_dirty", "_scan_dirty"):
-            if hasattr(self.bridge, name):
-                setattr(self.bridge, name, False)
         lock = getattr(self.bridge, "_costmap_lock", None)
         if lock is not None:
             with lock:
@@ -316,7 +302,7 @@ class MappingAuthority:
                 return
             if value["robot_id"] != self.bridge.id or value["navigation_frame"].lstrip(
                 "/"
-            ) != self.bridge.map_frame.lstrip("/"):
+            ) != self.bridge.navigation_frame.lstrip("/"):
                 return
             if not accepts_authority_update(value, self.value, self.expected_mission):
                 return

@@ -1,9 +1,8 @@
 """Rasterize world-frame keyframe points into a 2D occupancy grid.
 
-This is a display product for the 2D map, built from the replicated Swarm-SLAM
-keyframe geometry (the same chunks the Global 3D view renders). It is not a
-navigation input: the robots plan on their own onboard terrain products, and
-slam_toolbox's grids remain the "slam" map source.
+This is the only server-side 2D display product, built from replicated
+Swarm-SLAM keyframe geometry (the same chunks the Global 3D view renders). It
+is not a navigation input: robots plan on onboard terrain products.
 
 Rule, per cell of ``cell_m`` (0.2 m by default):
 
@@ -35,10 +34,10 @@ Rule, per cell of ``cell_m`` (0.2 m by default):
   obstacle return stays OCCUPIED; sweeping never overrides a return;
 * the cell is UNKNOWN when no point falls in it and no ray swept it.
 
-The cell values follow the ROS occupancy convention every other grid here
-uses (``-1`` unknown, ``0`` free, ``100`` occupied) and the cells are stored
-bottom-up, row-major, row 0 at ``origin_y``, exactly like the grids the SLAM
-back-end posts to ``/api/slam/optimized_map``.
+The cell values follow the ROS occupancy convention (``-1`` unknown, ``0``
+free, ``100`` occupied) and the cells are stored bottom-up, row-major, row 0
+at ``origin_y``. They are published only through the optimized deployment
+raster endpoint.
 
 Bounds: the grid covers the points' XY extent plus ``margin_m`` on every side,
 snapped to a lattice of the cell size so successive rebuilds of a growing map

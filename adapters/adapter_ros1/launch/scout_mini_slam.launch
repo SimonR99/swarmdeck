@@ -5,11 +5,10 @@
   autonomy layer removed: no `local_planner_agx.launch`, no gbplanner include,
   no `rosbuzz.launch`, no ROSBuzz_Adapter node. Nothing in this file publishes
   `cmd_vel` on its own — the robot stays stationary until `adapter_ros1.py`
-  forwards an explicit `drive`/`navigate_to` from the SwarmDeck GUI (and
-  `navigate_to` has nowhere to go yet regardless; see
-  adapters/adapter_ros1/config/scout_mini.yaml).
-
+  forwards an explicit `drive` or vendor goal from the SwarmDeck GUI.
   Requires `mist_ws/devel/setup.bash` sourced (NOT part of tars's default
+  boot).
+
   `~/.ros1_bashrc` — that line is commented out there) on top of the usual
   `/opt/ros/noetic/setup.bash` + `/ssd/catkin_ws/devel/setup.bash`.
 -->
@@ -40,7 +39,7 @@
 
     <!--- EKF: fuses LVI-SAM's lidar odometry, publishes the
           odom_lidar -> base_link_filtered TF that adapter_ros1's
-          scout_mini.yaml expects as map_frame/base_frame. -->
+          scout_mini.yaml expects as navigation_frame/base_frame. -->
     <node pkg="robot_localization" type="ekf_localization_node"
         name="robot_localization_ekf_node_odom"
         clear_params="true">

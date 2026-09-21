@@ -60,9 +60,6 @@ async def put_settings(request: Request) -> dict[str, Any]:
     app.apply_review_radii(settings)
     app.save_review(force=True)
     revised = app.reapply_detection_floors(settings)
-    await asyncio.to_thread(
-        app.map_service.set_excluded, app.disabled_robot_ids(settings)
-    )
     for rid in app.disabled_robot_ids(settings):
         await app.registry.send(rid, {"type": "cancel_goal", **app.stamps()})
         await app.registry.send(

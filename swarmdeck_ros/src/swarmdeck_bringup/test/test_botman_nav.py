@@ -1,194 +1,44 @@
-"""Static safety contract for Botman's hardware Nav2 wiring.
-
-These checks deliberately avoid launching hardware. They make the important
-seams reviewable in CI: Humble-compatible plugins, live sensor topics, and the
-adapter as the only path from autonomous velocity to the real driver.
-"""
+"""Platform footprint and inflation contracts shared by every robot launch."""
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[4]
-PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
-BUNKER = REPO / "adapters/adapter_ros2/config/bunker.yaml"
-COMPOSE = REPO / "deploy/compose/docker-compose.robot-botman.yml"
-BOTMAN_LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/botman.launch.py"
-PROJECTOR = REPO / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
+CONFIGS = {
+    "botman": (
+        REPO / "adapters/adapter_ros2/config/bunker.yaml",
+        REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/botman.launch.py",
+        0.77,
+        0.50,
+        "_BUNKER_FOOTPRINT",
+    ),
+    "aslan": (
+        REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml",
+        REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/aslan.launch.py",
+        0.77,
+        0.50,
+        "_BUNKER_FOOTPRINT",
+    ),
+    "asimov": (
+        REPO / "adapters/adapter_ros2/config/unitree_g1.yaml",
+        REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/asimov.launch.py",
+        0.30,
+        0.45,
+        "_G1_FOOTPRINT",
+    ),
+}
 
 
-def test_botman_uses_live_superodom_and_ouster_interfaces():
-    params = yaml.safe_load(PARAMS.read_text())
-    bt = params["bt_navigator"]["ros__parameters"]
-    local = params["local_costmap"]["local_costmap"]["ros__parameters"]
-    scan = local["obstacle_layer"]["scan"]
+@pytest.mark.parametrize("robot", CONFIGS)
+def test_platform_footprint_and_inflation_are_passed_to_nav2(robot):
+    config_path, launch_path, radius, inflation, footprint_symbol = CONFIGS[robot]
+    config = yaml.safe_load(config_path.read_text())
+    source = launch_path.read_text()
 
-    assert bt["global_frame"] == "map"
-    assert bt["robot_base_frame"] == "os_lidar"
-    assert bt["odom_topic"] == "/laser_odometry"
-    assert scan["topic"] == "<obstacle_scan_topic>"
-    assert scan["sensor_frame"] == "<obstacle_sensor_frame>"
-
-
-def test_botman_params_are_humble_compatible_and_keep_live_local_costmap():
-    params = yaml.safe_load(PARAMS.read_text())
-    bt = params["bt_navigator"]["ros__parameters"]
-    controller = params["controller_server"]["ros__parameters"]
-    planner = params["planner_server"]["ros__parameters"]["GridBased"]
-    global_map = params["global_costmap"]["global_costmap"]["ros__parameters"]
-    local_map = params["local_costmap"]["local_costmap"]["ros__parameters"]
-
-    assert "plugin_lib_names" in bt
-    assert "navigators" not in bt
-    assert controller["progress_checker_plugin"] == "progress_checker"
-    assert planner["plugin"] == "nav2_navfn_planner/NavfnPlanner"
-    # NOT rolling. This asserted True until 2026-08-25, on the grounds that a
-    # rolling window "keeps Nav2 usable before a collaborative map exists".
-    # That is handled on the server instead: MapService.nav_grid serves a
-    # robot's OWN raytraced grid while it is unmerged, so the static layer has
-    # a map from the first upload. Verified live -- spot_0, online and in no
-    # component, got HTTP 200 from /api/map/nav/spot_0.
-    #
-    # Rolling cost full-map planning: the window follows the robot, so the
-    # planner saw 40 x 40 m of maps measuring 66.0 x 58.4 m (botman_0) and
-    # 56.9 x 45.6 m (aslan_0). See test_costmap_sources.py.
-    assert global_map["rolling_window"] is False
-    assert "static_layer" in global_map["plugins"]
-    assert global_map["static_layer"]["map_topic"] == "/global_map"
-    # Collision authority stays on live sensors. A foreign map here is a crash.
-    assert "static_layer" not in local_map["plugins"]
-    assert global_map["track_unknown_space"] is True
-
-
-def test_bunker_costmaps_have_no_radial_blind_zone():
-    """The projector, not a circular range cutoff, removes chassis points."""
-    params = yaml.safe_load(PARAMS.read_text())
-    local = params["local_costmap"]["local_costmap"]["ros__parameters"]
-    global_map = params["global_costmap"]["global_costmap"]["ros__parameters"]
-
-    for costmap in (local, global_map):
-        scan = costmap["obstacle_layer"]["scan"]
-        assert scan["marking"] is True
-        assert scan["clearing"] is True
-        assert scan["obstacle_min_range"] == 0.0
-        assert scan["obstacle_max_range"] == 9.5
-        assert scan["raytrace_min_range"] == 0.0
-        assert scan["raytrace_max_range"] == 10.0
-        assert scan["inf_is_valid"] is True
-
-
-def test_bunker_point_goals_do_not_require_a_final_heading():
-    params = yaml.safe_load(PARAMS.read_text())
-    goal_checker = params["controller_server"]["ros__parameters"]["goal_checker"]
-
-    # The adapter must provide a quaternion for NavigateToPose, but dashboard
-    # goals contain only x/y. A tolerance greater than pi makes every planar
-    # heading valid, so reaching XY ends navigation without a corrective turn.
-    assert goal_checker["yaw_goal_tolerance"] > 3.141592653589793
-
-
-def test_bunker_point_goals_can_use_forward_or_reverse_velocity():
-    params = yaml.safe_load(PARAMS.read_text())
-    controller = params["controller_server"]["ros__parameters"]
-    follow_path = controller["FollowPath"]
-    smoother = params["velocity_smoother"]["ros__parameters"]
-
-    assert follow_path["publish_local_plan"] is True
-    assert follow_path["max_vel_x"] > 0.0
-    assert follow_path["min_vel_x"] < 0.0
-    assert smoother["min_velocity"][0] <= follow_path["min_vel_x"]
-    assert "PreferForward" in follow_path["critics"]
-    assert follow_path["PreferForward.penalty"] > 0.0
-
-
-def test_autonomous_velocity_can_only_reach_driver_through_adapter():
-    params = yaml.safe_load(PARAMS.read_text())
-    bunker = yaml.safe_load(BUNKER.read_text())
-    compose = yaml.safe_load(COMPOSE.read_text())
-
-    smoother = params["velocity_smoother"]["ros__parameters"]
-    assert smoother["max_velocity"] == [0.4, 0.0, 0.6]
-    assert bunker["topics"]["cmd_vel"] == "/cmd_vel"
-    assert bunker["topics"]["nav_cmd_vel"] == "/botman_0/cmd_vel_nav"
-    assert bunker["topics"]["plan"] == "/botman_0/plan"
-    assert bunker["topics"]["local_plan"] == "/botman_0/local_plan"
-    assert bunker["actions"]["navigate_to_pose"] == "/botman_0/navigate_to_pose"
-
-    adapter_dependencies = compose["services"]["adapter"]["depends_on"]
-    assert adapter_dependencies["nav2"]["condition"] == "service_started"
-    assert "robot_stack" not in adapter_dependencies
-    healthcheck = compose["services"]["nav2"]["healthcheck"]
-    assert ". /opt/ros/humble/setup.sh" in healthcheck["test"][1]
-    assert "grep -q '^active'" in healthcheck["test"][1]
-
-
-def test_botman_launch_keeps_mist_workspace_read_only_and_can_explicit():
-    compose = yaml.safe_load(COMPOSE.read_text())
-    volumes = compose["services"]["robot_stack"]["volumes"]
-    command = compose["services"]["robot_stack"]["command"][2]
-    robot_launch = REPO / "adapters/adapter_ros2/launch/botman_bunker.launch.py"
-
-    assert "${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro" in volumes
-    assert "${BOTMAN_CAN_INTERFACE:-can0}" in command
-    assert "start_base:=true" in command
-    assert "start_lidar:=false" in command
-    assert "start_slam:=false" in command
-    assert 'default_value="can0"' in robot_launch.read_text()
-    assert "profiles" not in compose["services"]["robot_stack"]
-    assert "profiles" not in compose["services"]["lidar"]
-    assert "profiles" not in compose["services"]["slam"]
-    assert "profiles" not in compose["services"]["adapter"]
-
-
-def test_botman_tf_bridge_accounts_for_live_pipeline_latency():
-    launch_source = BOTMAN_LAUNCH.read_text()
-    compose = yaml.safe_load(COMPOSE.read_text())
-    bunker = yaml.safe_load(BUNKER.read_text())
-
-    assert '"use_receive_time": True' in launch_source
-    assert '"robot_base_frame": _BASE_FRAME' in launch_source
-    assert 'name="botman_base_to_scan"' in launch_source
-    assert '"--frame-id",\n            _BASE_FRAME' in launch_source
-    assert '"--child-frame-id",\n            _SCAN_FRAME' in launch_source
-    assert '"--yaw",\n            "3.141592653589793"' in launch_source
-    assert 'executable="footprint_cloud_to_scan"' in launch_source
-    assert '"input_topic": "/ouster/points"' in launch_source
-    assert '"min_height": _OBSTACLE_MIN_HEIGHT' in launch_source
-    assert '"max_height": _OBSTACLE_MAX_HEIGHT' in launch_source
-    assert '"footprint_padding": _SELF_FILTER_PADDING' in launch_source
-    assert '"obstacle_scan_topic": _SCAN_TOPIC' in launch_source
-    assert '"obstacle_sensor_frame": _SCAN_FRAME' in launch_source
-    assert "child_frame:=botman_base_link" in compose["services"]["odom_tf"]["command"]
-    assert bunker["base_frame"] == "botman_base_link"
-    assert compose["services"]["oak_mount_tf"]["command"][-3:] == [
-        "botman_base_link",
-        "--child-frame-id",
-        "oak-d-base-frame",
-    ]
-
-
-def test_bunker_self_filter_runs_before_angular_projection():
-    source = PROJECTOR.read_text()
-
-    assert source.index("if (rear <= base_x") < source.index("scan.ranges[index] =")
-    assert 'declare_parameter<double>("min_height", -0.37)' in source
-    assert 'declare_parameter<double>("max_height", 1.28)' in source
-
-
-def test_botman_passes_the_bunker_footprint_instead_of_the_scout_default():
-    """nav.launch.py rewrites robot_radius from launch args, default 0.422 m.
-
-    That is a Scout Mini. A Bunker launched without an override plans as a
-    42 cm disc around the lidar; the deck is then an obstacle and forward
-    planning can fail. The chassis rectangle has to be in the lidar frame.
-    """
-    source = BOTMAN_LAUNCH.read_text()
-    assert '"robot_radius": _BUNKER_RADIUS' in source
-    assert '"footprint": _BUNKER_FOOTPRINT' in source
-    assert "_LIDAR_X = 0.160" in source
-    # Both ends of the chassis must sit inside the polygon in the lidar frame.
-    half_l, lidar_x = 1.023 / 2.0, 0.150
-    front = half_l - lidar_x
-    rear = -half_l - lidar_x
-    assert front > 0.0
-    assert abs(rear) > 0.65
+    assert config["footprint_radius"] == radius
+    assert config["footprint"]
+    assert f'"inflation_radius": "{inflation:.2f}"' in source
+    assert f'"footprint": {footprint_symbol}' in source
+    assert '"robot_radius":' in source

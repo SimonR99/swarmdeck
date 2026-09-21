@@ -108,34 +108,3 @@ def test_each_peer_start_claims_fresh_persisted_run(monkeypatch, tmp_path):
     assert start()["map_epoch"] == 8
 
 
-def test_standalone_native_launch_claims_once_per_robot_start(monkeypatch, tmp_path):
-    module = _load(
-        monkeypatch, "swarmdeck_ros/src/swarmdeck_cslam/launch/cslam.launch.py"
-    )
-    context = {
-        "robot_id": "1",
-        "max_nb_robots": "3",
-        "namespace": "r1",
-        "sensor_namespace": "rover_1",
-        "use_sim_time": "true",
-        "mission_id": "6f6afc5c-9a34-4eb4-8243-731629872d25",
-        "map_store": str(tmp_path),
-    }
-    first = module.setup(context)
-    second = module.setup(context)
-    for nodes, expected in ((first, 0), (second, 1)):
-        params = [
-            node.parameters[-1]
-            for node in nodes
-            if getattr(node, "package", "") == "cslam"
-        ]
-        assert len(params) == 3
-        assert {item["swarmdeck.map_epoch"] for item in params} == {expected}
-        assert {item["swarmdeck.mission_id"] for item in params} == {
-            context["mission_id"]
-        }
-    claim = json.loads(
-        (tmp_path / context["mission_id"] / "rover_1" / "map-epoch.json").read_text()
-    )
-    assert claim["map_epoch"] == 1
-    assert not (tmp_path / context["mission_id"] / "rover_0").exists()

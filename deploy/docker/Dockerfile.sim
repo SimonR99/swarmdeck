@@ -1,15 +1,7 @@
-# SwarmDeck ROS 2 image: the ARGoS bridge, SLAM, Nav2 and the simulation adapter.
-#
-# This is Dockerfile.gazebo with `ros_gz` taken out and nothing put in its
-# place: the simulator lives in the `argos` service now, and the only thing
-# crossing between them is a Unix socket on the shared runtime volume.
-#
-# The legacy Gazebo path keeps its own image (Dockerfile.gazebo), because
-# carrying Gazebo Harmonic here for a backend that is off by default would
-# double this image for nothing.
+# SwarmDeck ROS 2 image: the ARGoS bridge, Nav2 controller and simulation adapter.
 FROM ros:jazzy-ros-base
 
-# Reproduce the qualified Nav2/slam_toolbox/tf2 set without a warm apt layer.
+# Use the signed ROS snapshot for the qualified navigation dependencies.
 COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
 RUN bash /tmp/use-ros-snapshot.sh
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -25,16 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-opencv \
       python3-colcon-common-extensions \
       git \
-      ros-jazzy-slam-toolbox \
       ros-jazzy-navigation2 \
       ros-jazzy-nav2-bringup \
       ros-jazzy-nav2-msgs \
-      ros-jazzy-pointcloud-to-laserscan \
-      ros-jazzy-robot-localization \
       ros-jazzy-rosidl-default-generators \
-      ros-jazzy-rtabmap-odom \
-      ros-jazzy-rtabmap-slam \
-      ros-jazzy-rtabmap-util \
       ros-jazzy-tf2-ros \
       ros-jazzy-tf2-tools \
       # GStreamer, for adapters/media/ros2_rtsp.py. The simulated fleet's
@@ -92,7 +78,7 @@ RUN chmod +x /usr/local/bin/sim-entrypoint.sh \
 WORKDIR /app/swarmdeck_ros
 RUN . /opt/ros/jazzy/setup.sh \
     && colcon build --symlink-install --packages-select \
-         swarmdeck_description swarmdeck_sim swarmdeck_slam swarmdeck_nav swarmdeck_bringup
+         swarmdeck_description swarmdeck_sim swarmdeck_nav swarmdeck_bringup
 
 WORKDIR /app
 ENTRYPOINT ["/usr/local/bin/sim-entrypoint.sh"]

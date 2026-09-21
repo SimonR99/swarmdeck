@@ -37,7 +37,7 @@ def _authority() -> dict:
         "geometry_revision": 4,
         "correction_revision": 2,
         "map_source_stamp": {"sec": 10, "nanosec": 0},
-        "navigation_frame": f"{ROBOT}/map_frame",
+        "navigation_frame": f"{ROBOT}/navigation_frame",
         "T_component_navigation": _matrix(),
         "anchor": {"robot_id": ROBOT},
         "home": {

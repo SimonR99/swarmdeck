@@ -18,7 +18,7 @@ def _bridge(sim_module):
     """
     bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
     bridge.id = "r0"
-    bridge.map_frame = "r0/map_frame"
+    bridge.navigation_frame = "r0/navigation_frame"
     bridge.node = MagicMock()
     bridge.pub_cmd = MagicMock()
     bridge.goal = None
@@ -43,7 +43,7 @@ def _bridge(sim_module):
     return bridge
 
 
-def _plan(frame="r0/map_frame"):
+def _plan(frame="r0/navigation_frame"):
     from adapters.exploration import PlannerPath, PlannerPose
 
     return PlannerPath(
@@ -303,7 +303,7 @@ def test_stale_conditional_follow_path_does_not_preempt_newer_goal(sim_module):
     assert bridge.nav_status == "active"
 
 
-@pytest.mark.parametrize("frame", ["r0/map_frame", "r0/odom"])
+@pytest.mark.parametrize("frame", ["r0/navigation_frame", "r0/odom"])
 def test_follow_path_returns_the_accepted_owned_generation(sim_module, frame):
     bridge = _bridge(sim_module)
     plan = _plan(frame)

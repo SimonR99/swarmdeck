@@ -5,12 +5,11 @@
 robot_type: generic
 footprint_radius: 0.35
 
-map_frame: map
+navigation_frame: odom
 base_frame: base_link
 
 topics:
   odom: odom
-  map: map
   plan: ""
   cmd_vel: cmd_vel
   battery: ""
@@ -25,14 +24,12 @@ topics:
   camera_depth_points: ""
 
 actions:
-  navigate_to_pose: navigate_to_pose
 
 perception:
   depth_max_age_s: 1.0
 
 rates:
   state_hz: 5.0
-  map_period_s: 2.0
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45

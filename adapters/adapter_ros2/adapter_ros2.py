@@ -11,7 +11,7 @@ WHY THIS IS NOT `adapter_sim` WITH DIFFERENT TOPIC NAMES
 --------------------------------------------------------
 `adapter_sim` bridges four simulated robots from one process and may assume the
 simulator's conventions: every topic under `/<ns>/`, a `<ns>/tf` that carries the
-whole chain, `map_frame` named by us, and a lidar whose extrinsics we chose. None
+whole chain, `navigation_frame` named by us, and a lidar whose extrinsics we chose. None
 of that survives contact with a real robot, where the driver names topics, the
 URDF names frames, and TF is global rather than namespaced.
 
@@ -87,7 +87,6 @@ from adapters.perception.depth_projection import (
     transform_point,
     transform_points,
 )
-from adapters.map_color import CameraColorizer, MapColorMixin
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
@@ -97,30 +96,13 @@ from adapters.runtime import (
     AdapterTelemetryMixin,
     deep_merge,
     load_yaml_profile,
-    map_cloud_height_limits,
-    stamp_seconds,
     yaw_of,
-    unique_row_index,
 )
 from adapters.session import run_adapter_session
 from adapters.navigation_result import navigation_failure_reason
-from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
-from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
-from adapters.onboard_mapping import (
-    mapping_authority_mode,
-    publish_onboard_map,
-    map_upload_headers,
-    map_source_is_current,
-)
 from ros2_defaults import DEFAULTS
 
-# Transport quantisation for registered-cloud uploads. One centimetre keeps a
-# normal building-scale map inside int16 while remaining finer than either
-# consumer's display/grid resolution.
-MAP_CLOUD_SCALE = 0.01
-MAP_CLOUD_VOXEL = 0.05
-MAP_CLOUD_3D_VOXEL = 0.10
 
 # The detector needs OpenCV and the inference sidecar's client; a robot image
 # built without them still runs, just without perception.
@@ -133,12 +115,11 @@ except ImportError as exc:  # pragma: no cover - depends on the robot's install
 else:
     OBJECT_DETECTOR_IMPORT_ERROR = None
 
-# Nav2 is the common case but not the only one; see `navigate_to` below.
+# Nav2 follows validated MGG trajectories through `FollowPath`.
 try:
-    from nav2_msgs.action import FollowPath, NavigateToPose
+    from nav2_msgs.action import FollowPath
 except ImportError:  # pragma: no cover - depends on the robot's install
     FollowPath = None
-    NavigateToPose = None
 
 try:
     from std_srvs.srv import Trigger
@@ -190,7 +171,6 @@ OPTIONAL_BODY_SERVICES = frozenset({"power_on", "estop_release", "clear_keepaliv
 
 
 class HardwareBridge(
-    MapColorMixin,
     AdapterHelloMixin,
     AdapterDetectionMixin,
     AdapterLinkMixin,
@@ -217,43 +197,17 @@ class HardwareBridge(
         self.cfg = cfg
         self.http_url = http_url
         self.t0 = time.monotonic()
-        self.mapping_authority_mode = mapping_authority_mode()
-        self.onboard_mapping = self.mapping_authority_mode == "onboard"
-        self._onboard_map_warned_at = 0.0
-        rates = cfg.get("rates") or {}
-        self._keyframes = KeyframeUploader(
-            robot_id,
-            http_url,
-            min_period_s=float(rates.get("keyframe_period_s", 2.0)),
-            timeout_s=float(cfg.get("upload_timeout_s", 0.5)),
-            height_band=cfg.get("map_cloud_height_band"),
-            lidar_height_m=cfg.get("lidar_height_m"),
-        )
-        self._nav_map = NavMapClient(http_url, robot_id)
-
-        self.map_frame = cfg["map_frame"]
+        self.navigation_frame = cfg["navigation_frame"]
         self.base_frame = cfg["base_frame"]
         topics = cfg["topics"]
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, node)
 
-        self.grid: OccupancyGrid | None = None
-        self._grid_dirty = False
         self._costmaps: dict[str, CostmapSnapshot] = {}
         self._costmap_dirty: set[str] = set()
         self._costmap_lock = threading.Lock()
         self._costmap_warned_at: dict[str, float] = {}
-        self._scan_points: np.ndarray | None = None
-        # Sensor pose when `_scan_points` was captured; see _on_map_cloud.
-        self._scan_origin: dict[str, float] | None = None
-        self._scan_dirty = False
-        self._cloud_points: np.ndarray | None = None
-        self._map_color = CameraColorizer(cfg.get("map_color", {}))
-        self._cloud_rgb: np.ndarray | None = None
-        self._cloud_dirty = False
-        self._cloud_snapshot = None
-        self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
         self._global_planned_path: list[dict[str, float]] = []
         self._local_planned_path: list[dict[str, float]] = []
@@ -286,7 +240,6 @@ class HardwareBridge(
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._camera_color_info: CameraInfo | None = None
-        self._camera_depth_cloud: PointCloud2 | None = None
         perception = cfg.get("perception", {})
         self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
@@ -311,48 +264,13 @@ class HardwareBridge(
         self._last_depth_warning_at = 0.0
         self._pose_warned = False
 
-        # A map is latched: published once and expected to be available to any
-        # later subscriber. Matching that QoS is not optional — a VOLATILE
-        # subscriber on a TRANSIENT_LOCAL publisher receives nothing and the
-        # robot silently contributes no map.
-        latched = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-            history=QoSHistoryPolicy.KEEP_LAST,
-        )
-
         if topics.get("odom"):
-            # Sensor-data QoS (BEST_EFFORT). LIO-SAM and several lidar odometry
-            # publishers use it; a RELIABLE subscriber never sees those samples.
-            # A BEST_EFFORT subscriber still matches a RELIABLE publisher, so
-            # this does not break SuperOdometry on the Bunkers.
-            node.create_subscription(
-                Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data
-            )
-        if topics.get("map"):
-            node.create_subscription(
-                OccupancyGrid, topics["map"], self._on_map, latched
-            )
-        if topics.get("map_cloud"):
-            node.create_subscription(
-                PointCloud2,
-                topics["map_cloud"],
-                self._on_map_cloud,
-                qos_profile_sensor_data,
-            )
+            node.create_subscription(Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data)
         if topics.get("plan"):
             node.create_subscription(NavPath, topics["plan"], self._on_plan, 10)
         if topics.get("local_plan"):
             node.create_subscription(
                 NavPath, topics["local_plan"], self._on_local_plan, 10
-            )
-        if topics.get("global_costmap"):
-            node.create_subscription(
-                OccupancyGrid,
-                topics["global_costmap"],
-                lambda msg: self._on_costmap(msg, "global"),
-                qos_profile_sensor_data,
             )
         if topics.get("local_costmap"):
             node.create_subscription(
@@ -451,30 +369,7 @@ class HardwareBridge(
             if topics.get("cmd_vel")
             else None
         )
-        nav_map_topic = topics.get("nav_map") or "/global_map"
-        self.pub_global_map = node.create_publisher(
-            OccupancyGrid, nav_map_topic, latched
-        )
-        action_name = cfg.get("actions", {}).get("navigate_to_pose")
-        self.nav_client = None
-        if action_name and NavigateToPose is not None:
-            self.nav_client = ActionClient(node, NavigateToPose, action_name)
-
         path_action_name = cfg.get("actions", {}).get("follow_path")
-        planning_cfg = cfg.get("planning") or {}
-        uses_mgg_planning = (
-            str(
-                planning_cfg.get("backend") or cfg.get("planning_backend") or ""
-            ).lower()
-            == "mgg"
-        )
-        if (
-            path_action_name is None
-            and action_name
-            and ((cfg.get("exploration") or {}).get("enabled") or uses_mgg_planning)
-        ):
-            prefix = action_name.rsplit("/", 1)[0]
-            path_action_name = f"{prefix}/follow_path" if prefix else "follow_path"
         self.path_client = None
         if path_action_name and FollowPath is not None:
             self.path_client = ActionClient(node, FollowPath, path_action_name)
@@ -564,10 +459,8 @@ class HardwareBridge(
             caps.append("explore")
         if getattr(self, "objective_planner", None) is not None:
             caps.append("plan_objective")
-        if self.nav_client is not None or self.traj_client is not None:
+        if self.path_client is not None or self.traj_client is not None:
             caps.append("navigate")
-        if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
-            caps.append("map")
         if self.cfg["topics"].get("camera") or self.cfg["topics"].get(
             "camera_compressed"
         ):
@@ -590,15 +483,6 @@ class HardwareBridge(
 
     # ------------------------------------------------------------- ROS inputs
 
-    def _on_map(self, msg: OccupancyGrid) -> None:
-        with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
-            self.grid = msg
-            self._grid_dirty = True
-            # Runs independently of the websocket session.
-            publish_onboard_map(self, msg)
-
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
         if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
@@ -610,12 +494,10 @@ class HardwareBridge(
 
     def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
         """Capture Nav2's planner view without changing navigation inputs."""
-        if not map_source_is_current(self, msg):
-            return
         source = str(
             getattr(getattr(msg, "header", None), "frame_id", "") or ""
         ).lstrip("/")
-        target = str(self.map_frame or "").lstrip("/")
+        target = str(self.navigation_frame or "").lstrip("/")
         transform = (0.0, 0.0, 0.0)
         if source and source != target:
             try:
@@ -645,137 +527,9 @@ class HardwareBridge(
             self._warn_costmap(kind, str(exc))
             return
         with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
             with self._costmap_lock:
                 self._costmaps[kind] = snapshot
                 self._costmap_dirty.add(kind)
-
-    def _on_map_cloud(self, msg: PointCloud2) -> None:
-        """Normalize one cloud into ``map_frame`` before producing map data.
-
-        Most hardware profiles subscribe to an already-registered cloud whose
-        header is the configured map frame.  Asimov's Mid-360 publishes raw
-        sweeps in ``livox_frame`` instead.  Treating those XYZ values as world
-        coordinates makes the keyframe producer apply the inverse robot pose
-        to sensor-frame points; the optimizer then receives contradictory
-        clouds and fans repeated observations into several rotated maps.
-
-        Honour the PointCloud2 header and use the transform at the cloud stamp.
-        A cloud with no header remains the legacy/test-double case and is
-        assumed to already be registered.
-        """
-        if not map_source_is_current(self, msg):
-            return
-        points = self._cloud_xyz(msg)
-        if not len(points):
-            return
-
-        header = getattr(msg, "header", None)
-        source = str(getattr(header, "frame_id", "") or "").lstrip("/")
-        target = str(self.map_frame or "").lstrip("/")
-        stamp = getattr(header, "stamp", None) if header is not None else None
-        tf_time = (
-            rclpy.time.Time.from_msg(stamp) if stamp is not None else rclpy.time.Time()
-        )
-        if source and target and source != target:
-            try:
-                tf = self.tf_buffer.lookup_transform(
-                    target, source, tf_time, timeout=Duration(seconds=0.1)
-                )
-                mapped = transform_points(points, tf.transform)
-                if mapped is None:
-                    raise ValueError("cloud transform produced no points")
-                points = mapped
-            except Exception as exc:
-                now = time.monotonic()
-                warned_at = float(getattr(self, "_map_cloud_frame_warned_at", 0.0))
-                if now - warned_at >= 10.0:
-                    self._map_cloud_frame_warned_at = now
-                    self.node.get_logger().warn(
-                        f"[{self.id}] dropping map cloud: no {target} <- {source} "
-                        f"transform at capture time: {exc}"
-                    )
-                return
-
-        pose = self.pose7(tf_time)
-        if pose is not None:
-            pose = np.asarray(pose, dtype=np.float64)
-            if pose.shape != (7,) or not np.isfinite(pose).all():
-                pose = None
-
-        now = time.monotonic()
-        cloud_period = max(
-            0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
-        )
-        if now - self._last_cloud_prepare_at >= cloud_period:
-            cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
-            cloud_keep = unique_row_index(cloud_keys)
-            cloud_points = points[cloud_keep]
-            cloud_rgb = self._colorize_map(cloud_points, header)
-            with getattr(self, "_goal_lock", nullcontext()):
-                if not map_source_is_current(self, msg):
-                    return
-                self._last_cloud_prepare_at = now
-                self._cloud_points = cloud_points
-                self._cloud_rgb = cloud_rgb
-                self._cloud_snapshot = (cloud_points, cloud_rgb)
-                self._cloud_dirty = True
-
-        min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
-        xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
-        if not len(xy):
-            with getattr(self, "_goal_lock", nullcontext()):
-                if not map_source_is_current(self, msg):
-                    return
-                self._scan_points = np.zeros((0, 2), dtype=np.float32)
-                self._scan_dirty = True
-            return
-        keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
-        keep = unique_row_index(keys)
-        scan_points = xy[keep]
-        # Pair the points with the pose they were captured AT. upload_scan used
-        # to read the pose at upload time, up to map_period_s later, and the
-        # backend raytraces free space from that origin — so at 0.5 m/s with a
-        # 2 s period every ray was traced from a point up to a metre from where
-        # the beam actually left the sensor, carving free space through geometry
-        # it never crossed. That corrupts precisely the free/occupied contrast
-        # registration.py relies on to break rotational symmetry.
-        if pose is not None:
-            qx, qy, qz, qw = pose[3:]
-            scan_yaw = math.atan2(
-                2.0 * (qw * qz + qx * qy),
-                1.0 - 2.0 * (qy * qy + qz * qz),
-            )
-            scan_origin = {
-                "x": float(pose[0]),
-                "y": float(pose[1]),
-                "yaw": float(scan_yaw),
-            }
-        else:
-            scan_origin = self.map_pose()
-        with getattr(self, "_goal_lock", nullcontext()):
-            if not map_source_is_current(self, msg):
-                return
-            self._scan_points = scan_points
-            self._scan_origin = scan_origin
-            self._scan_dirty = True
-        try:
-            if pose is not None:
-                stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
-                self._keyframes.consider(
-                    points,
-                    pose,
-                    stamp,
-                    colorize=self._keyframe_colorizer(
-                        pose, getattr(msg, "header", None)
-                    ),
-                )
-        except Exception:
-            # Keyframe production is best-effort. A missing TF, a test double
-            # without a header, or a too-small cloud must not starve the scan
-            # map that the operator is looking at.
-            pass
 
     def _on_plan(self, msg: NavPath) -> None:
         self._receive_plan(msg, local=False)
@@ -785,9 +539,9 @@ class HardwareBridge(
         self._receive_plan(msg, local=True)
 
     def _receive_plan(self, msg: NavPath, *, local: bool) -> None:
-        """Publish the planner's intended route, in ``map_frame``.
+        """Publish the planner's intended route, in ``navigation_frame``.
 
-        Nav2's global and DWB local plans normally already use ``map_frame``.
+        Nav2's global and DWB local plans normally already use ``navigation_frame``.
         Keeping the transform path here as well makes this safe for a controller
         or vendor planner that publishes its route in another connected frame,
         and avoids drawing a perfectly plausible route at the wrong place.
@@ -805,7 +559,7 @@ class HardwareBridge(
             return
 
         frame = str(getattr(msg.header, "frame_id", "") or "").lstrip("/")
-        if not frame or frame == self.map_frame:
+        if not frame or frame == self.navigation_frame:
             points = np.array(
                 [
                     [ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
@@ -821,12 +575,12 @@ class HardwareBridge(
                     if stamp is not None
                     else rclpy.time.Time()
                 )
-                tf = self.tf_buffer.lookup_transform(self.map_frame, frame, tf_time)
+                tf = self.tf_buffer.lookup_transform(self.navigation_frame, frame, tf_time)
             except Exception as exc:
                 if not self._plan_frame_warned:
                     self._plan_frame_warned = True
                     self.node.get_logger().warn(
-                        f"[{self.id}] no {self.map_frame} -> {frame} transform for "
+                        f"[{self.id}] no {self.navigation_frame} -> {frame} transform for "
                         f"the {'local' if local else 'global'} planned path; "
                         f"not publishing it: {exc}"
                     )
@@ -886,7 +640,6 @@ class HardwareBridge(
         jpeg = bytes(msg.data)
         # Queue for detection; do NOT run inference here. See run_detection().
         self._detect_pending = (jpeg, getattr(msg, "header", None))
-        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Detection takes JPEG internally. Imported lazily so a robot with no
@@ -910,7 +663,6 @@ class HardwareBridge(
             return
         jpeg = buf.tobytes()
         self._detect_pending = (jpeg, getattr(msg, "header", None))
-        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def run_detection(self) -> None:
         """Detect on the newest queued frame. Runs OFF the ROS executor thread.
@@ -1043,7 +795,7 @@ class HardwareBridge(
         if not frame_id:
             return None
         try:
-            if frame_id == self.map_frame:
+            if frame_id == self.navigation_frame:
                 map_point = camera_point
             else:
                 stamp_msg = getattr(source_header, "stamp", None)
@@ -1054,11 +806,11 @@ class HardwareBridge(
                 )
                 try:
                     tf = self.tf_buffer.lookup_transform(
-                        self.map_frame, frame_id, stamp, timeout=Duration(seconds=0.1)
+                        self.navigation_frame, frame_id, stamp, timeout=Duration(seconds=0.1)
                     )
                 except Exception:
                     tf = self.tf_buffer.lookup_transform(
-                        self.map_frame, frame_id, rclpy.time.Time()
+                        self.navigation_frame, frame_id, rclpy.time.Time()
                     )
                 map_point = transform_point(camera_point, tf.transform)
             if map_point is None:
@@ -1072,7 +824,7 @@ class HardwareBridge(
             if now - self._last_depth_warning_at >= 10.0:
                 self._last_depth_warning_at = now
                 self.node.get_logger().warn(
-                    f"[{self.id}] cannot place camera detection in {self.map_frame}: {exc}"
+                    f"[{self.id}] cannot place camera detection in {self.navigation_frame}: {exc}"
                 )
             return None
 
@@ -1082,7 +834,7 @@ class HardwareBridge(
         """The robot's pose in its navigation-map frame, via tf2.
 
         A tf2 lookup rather than composing transforms we recognise by name.
-        `adapter_sim` can compose `map_frame -> odom -> base_link` because we
+        `adapter_sim` can compose `navigation_frame -> odom -> base_link` because we
         built that tree; a real robot's tree has links we do not know about, and
         hardcoding a chain through them is how an adapter ends up reporting a
         pose that is subtly wrong (this project has already made that mistake
@@ -1093,7 +845,7 @@ class HardwareBridge(
         """
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame, self.base_frame, rclpy.time.Time()
+                self.navigation_frame, self.base_frame, rclpy.time.Time()
             )
             t = tf.transform
             return {
@@ -1107,43 +859,18 @@ class HardwareBridge(
                 return {"x": 0.0, "y": 0.0, "yaw": 0.0}
             if not self._pose_warned:
                 self._pose_warned = True
-                if getattr(self, "_odom_frame", "") == self.map_frame:
-                    detail = f"using direct {self.map_frame}-frame odometry instead"
+                if getattr(self, "_odom_frame", "") == self.navigation_frame:
+                    detail = f"using direct {self.navigation_frame}-frame odometry instead"
                 else:
                     detail = (
                         "falling back to raw odometry, which DRIFTS. Check that SLAM "
                         "or localisation is running and publishing TF"
                     )
                 self.node.get_logger().warn(
-                    f"[{self.id}] no {self.map_frame} -> {self.base_frame} transform; "
+                    f"[{self.id}] no {self.navigation_frame} -> {self.base_frame} transform; "
                     f"{detail}."
                 )
             return dict(fallback)
-
-    def pose7(self, stamp: Any | None = None) -> np.ndarray | None:
-        """Full ``T_map_base`` as ``[x,y,z,qx,qy,qz,qw]`` for keyframe upload."""
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.map_frame,
-                self.base_frame,
-                stamp if stamp is not None else rclpy.time.Time(),
-                timeout=Duration(seconds=0.1),
-            )
-            t = tf.transform.translation
-            q = tf.transform.rotation
-            return np.array([t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64)
-        except Exception:
-            stored = getattr(self, "_odom_pose7", None)
-            # Current odometry cannot replace a historical map pose: a delayed
-            # scan would acquire today's yaw, potentially in a different frame.
-            if stamp is not None:
-                return None
-            if stored is not None:
-                return np.asarray(stored, dtype=np.float64)
-            fallback = getattr(self, "_odom_pose", None)
-            if fallback is None:
-                return None
-            return pose7_from_xy_yaw(fallback["x"], fallback["y"], fallback["yaw"])
 
     # ------------------------------------------------------------- commands
 
@@ -1376,56 +1103,6 @@ class HardwareBridge(
 
         future.add_done_callback(report_result)
         return True
-
-    def navigate_to(self, goal: dict[str, float]) -> None:
-        planner = getattr(self, "objective_planner", None)
-        if planner is not None:
-            planner.navigate(goal)
-            return
-        if self.traj_client is not None:
-            self._navigate_trajectory(goal)
-            return
-        if self.nav_client is None:
-            return
-        # Goal submission runs in the adapter's executor worker, not the
-        # websocket receive coroutine, so a brief startup wait cannot stop the
-        # 5 Hz state heartbeat. This matters when Nav2 is still activating: a
-        # click during that window should not be silently turned into a failed
-        # goal just because the action server was a moment late.
-        if (
-            not self.nav_client.server_is_ready()
-            and not self.nav_client.wait_for_server(timeout_sec=3.0)
-        ):
-            self.node.get_logger().warn(
-                f"[{self.id}] navigation action server not available; goal dropped"
-            )
-            self.nav_status = "failed"
-            return
-        msg = NavigateToPose.Goal()
-        msg.pose.header.frame_id = self.map_frame
-        msg.pose.header.stamp = self.node.get_clock().now().to_msg()
-        msg.pose.pose.position.x = float(goal["x"])
-        msg.pose.pose.position.y = float(goal["y"])
-        # NavigateToPose requires an orientation even though SwarmDeck's GUI
-        # command is a point. The Bunker/Nav2 point-goal checker intentionally
-        # accepts any final heading, so this neutral quaternion is not a
-        # request to rotate the robot to yaw zero.
-        yaw = float(goal.get("yaw", 0.0))
-        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
-        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
-
-        with self._goal_lock:
-            self._goal_generation += 1
-            generation = self._goal_generation
-            self._trajectory_target = None
-            self._trajectory_step = ""
-            self._trajectory_step_count = 0
-            self._trajectory_step_error = None
-            self._arm_goal(goal, relay_nav=True)
-            future = self.nav_client.send_goal_async(msg)
-            future.add_done_callback(
-                lambda f, g=generation: self._on_goal_response(f, g)
-            )
 
     def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
         planner = getattr(self, "objective_planner", None)
@@ -1801,11 +1478,11 @@ class HardwareBridge(
         frame = frame or str((self.cfg.get("trajectory") or {}).get("frame") or "body")
         try:
             tf = self.tf_buffer.lookup_transform(
-                frame, self.map_frame, rclpy.time.Time()
+                frame, self.navigation_frame, rclpy.time.Time()
             )
         except Exception as exc:
             self.node.get_logger().warn(
-                f"[{self.id}] {self.map_frame} -> {frame} TF failed; goal dropped: {exc}"
+                f"[{self.id}] {self.navigation_frame} -> {frame} TF failed; goal dropped: {exc}"
             )
             return None
         xyz = transform_point((float(goal["x"]), float(goal["y"]), 0.0), tf.transform)
@@ -2028,7 +1705,7 @@ class HardwareBridge(
         if frame is None:
             return None
         target = str(frame).lstrip("/")
-        if target == str(self.map_frame).lstrip("/"):
+        if target == str(self.navigation_frame).lstrip("/"):
             return self.map_pose()
         try:
             tf = self.tf_buffer.lookup_transform(
@@ -2162,49 +1839,9 @@ class HardwareBridge(
 
     # ------------------------------------------------------------- uploads
 
-    def upload_map(self) -> dict[str, Any] | None:
-        """Push the occupancy grid; return the `map_meta` to send afterwards."""
-        headers = map_upload_headers(self)
-        if headers is None:
-            return None
-        if not self._grid_dirty or self.grid is None:
-            return None
-        self._grid_dirty = False
-        g = self.grid
-        cells = np.array(g.data, dtype=np.int8)
-        body = zlib.compress(np.ascontiguousarray(cells).tobytes())
-        url = (
-            f"{self.http_url}/api/adapter/map?robot_id={self.id}"
-            f"&resolution={g.info.resolution}&width={g.info.width}"
-            f"&height={g.info.height}"
-            f"&origin_x={g.info.origin.position.x}"
-            f"&origin_y={g.info.origin.position.y}"
-        )
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(url, data=body, headers=headers),
-                timeout=float(self.cfg["upload_timeout_s"]),
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
-            return None
-        return {
-            "type": "map_meta",
-            "robot_id": self.id,
-            "resolution": g.info.resolution,
-            "width": g.info.width,
-            "height": g.info.height,
-            "origin": {
-                "x": g.info.origin.position.x,
-                "y": g.info.origin.position.y,
-            },
-        }
-
     def upload_costmaps(self) -> None:
         """Push the newest global/local Nav2 snapshots to the read-only overlay."""
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
+        headers = {"Content-Type": "application/octet-stream"}
         with self._costmap_lock:
             pending = [
                 (kind, self._costmaps[kind])
@@ -2221,7 +1858,7 @@ class HardwareBridge(
             frame = urllib.parse.quote(snapshot.frame_id, safe="")
             url = (
                 f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
-                f"&kind={kind}&resolution={snapshot.resolution}"
+                f"&kind=local&resolution={snapshot.resolution}"
                 f"&width={snapshot.width}&height={snapshot.height}"
                 f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
                 f"&frame_id={frame}"
@@ -2242,126 +1879,6 @@ class HardwareBridge(
                 self.node.get_logger().warn(
                     f"[{self.id}] {kind} costmap upload failed: {exc}"
                 )
-
-    def upload_scan(self) -> None:
-        """Upload registered XY returns for server-side occupancy raytracing."""
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
-        if not self._scan_dirty or self._scan_points is None:
-            return
-        self._scan_dirty = False
-        if not len(self._scan_points):
-            return
-        # The pose these points were captured at, not the pose now. See _on_map_cloud.
-        origin = self._scan_origin or self.map_pose()
-        points = self._scan_points
-        # A deck-mounted 3D lidar can see the chassis beneath and behind it.
-        # Those returns are already in the map frame, so remove the robot's
-        # configured footprint around the same origin used for raytracing.
-        # Otherwise ScanGridAccumulator quite correctly treats each self-hit
-        # as permanently occupied and the moving robot paints a trail of itself.
-        footprint_radius = max(0.0, float(self.cfg.get("footprint_radius", 0.0)))
-        if footprint_radius:
-            offsets = points - np.array([origin["x"], origin["y"]], dtype=np.float32)
-            outside_footprint = np.einsum("ij,ij->i", offsets, offsets) > (
-                footprint_radius * footprint_radius
-            )
-            points = points[outside_footprint]
-        if not len(points):
-            return
-        quantised = np.round(points / MAP_CLOUD_SCALE).astype(np.int16)
-        url = (
-            f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
-            f"&origin_x={origin['x']}&origin_y={origin['y']}"
-            f"&scale={MAP_CLOUD_SCALE}"
-            f"&retain_free_space={1 if self.cfg.get('retain_free_space', False) else 0}"
-        )
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url,
-                    data=zlib.compress(quantised.tobytes()),
-                    headers=headers,
-                ),
-                timeout=float(self.cfg["upload_timeout_s"]),
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] scan upload failed: {exc}")
-
-    def _lookup_color_transform(self, header):
-        # Do not block the single ROS executor waiting for TF it must dispatch.
-        return self.tf_buffer.lookup_transform(
-            header.frame_id, self.map_frame, rclpy.time.Time.from_msg(header.stamp)
-        )
-
-    def upload_cloud(self) -> None:
-        """Upload a voxel-reduced XYZ scan for the optional 3D map view."""
-        headers = map_upload_headers(self)
-        if headers is None:
-            return
-        points, rgb = getattr(self, "_cloud_snapshot", None) or (
-            self._cloud_points,
-            getattr(self, "_cloud_rgb", None),
-        )
-        if not self._cloud_dirty or points is None:
-            return
-        self._cloud_dirty = False
-        if not len(points):
-            return
-        scale = max(MAP_CLOUD_SCALE, float(np.max(np.abs(points))) / 32767)
-        body = (
-            np.round(points / scale).astype("<i2").tobytes()
-            if rgb is None
-            else points.astype("<f4").tobytes() + rgb.tobytes()
-        )
-        url = (
-            f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
-            f"&scale={scale}" + ("&format=xyzrgb32" if rgb is not None else "")
-        )
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url,
-                    data=zlib.compress(body, 1),
-                    headers=headers,
-                ),
-                timeout=float(self.cfg["upload_timeout_s"]),
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] 3D cloud upload failed: {exc}")
-
-    def upload_keyframe(self) -> None:
-        """Best-effort keyframe POST. Drops rather than blocking telemetry."""
-        if not self._keyframes.upload_one() and self._keyframes.last_error:
-            self.node.get_logger().warn(
-                f"[{self.id}] keyframe upload failed: {self._keyframes.last_error}"
-            )
-
-    def pull_nav_map(self) -> None:
-        """Publish the merged occupancy in this robot's map frame for Nav2."""
-        client = getattr(self, "_nav_map", None)
-        pub = getattr(self, "pub_global_map", None)
-        if client is None or pub is None:
-            return
-        downloaded = client.poll()
-        if downloaded is None:
-            if client.last_error:
-                self.node.get_logger().warn(
-                    f"[{self.id}] nav map download failed: {client.last_error}"
-                )
-            return
-        grid = OccupancyGrid()
-        pose = self.map_pose()
-        apply_to_occupancy_grid(
-            grid,
-            downloaded,
-            self.map_frame,
-            pose_xy=(pose["x"], pose["y"]),
-            clear_radius_m=float(self.cfg.get("footprint_radius", 0.35)) + 0.15,
-        )
-        grid.header.stamp = self.node.get_clock().now().to_msg()
-        pub.publish(grid)
 
 
 async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:

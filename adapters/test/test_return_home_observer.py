@@ -24,7 +24,7 @@ def authority():
         "robot_map_epoch": 0,
         "run_id": RUN,
         "component_id": "component:test",
-        "navigation_frame": "robot_3/map_frame",
+        "navigation_frame": "robot_3/navigation_frame",
         "correction_revision": 2,
         "map_epoch": 1,
         "mapping_graph_revision": 8,

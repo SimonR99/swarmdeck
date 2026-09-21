@@ -57,7 +57,7 @@ def main():
             node=node,
             id="probe",
             cfg={"link_timeout_s": 60},
-            map_frame="map",
+            navigation_frame="map",
             navigate_to=goals.append,
             cancel_goal=lambda: stops.append(True),
             drive=lambda *_: None,

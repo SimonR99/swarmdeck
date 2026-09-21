@@ -14,7 +14,6 @@ for rendering backends, scenarios, calibration, and launch configuration.
 | ARGoS ROS bridge | Decode packets; publish truth, odometry/TF, RGB-D, cloud, planar and proximity scans | Socket bytes, point projections, ROS serialization |
 | Fast-LIVO2 link and estimators | Separate sensor socket; publish estimator inputs; return estimated poses | Per-robot estimation; optional image processing |
 | `adapter_sim` | Capture-time pose lookup, keyframe gating, RGB projection, detections, cloud/map uploads | Point processing, detection inference, image encoding, network |
-| Collaborative SLAM/server/UI | Register keyframes, optimize maps, serve and display geometry | Registration and browser rendering; separate from simulation real-time factor |
 
 Ground truth is published separately for evaluation. It is not substituted for
 an unconverged estimator. Odometry profile selection and TF ownership are defined
@@ -46,7 +45,6 @@ skipped, so subsequent robots remain aligned. Empty LiDAR packets produce
 all-infinite planar/proximity scans without disconnecting the bridge. A bridge
 reconnection or clock rewind clears its sensor deduplication state. This is not
 a reset of the estimator or SLAM graph: start a fresh stack/session for a fresh
-trajectory. The legacy Gazebo reset service is not a complete ARGoS reset path.
 
 Capture-time TF checks and the keyframe yaw-rate gate remain necessary even with
 correct stamps: a delayed transform or a rolling scan during a fast turn can
@@ -172,11 +170,9 @@ timeout. Check its state inside the simulation container:
 
 ```sh
 docker exec swarmdeck-sim-1 bash -c \
-  'source /opt/ros/jazzy/setup.bash; ros2 lifecycle get /robot_3/slam_toolbox'
 ```
 
 If configured but inactive, activate it with
-`ros2 lifecycle set /robot_3/slam_toolbox activate` in the same environment.
 Check Nav2 lifecycle states too: a missing map can leave downstream nodes
 inactive. Activate only nodes confirmed inactive. Startup staggering and longer
 client timeouts reduce contention but cannot recover every lost response.
@@ -197,7 +193,6 @@ above the ground, keeping street returns from hiding changes in nearby walls.
 The novelty threshold is 0.25 m; full 3D geometry still uploads. Timestamp,
 yaw-rate, and registration gates remain independent checks.
 
-Use `/api/slam/backend` to distinguish ingest backlog from sparse matches:
 
 | Signal | Interpretation |
 |---|---|

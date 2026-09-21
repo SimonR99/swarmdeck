@@ -69,12 +69,9 @@ def generate_launch_description() -> LaunchDescription:
             {
                 "use_sim_time": use_sim_time,
                 "odom_topic": "/laser_odometry",
-                "parent_frame": "map",
+                "navigation_frame": "map",
                 "child_frame": _BASE_FRAME,
                 "planar": True,
-                # SuperOdometry arrives about 0.7 s behind wall time while the
-                # Ouster scan arrives about 0.1 s behind. Stamp the relayed TF
-                # on receipt so the scan-only costmaps can transform live data.
                 "use_receive_time": True,
             }
         ],

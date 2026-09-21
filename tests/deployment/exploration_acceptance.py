@@ -17,8 +17,12 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-
-import websockets
+try:
+    import websockets
+except ModuleNotFoundError:
+    class _WebSockets:
+        connect = None
+    websockets = _WebSockets()
 
 ROBOT_IDS = frozenset(f"robot_{index}" for index in range(4))
 ACTIVE_EXPLORATION = frozenset({"starting", "exploring", "waiting"})
@@ -416,8 +420,7 @@ async def qualified_live(args, robot_ids, deadline, expected=None):
 
 
 async def _drain(socket):
-    async for _ in socket:
-        pass
+    pass
 
 
 async def run(args):

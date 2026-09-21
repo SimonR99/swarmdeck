@@ -1,34 +1,22 @@
-"""Keep a 2D raster of the fleet map in the optimized-map store.
+"""Keep the deployment-frame 2D raster beside replicated 3D products.
 
-The Global 3D view renders the fleet map from the replicated keyframes: the
-verified multi-robot component when inter-robot closures have merged the
-robots, else the deployment composite (``replica_views``: every replicated
-single-robot component placed in the surveyed deployment frame). The 2D map's
-"optimized" source (``/api/map/optimized``) had nothing to show for either:
-the central SLAM service that posts ``component:<n>`` grids ingests no
-keyframes in a peer deployment. This module rasterizes the same geometry the
-3D view draws (``mapsvc.keyframe_raster``) and stores it beside the back-end's
-grids: a verified component as ``component:<id>`` (which the 2D view ranks
-first, as a merge), the composite as ``deployment:<session>``. Both
-interfaces then show one map.
+The Global 3D view renders replicated keyframes directly. This module rasterizes
+the same geometry for the 2D dashboard and stores it in the optimized-map
+store: a verified component as ``component:<id>``, or the deployment composite
+as ``deployment:<session>``. Both interfaces therefore show the same product.
 
-Lifecycle: ``deployment_raster_loop`` in ``api.app`` calls ``tick`` every
-``REFRESH_INTERVAL_S``. Registry and map-service placements are read on the
-event loop; catalogue assembly, chunk decoding and the numpy raster run in a
-worker thread. A rebuild happens only when the composite's ``snapshot_id``
-changed (it digests every member's replica snapshot and placement) or when the
-scope is missing from the store (a map reset cleared it). The scope is kept
-while the mission is unchanged, even through a moment without a composite
-(a member's authority and replica can briefly disagree on a frame revision),
-and retired when the active mission changes or is unset; the SLAM back-end's
-scope list never touches it (``map_routes._prune_optimized_maps``).
+Lifecycle: ``deployment_raster_loop`` calls ``tick`` periodically. Registry and
+map-service placements are read on the event loop; catalogue assembly, chunk
+decoding and the numpy raster run in a worker thread. A rebuild happens only
+when the composite snapshot or placement changes, or when the scope is absent.
+Scopes remain valid while the mission is unchanged and are retired on mission
+change or reset.
 
-Budgets: the composite's own submap and source budgets apply (an overflow
-skips the build), the declared point total is capped by ``MAX_POINTS`` before
-any chunk is read, the raster's cell count is capped by ``keyframe_raster``,
-and decoded chunks are cached by hash under ``CACHE_BYTES`` because chunks
-are immutable while pose corrections move whole submaps.
+Budgets: the composite's own submap and source budgets apply, declared points
+are capped before chunks are read, raster cell count is bounded, and decoded
+chunks are cached by hash because chunks are immutable while placements move.
 """
+
 
 from __future__ import annotations
 

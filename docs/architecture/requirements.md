@@ -7,13 +7,11 @@ maps, and a browser GUI for one operator. This document is the target product
 contract, not an implementation-status report; see the root README and roadmap.
 
 Built and validated in simulation. **Robots connect through a version-agnostic adapter
-contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 
 ## 2. Scope
 
 **In scope**
 
-- Gazebo simulation: indoor world, 4 differential-drive robots with lidar, IMU, wheel
   odometry, RGB camera.
 - Per-robot 2D SLAM producing an occupancy grid.
 - Merged 2D occupancy grid across robots, supporting unknown relative start poses.
@@ -78,7 +76,6 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
   - `auto` — unknown starts, estimated by grid feature matching.
 - **FR-M5** Serve the merged map to the GUI as a full grid on connect and incremental
   patches thereafter.
-- **FR-M6** Report merge accuracy against Gazebo ground truth, in meters.
 - **FR-M7** Map state survives GUI reload and reconnection.
 - **FR-M8** Merged map feeds each robot's navigation costmap.
 
@@ -161,7 +158,6 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 ## 7. Prerequisites
 
 Docker is the supported setup. Host simulation development uses ROS 2 Jazzy,
-Gazebo Harmonic, Nav2, SLAM Toolbox, `robot_localization`, and optionally
 RTAB-Map. MediaMTX and perception runtimes are included in Compose images.
 
 ROS 1 Noetic is EOL and must run in the robot's own environment or container;

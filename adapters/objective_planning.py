@@ -1883,7 +1883,7 @@ class MggObjectivePlanning:
 
         component_goal = goal.get("component_goal")
         source_frame = str(
-            goal.get("frame_id") or getattr(self.bridge, "map_frame", self.frame)
+            goal.get("frame_id") or getattr(self.bridge, "navigation_frame", self.frame)
         ).lstrip("/")
         raw_frame = str((raw_authority or {}).get("navigation_frame", "")).lstrip("/")
         if not raw_frame and raw_authority is None:
@@ -1964,7 +1964,7 @@ class MggObjectivePlanning:
         if isinstance(goal.get("component_goal"), dict):
             return self._component_goal_in_navigation(goal, authority)
         source_frame = str(
-            goal.get("frame_id") or getattr(self.bridge, "map_frame", self.frame)
+            goal.get("frame_id") or getattr(self.bridge, "navigation_frame", self.frame)
         ).lstrip("/")
         resolved = deepcopy(goal)
         if source_frame != self.frame:

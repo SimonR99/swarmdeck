@@ -129,7 +129,7 @@ from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformException
 
 node.pending_odom = deque(maxlen=10)
-node.frame = "robot_0/map_frame"
+node.frame = "robot_0/navigation_frame"
 node.odom = Mock()
 node.buffer = Mock()
 node.get_clock = Mock()

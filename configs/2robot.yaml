@@ -29,10 +29,7 @@ fleet:
     h_samples: 512
 
 map:
-  merge_mode: graph         # pose-graph occupancy; no grid registration
-  size_m: 30.0              # merged grid extent, metres
-  resolution: 0.05
-  start_poses:              # spawn poses; graph mode does not treat these as merges
+  start_poses:
     robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
     robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
 alerts:

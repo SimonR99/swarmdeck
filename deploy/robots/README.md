@@ -31,11 +31,11 @@ helper additionally verifies its ROS data before checking backend liveness.
 `--no-verify` skip stages.
 
 The Bunker base driver starts up by default alongside sensing and navigation.
-
-Adding a Compose robot requires `deploy/robots/<name>.env`, a robot Compose file,
-and adapter/sensor configuration. `ROBOT=all` discovers the profile automatically.
-Deployment reset means `docker compose down --remove-orphans`; it does not move
-hardware or clear robot-side SLAM.
+Every ROS 2 robot may enable the `peer_mapping` Compose profile. It is the
+documented map source: the peer Swarm-SLAM service publishes corrected poses,
+the local MOLA worker builds occupancy products, and the indexed query serves
+MGG. Navigation uses the robot's continuous odometry frame; corrections remain
+map-authority data rather than TF edges.
 
 ## Asimov (Unitree G1)
 
@@ -49,11 +49,11 @@ odometry, joint state, RTSP stream, and backend registration:
 make deploy ROBOT=asimov
 ```
 
-The profile also brings up a full Nav2 stack (obstacle-aware costmap built
-from the projected Mid-360 cloud, planner, controller, `bt_navigator`)
-against the onboard Unitree/Livox localization's live `world -> base_link` TF,
-the same generic NavigateToPose path Botman and Aslan already run. One detail
-remains unverified on real hardware: `asimov.launch.py`'s
+The profile brings up the Nav2 trajectory controller and local obstacle costmap
+against the onboard Unitree/Livox localization's live continuous frame. MGG is
+the sole planner and sends `FollowPath` trajectories; Nav2 does not run a
+planner or behavior tree.
+One detail remains unverified on real hardware: `asimov.launch.py`'s
 `_SENSOR_YAW_IN_BASE` assumes the Mid-360's `livox_frame` already agrees with
 `base_link`'s forward axis (0 rad), unlike the Bunkers' confirmed pi-yaw
 mount offset. Confirm this on first bring-up by checking whether the

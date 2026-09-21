@@ -21,15 +21,13 @@ install` also requires Node.js for the host development workflow.
 
 ### Dashboard with a mock fleet
 
-This is the smallest way to try the UI. It runs the server, UI, SLAM service,
-MediaMTX, and a synthetic fleet without ROS or a simulator.
+
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml --profile mock up --build -d
 ```
 
-Open <http://localhost:5173>. The API is at <http://localhost:8080> and SLAM
-diagnostics are at <http://localhost:8090/status>.
+
 
 ```bash
 make docker-ps
@@ -78,13 +76,6 @@ make test-ui
 make test
 ```
 
-The optional collaborative SLAM environment is separate because its pinned
-GTSAM binding requires Python 3.12 and NumPy < 2:
-
-```bash
-make install-slam
-make slam
-```
 
 ## Architecture
 
@@ -96,20 +87,20 @@ receives REST and WebSocket state and obtains camera media from MediaMTX.
 
 ```mermaid
 flowchart LR
-    Sensors["ARGoS or robot sensors"] --> Adapters["Robot adapters<br/>ROS 1 · ROS 2 · simulation · mock"]
-    Adapters <-->|"state · commands · replicas · keyframes"| Server["SwarmDeck server<br/>FastAPI :8080 · no ROS"]
-    Server <-->|"diagnostics · verified graph"| SLAM["Central SLAM service<br/>:8090"]
-    Server <-->|"REST · WebSocket"| UI["Svelte dashboard<br/>:5173"]
+    Sensors["ARGoS or robot sensors"] --> Peer["Swarm-SLAM peer<br/>SWARMDECK_SLAM_BACKEND=cslam"]
+    Peer --> MOLA["MOLA occupancy products"]
+    MOLA --> MGG["MGG planner<br/>frame = robot/odom"]
+    MGG --> Controller["Nav2 controller<br/>FollowPath + local costmap"]
+    Controller --> Adapters["Robot adapters<br/>ROS 1 · ROS 2 · simulation · mock"]
+    Adapters <-->|"state · commands · replicas"| Server["SwarmDeck server<br/>FastAPI :8080 · no ROS"]
+    Server -->|"replicas · events · map catalogue"| UI["Svelte dashboard<br/>:5173"]
     Adapters -->|RTSP| Media["MediaMTX"]
     Media -->|WHEP / WebRTC| UI
-    Server -->|"replicas · events · map catalogue"| UI
 ```
 
-The central server path remains available for diagnostics, historical maps, and
-the explicit legacy mode. The normal simulation launcher selects the onboard
-authority chain: sensors, capture, peer Swarm-SLAM, native MOLA, indexed query,
-MGG, Nav2, adapter. [`docs/plan.md`](docs/plan.md) owns that chain, its
-ownership table and its invariants. Use [current stack
+The launcher selects one authority chain: sensors, peer Swarm-SLAM, native MOLA,
+indexed query, MGG, controller, and adapter. [`docs/plan.md`](docs/plan.md) owns
+that chain, its ownership table and invariants. Use [current stack
 operations](docs/operations/current-stack.md) for commands and the [acceptance
 log](docs/operations/acceptance-log.md) for measured trials.
 

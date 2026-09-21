@@ -1,18 +1,14 @@
 import { postLiveReplicaGoal } from '../map3d/liveReplicaFrame.ts';
-import { isComponentScope } from '$lib/stores/optimizedScopes';
+import { isComponentScope, isDeploymentScope } from '../../stores/optimizedScopes.ts';
 
 /**
- * A click on a verified component raster is a point in that component's
- * frame, the frame the 3D view picks in as well. The legacy `set_goal`
- * command fences its goal on the surveyed start transforms and refuses one
- * whose `map_transform` differs ("Map alignment changed"), and a component
- * raster's per-robot transforms are the solver's, never those, so every goal
- * placed on it was refused (operator, 2026-09-20). Such a goal goes through the
- * live component goal API instead: the displayed solution order fences it,
- * and the server re-expresses it in the robot's own navigation frame.
+ * Every displayed optimized raster uses the live replica goal endpoint. The
+ * solution order returned by that endpoint fences the click against a newer
+ * raster publication before dispatch.
  */
-export function usesLiveComponentGoal(viewMode: string, scope: string | null): scope is string {
-  return viewMode === 'global' && scope !== null && isComponentScope(scope);
+export function usesLiveRasterGoal(viewMode: string, scope: string | null): scope is string {
+  return (viewMode === 'global' || viewMode === 'local') &&
+    scope !== null && (isComponentScope(scope) || isDeploymentScope(scope));
 }
 
 interface LiveRobot {

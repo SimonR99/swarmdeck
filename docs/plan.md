@@ -19,13 +19,12 @@ flowchart TB
   Peer --> Chunks["Revisioned geometry<br/>and immutable snapshots"]
   Chunks --> MOLA["Native MOLA<br/>persistent products"]
   MOLA --> Query["Bounded indexed query"]
-  Query --> MGG["MGG graph + grid"]
-  MGG --> Nav2["Nav2 local controller"]
+  Query --> MGG["MGG graph + grid planner<br/>frame = robot/odom"]
+  MGG --> Nav2["Nav2 trajectory controller<br/>FollowPath + local costmap"]
   Nav2 --> Adapter["Robot adapter<br/>command/action output"]
   Chunks --> Replica["Server replica"]
   Replica --> Server["FastAPI server"]
   Server <--> UI["Svelte UI"]
-  Server <--> SLAM["Central SLAM diagnostics"]
 ```
 
 The planning hierarchy is graph planner, then grid planner, then local
@@ -47,7 +46,6 @@ hard constraints.
 | Gaussian appearance and checkpoints | Optional reconstruction worker, bound to a graph revision | `scripts/reconstruction/` |
 | Fleet state, sessions, replicas, operator commands | ROS-free server | `server/` |
 | Operator display | Cached replica in the browser | `ui/` |
-| Server-facing pose graph and occupancy diagnostics | Central SLAM service on `:8090` | `slam/` |
 
 Adapters capture points in a sensor frame and associate them with the pose at
 the capture timestamp. Local odometry and navigation frames stay robot-owned.
@@ -137,10 +135,10 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 1. One provider publishes local odometry per robot and session. Multiple
    estimators consuming the same IMU and LiDAR are not independent measurements.
 2. Peer Swarm-SLAM is the only corrected-pose authority. MOLA neither optimizes
-   those poses nor publishes a competing `map -> odom` transform.
-3. No identity transform connects unverified components. A disconnected robot
-   has its own map root; a missing or stale shared transform blocks the
-   dependent operation instead of assuming two local frames coincide.
+   those poses nor publishes a competing TF transform.
+3. No identity transform connects unverified components. Corrections remain data,
+   and a disconnected robot has its own map root; missing or stale shared data
+   blocks the dependent operation instead of assuming local frames coincide.
 4. Occupied points alone cannot certify free space. Free space requires explicit
    `RayEvidence`: `FIRST_RETURN`, `DESKEWED` or `NOT_REQUIRED`, plus
    `SINGLE_CAPTURE`. Missing, partial, stale or generic geometry evidence never
@@ -218,8 +216,13 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     0.2 m cells, ground at the 10th percentile of z, occupied between
     ground + 0.30 m and ground + 2.0 m): a display raster of the replicated
     keyframes in the surveyed deployment frame, ranked after any verified
-    multi-robot component, while slam_toolbox's grids remain the `slam`
-    source and no planner reads it.
+    multi-robot component, and no planner reads the display raster.
+20. Navigation frame equals the robot's continuous odometry frame. Corrections
+    are data (`T_component_navigation`), never a TF edge.
+21. One 3D backend is selected by `SWARMDECK_SLAM_BACKEND=cslam`: peer
+    Swarm-SLAM supplies corrected poses and MOLA supplies occupancy products.
+22. Nav2 is the controller only. MGG is the sole planner and sends trajectories
+    to `FollowPath`.
 
 ## Status
 
@@ -366,8 +369,8 @@ Each item names its acceptance gate.
       signed Jazzy 2026-06-18 snapshot, removes mutable ROS apt sources, and
       permits downgrade of newer ROS packages inherited from the base image.
       Fresh sim, mapping, MGG and cslam builds passed on Benchbot amd64 with
-      MOLA 2.9.0, Nav2 1.3.12, slam_toolbox 2.8.5 and tf2 0.36.21. Native
-      lifecycle bring-up, lost-reply reconciliation and SIGINT shutdown passed.
+      MOLA 2.9.0, Nav2 1.3.12 and tf2 0.36.21. Native lifecycle bring-up,
+      lost-reply reconciliation and SIGINT shutdown passed.
       Humble uses its signed 2026-07-02 snapshot. Ubuntu updates, base-image
       tags and Python dependencies are not a bit-for-bit hermetic OS lock;
       hardware and ARM image qualification remain separate gates.
@@ -411,10 +414,9 @@ Each item names its acceptance gate.
 server/.venv/bin/python tests/deployment/exploration_acceptance.py \
   --simulation --base-url http://localhost:8080 --duration 180
 
-# Python, UI and SLAM suites
+# Python and UI suites
 make test
 make test-ui
-make test-slam
 
 # MGG native PCI contract smoke, without robot access
 docker run --rm --network none -e ROS_DOMAIN_ID=173 \

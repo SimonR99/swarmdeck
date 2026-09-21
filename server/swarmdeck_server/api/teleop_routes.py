@@ -91,93 +91,38 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-
     if "x" not in body or "y" not in body:
         return JSONResponse({"error": "'x' and 'y' required"}, status_code=400)
-
     robot = app.registry.robots.get(robot_id)
-    if not robot:
+    if robot is None:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
     from .map_routes import robot_command_error
-
-    error = robot_command_error(robot_id)
-    if error:
+    if (error := robot_command_error(robot_id)):
         return JSONResponse({"error": error}, status_code=409)
-
-    if not app.registry.can(robot_id, "navigate"):
+    if not app.registry.can(robot_id, "plan_objective"):
         return JSONResponse(
-            {"error": f"Robot '{robot_id}' does not support navigation"},
-            status_code=400,
+            {"error": f"Robot '{robot_id}' does not support plan_objective"},
+            status_code=409,
         )
-
     goal = {
         "x": float(body["x"]),
         "y": float(body["y"]),
         "yaw": float(body.get("yaw", 0.0)),
     }
-
     taken_by = app.goal_taken(goal, exclude=robot_id)
     if taken_by:
         return JSONResponse(
             {"error": f"Goal position is already occupied/assigned to {taken_by}"},
             status_code=409,
         )
-
-    local_goal = (
-        goal
-        if robot.coordinate_frame == "merged"
-        else app.map_service.world_to_robot(robot_id, goal)
-    )
-
-    start_pose = (
-        robot.pose
-        if robot.coordinate_frame == "merged"
-        else app.map_service.robot_to_world(robot_id, robot.pose)
-    )
-    world_goal = (
-        goal
-        if robot.coordinate_frame == "merged"
-        else app.map_service.robot_to_world(robot_id, local_goal)
-    )
-    planned_world = app.map_service.plan_path(robot_id, start_pose, world_goal)
-    local_planned = (
-        (
-            planned_world
-            if robot.coordinate_frame == "merged"
-            else [app.map_service.world_to_robot(robot_id, pt) for pt in planned_world]
-        )
-        if planned_world
-        else []
-    )
-
-    sent = await app.registry.send(
-        robot_id,
-        {
-            "type": "navigate_to",
-            "goal": local_goal,
-            "path": local_planned,
-            **app.stamps(),
-        },
-    )
-    if not sent:
+    from .objective_commands import send_objective
+    if not await send_objective(app.registry, robot_id, "navigate", goal):
         return JSONResponse(
-            {"error": f"Failed to send navigation goal to {robot_id}"}, status_code=502
+            {"error": f"Failed to send navigation goal to {robot_id}"},
+            status_code=502,
         )
-
-    robot.goal = local_goal
-    robot.nav_status = "active"
-    robot.mode = "nav"
-    if local_planned:
-        robot.global_planned_path = local_planned
-        robot.planned_path = local_planned
-
     app.events.log("agent_goal", {"robot_id": robot_id, "goal": goal})
-    return {
-        "ok": True,
-        "robot_id": robot_id,
-        "goal": goal,
-        "path_length": len(local_planned),
-    }
+    return {"ok": True, "robot_id": robot_id, "goal": goal}
 
 
 async def post_robot_cancel(robot_id: str) -> Any:

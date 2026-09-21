@@ -18,11 +18,9 @@ from adapters.runtime import (
     deep_merge,
     detections_message,
     hello_message,
-    map_cloud_height_limits,
     next_backoff,
-    project_occupied_cloud,
-    stamp_seconds,
     websocket_connect_kwargs,
+    stamp_seconds,
     yaw_of,
 )
 
@@ -57,36 +55,6 @@ def test_stamp_seconds_accepts_both_ros_timestamp_shapes():
     assert stamp_seconds(ros2) == 2.5
     assert stamp_seconds(types.SimpleNamespace(stamp=None)) is None
 
-
-def test_map_cloud_height_limits_can_be_expressed_above_a_floor():
-    assert map_cloud_height_limits(
-        {
-            "floor_z": -0.5,
-            "min_z": 0.15,
-            "max_z": 0.65,
-        }
-    ) == pytest.approx((-0.35, 0.15))
-
-
-def test_map_cloud_height_limits_preserves_legacy_map_frame_profiles():
-    assert map_cloud_height_limits({"min_z": -0.3, "max_z": 0.5}) == pytest.approx(
-        (-0.3, 0.5)
-    )
-
-
-def test_project_occupied_cloud_keeps_unknown_cells_unknown():
-    result = project_occupied_cloud(
-        np.array([[1.0, 2.0], [1.1, 2.1], [math.nan, 4.0]]),
-        resolution=0.5,
-        padding_m=0.5,
-    )
-    assert result is not None
-    resolution, width, height, origin_x, origin_y, cells = result
-    assert resolution == pytest.approx(0.5)
-    assert (width, height) == (3, 3)
-    assert (origin_x, origin_y) == pytest.approx((0.5, 1.5))
-    assert int((cells == 100).sum()) == 1
-    assert int((cells == -1).sum()) == 8
 
 
 def test_cloud_xyz_honours_field_offsets_and_drops_nonfinite_rows():

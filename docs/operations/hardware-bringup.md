@@ -35,7 +35,6 @@ robot-side SLAM state.
 
 ```bash
 make up-server       # server + UI + pose-graph SLAM back-end
-# Physical fleet (uses configs/hardware_fleet.yaml, merge_mode: graph):
 make up-deploy       # server + UI + SLAM + Zenoh router
 ```
 
@@ -135,4 +134,3 @@ origin. Navigation can retain its shorter obstacle/raytrace horizon.
 Apply these startup parameters by restarting the corresponding LiDAR driver.
 On TARS, restart its coupled sensor/SLAM launch after building the backport.
 Check the published cloud's range afterward. Existing spurious
-returns already accumulated in a SLAM/server map are not removed retroactively.

@@ -36,9 +36,9 @@ def authority():
 
 
 def test_planning_frame_defaults_to_map_and_expands_robot(monkeypatch):
-    bridge = NS(id="r0", map_frame="/r0/map_frame")
+    bridge = NS(id="r0", navigation_frame="/r0/navigation_frame")
     monkeypatch.delenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", raising=False)
-    assert planning_frame(bridge) == "r0/map_frame"
+    assert planning_frame(bridge) == "r0/navigation_frame"
     monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "/{robot}/odom")
     assert planning_frame(bridge) == "r0/odom"
     monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{unknown}/odom")
@@ -52,7 +52,7 @@ def test_planning_frame_defaults_to_map_and_expands_robot(monkeypatch):
 
 def test_authority_for_stable_frame_preserves_component_home():
     value = authority()
-    value["navigation_frame"] = "r0/map_frame"
+    value["navigation_frame"] = "r0/navigation_frame"
     # Live evidence showed these two translations changing together while
     # component<-odom remained invariant.
     component_from_map = np.eye(4)
@@ -75,7 +75,7 @@ def test_authority_for_stable_frame_preserves_component_home():
         selected["home"]["T_navigation_home"], expected_odom_home
     )
     # Selection is a copy and cannot alter the UI authority.
-    assert value["navigation_frame"] == "r0/map_frame"
+    assert value["navigation_frame"] == "r0/navigation_frame"
     np.testing.assert_allclose(value["home"]["T_navigation_home"], map_from_home)
 
 
@@ -141,7 +141,7 @@ def test_authority_relays_exact_key_and_expires(monkeypatch):
         create_subscription=lambda *args: None,
         create_publisher=lambda *args: NS(publish=published.append),
     )
-    reader = MappingAuthority(NS(node=node, id="r0", map_frame="map"))
+    reader = MappingAuthority(NS(node=node, id="r0", navigation_frame="map"))
     clock = [10.0]
     reader.clock = lambda: clock[0]
     value = authority()
@@ -191,7 +191,7 @@ def test_snapshot_uses_opted_in_planning_authority_but_current_stays_ui(monkeypa
         create_subscription=lambda *args: None,
         create_publisher=lambda *args: NS(publish=published.append),
     )
-    reader = MappingAuthority(NS(node=node, id="r0", map_frame="map"))
+    reader = MappingAuthority(NS(node=node, id="r0", navigation_frame="map"))
     value = authority()
     value["planning_frame"] = "r0/odom"
     component_from_odom = np.eye(4)
@@ -228,7 +228,7 @@ def test_reordered_authority_cannot_rollback_or_renew_freshness(monkeypatch):
         create_subscription=lambda *args: None,
         create_publisher=lambda *args: NS(publish=published.append),
     )
-    reader = MappingAuthority(NS(node=node, id="r0", map_frame="map"))
+    reader = MappingAuthority(NS(node=node, id="r0", navigation_frame="map"))
     clock = [10.0]
     reader.clock = lambda: clock[0]
     current = {**authority(), "solution_order": [2, 0]}
@@ -303,15 +303,11 @@ def test_mission_filter_is_exact_and_unconfigured_readers_pin_first(monkeypatch)
 
 
 def test_reset_notice_cancels_only_its_robot_and_fences_delayed_authority(monkeypatch):
-    from adapters.onboard_mapping import map_source_is_current, map_upload_headers
-
     monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
     monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=object))
     monkeypatch.setitem(sys.modules, "mgg_msgs.msg", None)
     node = NS(create_subscription=lambda *_args: None)
-    target = NS(
-        id="r0", node=node, map_frame="map", onboard_mapping=True, nav_status="active"
-    )
+    target = NS(id="r0", node=node, navigation_frame="map", nav_status="active")
     target.cancel_goal = lambda: setattr(target, "nav_status", "cancelled")
     target.drive = lambda *_: None
     reader = target._mapping_authority = MappingAuthority(target)
@@ -348,15 +344,11 @@ def test_reset_notice_cancels_only_its_robot_and_fences_delayed_authority(monkey
     reader.receive(NS(data=json.dumps(notice)))
     assert target.nav_status == "cancelled"
     assert reader.current() is None
-    assert map_upload_headers(target) is None
     reader.receive(NS(data=json.dumps(old)))
     assert reader.current() is None
     fresh = {**old, **notice, "source_reset_stamp": {"sec": 12, "nanosec": 5}}
     fresh.pop("state")
     reader.receive(NS(data=json.dumps(fresh)))
     assert reader.current() == fresh
-    assert map_upload_headers(target)["X-Run-Id"] == notice["run_id"]
-    assert not map_source_is_current(target, NS(header=NS(stamp=NS(sec=12, nanosec=5))))
-    assert map_source_is_current(target, NS(header=NS(stamp=NS(sec=12, nanosec=6))))
     reader.receive(NS(data=json.dumps(old)))
     assert reader.current() == fresh

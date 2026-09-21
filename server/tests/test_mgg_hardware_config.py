@@ -38,8 +38,7 @@ def test_onboard_planner_matches_adapter(robot, filename, domain):
     )
     planner = cfg["exploration"]["planner"]
     assert planner["cloud_topic"] != cfg["topics"]["odom"]
-    if robot != "asimov":
-        assert planner["cloud_topic"] != cfg["topics"]["map_cloud"]
     assert planner["body_height_m"] > 0
     assert all(lo < hi for lo, hi in zip(planner["bounds_min"], planner["bounds_max"]))
-    assert cfg["actions"].get("navigate_to_pose") or cfg["actions"].get("trajectory")
+    # MGG routes need an executor: Nav2's controller or the vendor trajectory.
+    assert cfg["actions"].get("follow_path") or cfg["actions"].get("trajectory")

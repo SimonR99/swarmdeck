@@ -26,7 +26,7 @@ let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
 let tickTimer: number | null = null;
-let localMapTimer: number | null = null;
+let rasterRefreshTimer: number | null = null;
 let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
@@ -156,14 +156,6 @@ function dispatch(msg: ServerMessage) {
     case 'fleet_change':
       fleet.sync(msg.robots);
       break;
-    case 'map_info':
-      mapStore.setGlobalInfo(msg.info);
-      if (mapStore.viewMode === 'local') void mapStore.reloadCurrentView();
-      else void mapStore.loadFullPng(msg.info);
-      break;
-    case 'map_patch':
-      mapStore.applyGlobalPatch(msg);
-      break;
     case 'network_patch':
       mapStore.applyNetworkPatch(msg);
       break;
@@ -279,9 +271,7 @@ function send(msg: ClientMessage) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   } else if (mock) {
-    // Mirror commands into the simulator so the UI behaves identically.
-    if (msg.type === 'set_goal') mock.command(msg.robot_id, 'set_goal', msg.payload);
-    else if (msg.type === 'cancel_goal') mock.command(msg.robot_id, 'cancel_goal');
+    if (msg.type === 'cancel_goal') mock.command(msg.robot_id, 'cancel_goal');
     else if (msg.type === 'drive' && msg.payload.linear === 0 && msg.payload.angular === 0)
       mock.command(msg.robot_id, 'cancel_goal');
     else if (msg.type === 'stop_all') mock.stopAll();
@@ -299,13 +289,6 @@ export const actions = {
       if (!fleet.can(robot.robot_id, 'explore') || (enabled && !robot.online)) continue;
       sendAction({ type: enabled ? 'start_explore' : 'stop_explore', robot_id: robot.robot_id });
     }
-  },
-  setGoal(robotId: string, p: Point, mapTransform?: { x: number; y: number; yaw: number }) {
-    if (!fleet.isEnabled(robotId)) return;
-    sendAction({
-      type: 'set_goal', robot_id: robotId,
-      payload: mapTransform ? { ...p, map_transform: mapTransform } : p
-    });
   },
   cancelGoal(robotId: string) {
     sendAction({ type: 'cancel_goal', robot_id: robotId });
@@ -444,12 +427,7 @@ export function startConnection() {
   void resumeReset();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
-  // map_patch carries the merged map only, so the per-robot view has no push
-  // path and would otherwise sit frozen until the operator reselected the
-  // robot. Poll it at the adapter's own map cadence; refreshLocalView is a
-  // no-op unless a robot view is actually on screen.
-  localMapTimer = setInterval(() => {
-    void mapStore.refreshLocalView();
+  rasterRefreshTimer = setInterval(() => {
     void mapStore.refreshGlobalOptimizedView();
   }, 2000) as unknown as number;
 }
@@ -457,12 +435,12 @@ export function startConnection() {
 export function teardown() {
   if (!started) return;
   started = false;
-  if (retryTimer) clearTimeout(retryTimer);
-  if (tickTimer) clearInterval(tickTimer);
-  if (localMapTimer) clearInterval(localMapTimer);
+  clearTimeout(retryTimer ?? undefined);
+  clearInterval(tickTimer ?? undefined);
+  clearInterval(rasterRefreshTimer ?? undefined);
   retryTimer = null;
   tickTimer = null;
-  localMapTimer = null;
+  rasterRefreshTimer = null;
   if (ws) ws.onclose = null;
   ws?.close();
   ws = null;

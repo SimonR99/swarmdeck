@@ -119,11 +119,9 @@ platform steps as the planner. The supplied planning bounds are ±60 m horizonta
 These settings apply to simulation; hardware needs its own qualified profile.
 
 In MOLA mode, MGG reads the immutable native planner grid directly. It does not
-reconstruct an OctoMap tree. Occupied-only body checks retain measured surface
 heights so a coarse floor voxel cannot protrude upward into the robot's body
 solely because of its cell boundary. Missing height evidence remains conservative,
 and strict observed-volume checks retain full voxel bounds. The separate legacy
-cloud backend still uses OctoMap.
 
 Sparse LiDAR rays do not observe the whole body volume or the floor underneath
 a stationary robot. The simulation's explicit `observed_ground` body policy
@@ -236,8 +234,6 @@ coverage or exploration completion.
 Measured results for this test, including the 2026-09-16 four-robot Bistro
 trial, are in the [acceptance log](acceptance-log.md).
 
-The independent cloud/OctoMap path remains available through
-`./scripts/sim-up --legacy-cloud --drift`. For a direct legacy Compose invocation
 with NVIDIA rendering, add the MGG overlay to the same files and environment
 used for the simulation:
 
@@ -246,7 +242,6 @@ SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
 SWARMDECK_ODOMETRY=drift \
 docker compose -f deploy/compose/docker-compose.yml \
   -f deploy/compose/docker-compose.gpu.yml \
-  -f deploy/compose/docker-compose.mgg.yml \
   --profile argos up --build -d
 ```
 
@@ -260,8 +255,6 @@ The sidecar shares the simulator's network namespace. The peer launcher selects
 a fresh mission and ROS domain; the direct legacy overlay uses domain 42. The
 isolated test overlays use UDP between separate container IPC namespaces; this
 does not require disabling shared memory for colocated production ROS processes.
-Both paths use the existing ARGoS sensor bridge. In legacy cloud mode, the input
-relay resolves `map_frame <- base_link` at each odometry stamp and caps LiDAR
 publication at 2 Hz. It also projects the depth camera at
 2 Hz, sampling every fourth pixel, to observe ground inside the elevated
 LiDAR’s blind region. Camera extrinsics come from the same platform table
@@ -269,7 +262,6 @@ as the simulated sensor. No synthetic floor is inserted. Missing historical TF
 suppresses the observation. Odometry waits in a bounded ten-message queue
 for up to one simulated second for its matching TF, avoiding callback-order
 races without substituting a newer pose.
-Planner and PCI use simulation time. Legacy cloud mode uses 0.15 m OctoMap
 voxels and the same platform-specific collision and terrain limits.
 
 PCI's forward bootstrap is disabled (`bootstrap_distance=0`);
@@ -308,7 +300,6 @@ sourced workspace is:
 
 ```bash
 ros2 launch deploy/mgg/robot.launch.py \
-  robot:=spot_0 map_frame:=map base_frame:=body \
   odom:=/lio_sam/mapping/odometry cloud:=/ouster/points \
   params:=/absolute/path/to/spot-site-mgg.yaml use_sim_time:=false
 ```
@@ -316,7 +307,6 @@ ros2 launch deploy/mgg/robot.launch.py \
 The parameter file must target `/**/mggplanner_node` and describe the robot's
 collision size, sensor extrinsics, ground clearance, and site's allowed planning
 bounds. The upstream foot-bot demo parameters are not hardware calibration.
-The map frame must match the adapter's `map_frame`; the controller rejects paths
 in another frame. `odom.child_frame_id` must resolve into that frame through TF.
 Use `base_frame:=...` to select the chassis when the odometry child names a
 sensor frame. Use `tf:=... tf_static:=...` if the robot has nonstandard TF topics. Use an actual
@@ -445,7 +435,6 @@ schedule described above. A stopped session cannot publish a late planner
 result.
 
 **Return home** is per robot. The simulation adapter records its first complete,
-finite `map_frame -> odom -> base_link` pose, rather than the startup `(0,0)`
 fallback. The server keeps this robot-local position and converts through the
 current fleet alignment when issuing the normal navigation command. Home is
 not a teleport or automatic emergency behavior. The button waits for valid home

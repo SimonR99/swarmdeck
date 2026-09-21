@@ -420,7 +420,7 @@ services:
       # took the whole robot off the dashboard: no telemetry, no map, no camera,
       # and — the part that matters — no teleop. A detector that cannot reach
       # Ultralytics to fetch its weights on a site with no internet never
-      # reports healthy, and a bt_navigator that will not reach `active` never
+      # reports healthy, and a controller_server that will not reach `active` never
       # does either. "Nav2 won't come up, drive it manually" is exactly the
       # fallback that gate foreclosed.
       #
@@ -531,7 +531,7 @@ services:
       - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
-  # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
+  # SuperOdometry publishes /laser_odometry but not continuous odometry -> base TF. Despite
   # naming os_lidar as the message child, its pose is the physical-forward
   # frame; botman.launch.py adds the measured pi-yaw edge to raw os_lidar.
   # Keep one bridge independent of Nav2 so costmaps still get a pose if Nav2
@@ -570,7 +570,7 @@ services:
   # Reuses swarmdeck_ros/src/swarmdeck_nav, with Botman-specific frames,
   # odometry and Ouster scan configuration. Nav2 writes only cmd_vel_nav;
   # the adapter remains the sole publisher to the real Bunker /cmd_vel and
-  # relays autonomy only while its NavigateToPose goal is active.
+  # relays autonomy only while its FollowPath goal is active.
   nav2:
     build:
       context: ../..
@@ -612,8 +612,8 @@ services:
           export FASTRTPS_DEFAULT_PROFILES_FILE=/app/swarmdeck/deploy/dds/fastdds_udp_only.xml &&
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/botman_0/navigate_to_pose' &&
-          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /botman_0/bt_navigator | grep -q '^active'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/botman_0/follow_path' &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /botman_0/controller_server | grep -q '^active'
       interval: 20s
       timeout: 12s
       retries: 12
