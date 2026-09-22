@@ -1,4 +1,4 @@
-"""Apply bounded step traversal and internal-edge correction to pinned ARGoS models."""
+"""Apply bounded step traversal after the native contact-traction patch."""
 
 import argparse
 from pathlib import Path
@@ -28,20 +28,9 @@ def require_anchor(source: str, anchor: str) -> None:
 
 
 def patch_model(s: str, limit: float) -> str:
-    """Return the patched model; repeated application leaves it unchanged."""
-    anchor = "      /* Maintain vertical velocity from gravity */"
-    require_anchor(s, anchor)
-    contact_anchor = "      cSettings.mMotionQuality = JPH::EMotionQuality::LinearCast;"
-    require_anchor(s, contact_anchor)
-    if "cSettings.mEnhancedInternalEdgeRemoval = true;" not in s:
-        s = s.replace(
-            contact_anchor,
-            """      // Reject ghost edge contacts where adjacent/decorative road triangles meet.
-      // Apply the extra local contact work only to moving robot bodies.
-      cSettings.mEnhancedInternalEdgeRemoval = true;
-"""
-            + contact_anchor,
-        )
+    """Add one control-tick step probe to a contact-driven robot model."""
+    drive = "      SetDriveVelocity(fLinear, fAngular);"
+    require_anchor(s, drive)
     if "SwarmDeckStep" in s:
         matches = list(_STEP_CALL.finditer(s))
         if len(matches) != 1 or s.count("SwarmDeckStep") != 1:
@@ -52,26 +41,25 @@ def patch_model(s: str, limit: float) -> str:
             raise ValueError(
                 "Existing SwarmDeckStep call requires exactly one helper include"
             )
-        match = matches[0]
-        start, end = match.span("limit")
+        start, end = matches[0].span("limit")
         return s[:start] + f"{limit:.2f}" + s[end:]
     if _STEP_HELPER_INCLUDE in s:
         raise ValueError(
             "Found SwarmDeck step helper include without its generated call"
         )
-    s = _STEP_HELPER_INCLUDE + "\n" + s
-    s = s.replace(
-        anchor,
-        f"""      // Probe only one small commanded advance, never jump across a gap.
-      // Clear the rounded body corner even with a 1 ms physics substep.
+    step_body = f"""
+      JPH::BodyInterface& cInterface = GetJoltEngine().GetBodyInterface();
+      const JPH::BodyID& cId = m_vecBodies[0].Id;
+      JPH::RVec3 cPosition;
+      JPH::Quat cRotation;
+      cInterface.GetPositionAndRotation(cId, cPosition, cRotation);
+      JPH::Vec3 cForward = cRotation * JPH::Vec3::sAxisX();
+      // Probe once per control tick; contact friction supplies motor traction.
       float distance = std::abs(fLinear) < 0.001 ? 0.0f :
          std::clamp(std::abs(float(fLinear)) * float(GetJoltEngine().GetPhysicsClockTick()), 0.10f, 0.12f);
       SwarmDeckStep(GetJoltEngine().GetSystem(), cId, cPosition, cRotation,
-                    cForward * (fLinear < 0 ? -distance : distance), {limit:.2f}f);
-
-""" + anchor,
-    )
-    return s
+                    cForward * (fLinear < 0 ? -distance : distance), {limit:.2f}f);"""
+    return _STEP_HELPER_INCLUDE + "\n" + s.replace(drive, drive + step_body)
 
 
 def main() -> None:

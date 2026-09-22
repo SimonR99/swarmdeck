@@ -1,9 +1,14 @@
-# Jolt step traversal
+# Jolt terrain contact and step traversal
 
-`Dockerfile.argos` applies `apply_steps.py` to the pinned ARGoS checkout and
-rebuilds the four upright robot models. Upstream source outside the Docker build
-is never edited. A missing insertion anchor fails the build instead of silently
-omitting the helper after an upstream update.
+Native contact physics belongs in the sibling `../argos3` fork.
+`Dockerfile.argos` applies only the bounded-step integration in `apply_steps.py`
+to that native implementation. A missing insertion anchor fails the build
+instead of silently omitting traversal after an upstream update. Reapplying the
+step patch is idempotent.
+
+The contact traction lives in fork commit `45aabc8a`; the image pin
+(`ARGOS_REF`, currently `2fd71e40`) must include it, because the step patch
+anchors on its `SetDriveVelocity` call and fails the build without it.
 
 `SwarmDeckStep` runs only for a commanded translation. A cheap forward shape
 cast normally returns immediately. On contact, full-body casts check current
@@ -16,6 +21,20 @@ manhole reproduction found a robot stuck on an internal triangle edge despite
 clear forward shape casts. This option rejects ghost edge contacts while
 retaining the terrain faces and actual obstacles. The extra contact processing
 is enabled per robot, rather than across every body in the scene.
+
+Roll and pitch remain contact-driven rather than being locked upright.
+`CJoltGroundRobotModel` sets moving-contact surface velocities, and Jolt supplies
+traction bounded by friction and support load. It does not overwrite chassis
+linear/angular velocity, so gravity, terrain attitude, and airborne motion
+remain physical. The same mechanism supports differential steering.
+
+Ground robots inherit the engine's configured `default_friction`. Drive targets
+are updated in `UpdateFromEntityStatus`; the contact solver applies them at each
+physics substep. The bounded step probe runs once per control tick.
+With friction 0.6, all four native chassis crossed the actual SubT metal-platform
+approach without tipping. A commanded Bunker descent reached Z = -3.916 m while
+following the approximately 16-degree ramp. These isolated physics runs do not
+qualify MGG navigation or mapping through a live descent.
 
 Run both regression suites against a local ARGoS build:
 
@@ -32,6 +51,15 @@ No Bistro geometry is copied into the repository.
 Omit `--bistro` to run just the step suite (exact and near-limit steps, taller
 obstacles, overhead clearance, dynamic bodies, and absent support). The runner
 requires a C++ compiler; the optional mesh fixture also requires NumPy.
+
+The native ARGoS checkout also contains real Bunker, Scout Mini and Spot
+attitude regressions on a mesh incline, including differential yaw while
+following the surface normal:
+
+```bash
+cmake --build ../argos3/build --target mesh_jolt_assets mesh_jolt_controller mesh_jolt_loop_functions
+ctest --test-dir ../argos3/build -R '^jolt_mesh_' --output-on-failure
+```
 
 ## Maintenance
 

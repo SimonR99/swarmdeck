@@ -345,8 +345,9 @@ of those raise, none appear in a log, and all three are obvious in a picture.
 ## Building the fork
 
 The `argos` image builds it, from a pinned commit
-(`ARGOS_REF` in `Dockerfile.argos`, currently `da708052`, which adds the three
-robot entities and the static-libc++ discovery fix). Bump it deliberately and together with whatever in
+(`ARGOS_REF` in `Dockerfile.argos` and `docker-compose.yml`, currently
+`2fd71e40`: contact-driven ground-robot traction, robot-mounted headlights and
+the viewer flashlight). Bump it deliberately and together with whatever in
 `swarmdeck_sim` needs the newer simulator: a floating ref would mean the
 simulator changes under the stack with nothing in this repository recording
 that it did.
