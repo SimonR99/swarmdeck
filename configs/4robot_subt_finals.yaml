@@ -21,6 +21,8 @@ fleet:
   robot_types:
     robot_2: scout_mini
     robot_3: spot
+  # Forward-facing floodlight mounted at camera height for underground navigation
+  floodlight: true
   odometry: fast_livo2
   # 17-ring Velodyne VLP-16 profile required by the lidar-inertial estimator
   lidar:

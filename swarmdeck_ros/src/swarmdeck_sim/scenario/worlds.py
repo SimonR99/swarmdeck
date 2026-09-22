@@ -63,6 +63,7 @@ class MeshWorld:
     viewer_look_at: str
     viewer_far: str
     viewer_flashlight: bool = False
+    robot_floodlights: bool = False
 
     def assets_dir(self, custom_path: Path | str | None = None) -> Path:
         candidates: list[Path] = []
@@ -216,6 +217,7 @@ SUBT_FINALS = MeshWorld(
     viewer_look_at="-8,0,0.8",
     viewer_far="300",
     viewer_flashlight=True,
+    robot_floodlights=True,
 )
 
 MESH_WORLDS: dict[str, MeshWorld] = {w.name: w for w in (BISTRO, SUBT_FINALS)}

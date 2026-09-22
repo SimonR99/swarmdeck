@@ -757,8 +757,33 @@ def test_subt_is_lit_by_its_own_lamps_only(subt_tree):
     assert float(pr.find("sun").get("intensity")) == 0.0
     assert pr.find("environment") is None
     lamps = pr.findall("lights/spot") + pr.findall("lights/point")
-    assert len(lamps) == 88, "the importer found 88 SDF lights in this world"
+    world_lamps = [l for l in lamps if l.get("entity") is None]
+    assert len(world_lamps) == 88, "the importer found 88 SDF lights in this world"
     assert all(float(l.get("intensity")) > 0 for l in lamps)
+
+
+def test_subt_robots_carry_forward_floodlights(subt_tree):
+    """Each robot in the dark SubT tunnels carries a forward-facing floodlight."""
+    pr = subt_tree.find("media/photorealism")
+    robot_lamps = [l for l in pr.findall("lights/spot") if l.get("entity") is not None]
+    assert len(robot_lamps) == 4
+    assert {l.get("entity") for l in robot_lamps} == {
+        "robot_0",
+        "robot_1",
+        "robot_2",
+        "robot_3",
+    }
+    for lamp in robot_lamps:
+        assert lamp.get("direction") == "1,0,-0.05"
+        assert float(lamp.get("intensity")) >= 3000.0
+        assert float(lamp.get("falloff")) >= 20.0
+        assert float(lamp.get("inner_angle")) >= 30.0
+        assert float(lamp.get("outer_angle")) >= 45.0
+        # Origin anchor: position x is positive (at front of chassis) and z is positive (off the floor)
+        x, y, z = (float(v) for v in lamp.get("position").split(","))
+        assert x > 0.3
+        assert y == 0.0
+        assert z > 0.2
 
 
 def test_subt_targets_stand_on_the_tunnel_floor_not_the_ceiling(subt_tree):

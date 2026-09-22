@@ -88,6 +88,41 @@ def world_lights(path: Path) -> list[str]:
     ]
 
 
+def robot_floodlights(
+    robot_ids: list[str],
+    types: list[str],
+    cfg: bool | dict[str, Any],
+    indent: str = "        ",
+) -> list[str]:
+    """Mounts a forward-facing floodlight on each robot entity for camera navigation.
+
+    ARGoS's photorealism plugin attaches any <spot> with an `entity` attribute to that
+    robot's origin anchor, tracking its pose every tick in the body frame (+x forward).
+    A wide beam (inner 35 deg, outer 55 deg) covers the camera's 60 deg FOV, with a
+    slight downward pitch (-0.05 z component) to illuminate the floor ahead as well as
+    walls and ceiling in dark tunnels.
+    """
+    params = cfg if isinstance(cfg, dict) else {}
+    intensity = params.get("intensity", 4000)
+    falloff = params.get("falloff", 25)
+    inner = params.get("inner_angle", 35)
+    outer = params.get("outer_angle", 55)
+    color = params.get("color", "1.0,0.95,0.85")
+    direction = params.get("direction", "1,0,-0.05")
+    lines: list[str] = []
+    for rid, profile in zip(robot_ids, types):
+        spec = robot_spec(profile)
+        camera_z = spec.base_height + spec.camera_z
+        pos = _vec(spec.camera_x, 0.0, camera_z)
+        lines.append(
+            f"{indent}<spot entity={_attr(rid)} position={_attr(pos)} "
+            f'direction={_attr(direction)} intensity="{intensity:g}" '
+            f'falloff="{falloff:g}" inner_angle="{inner:g}" '
+            f'outer_angle="{outer:g}" color={_attr(color)} />'
+        )
+    return lines
+
+
 # Ultra-Fusion's tooling is built around 100 Hz. `make_profile.py` derives the
 # estimator's IMU noise densities from the sample rate, and those scale by
 # sqrt(rate), so running the simulation ten times slower than the estimator was
@@ -287,6 +322,13 @@ def generate_argos_xml(
         fleet_cfg, count, prefix, default_override=default_odom
     )
     odom_specs = [odometry_spec(o) for o in odom_types_list]
+    floodlight_setting = fleet_cfg.get("floodlight")
+    if floodlight_setting is None:
+        floodlight_setting = fleet_cfg.get("floodlights")
+    if floodlight_setting is None:
+        floodlight_setting = fleet_cfg.get("light")
+    if floodlight_setting is None and world is not None:
+        floodlight_setting = getattr(world, "robot_floodlights", False)
 
     system_threads = 0 if threads is None else threads
 
@@ -503,6 +545,12 @@ def generate_argos_xml(
         lights_path = assets / world.lights_file if world.lights_file else None
         if lights_path is not None and lights_path.exists():
             lines.extend(f"        {lamp}" for lamp in world_lights(lights_path))
+        if floodlight_setting:
+            lines.extend(
+                robot_floodlights(
+                    robot_ids, types, floodlight_setting, indent="        "
+                )
+            )
         lines.extend(
             [
                 "      </lights>",
@@ -559,6 +607,16 @@ def generate_argos_xml(
                 '        <point position="3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
                 '        <point position="9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
                 '        <point position="0,0,2.3" intensity="8000" falloff="14" color="1.0,0.98,0.95" />',
+            ]
+        )
+        if floodlight_setting:
+            lines.extend(
+                robot_floodlights(
+                    robot_ids, types, floodlight_setting, indent="        "
+                )
+            )
+        lines.extend(
+            [
                 "      </lights>",
                 "      <scenery>",
                 f'        <prop model={_attr(world_gltf)} position="0,0,0"',
