@@ -198,7 +198,9 @@ def test_parked_scans_repeat_only_at_the_scene_change_period(bridge_module):
     assert not parked_since(rest, rest, 9.0 + bridge_module.PARKED_REPUBLISH_S, 9.0)
 
 
-def test_write_text_if_changed_skips_the_write_when_nothing_changed(tmp_path, bridge_module):
+def test_write_text_if_changed_skips_the_write_when_nothing_changed(
+    tmp_path, bridge_module
+):
     write_text_if_changed = bridge_module.write_text_if_changed
     path = tmp_path / "status.json"
 
@@ -251,7 +253,13 @@ def test_authority_heartbeat_republishes_the_cache_verbatim_while_gated(bridge_m
     mission = str(uuid.uuid4())
     run_id = robot_run_id(mission, "robot_0", 0)
     good = _authority(mission, run_id, 0, 7)
-    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+    kwargs = dict(
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=0,
+        run_id=run_id,
+        cache_age_s=0.0,
+    )
 
     # A fresh authority is published and cached as-is.
     message, cache = heartbeat(good, None, **kwargs)
@@ -281,6 +289,7 @@ def test_authority_heartbeat_republishes_the_cache_verbatim_while_gated(bridge_m
         mission_id=mission,
         robot_map_epoch=1,
         run_id=reset_run_id,
+        cache_age_s=0.0,
     )
     assert message == {
         "robot_id": "robot_0",
@@ -306,12 +315,81 @@ def test_authority_heartbeat_resend_is_a_valid_causal_update(bridge_module):
     mission = str(uuid.uuid4())
     run_id = robot_run_id(mission, "robot_0", 0)
     good = _authority(mission, run_id, 0, 7)
-    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+    kwargs = dict(
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=0,
+        run_id=run_id,
+        cache_age_s=0.0,
+    )
 
     assert accepts_authority_update(good, None)
     resent, _ = heartbeat(None, good, **kwargs)
     # Identical heartbeats are accepted, never treated as rollback.
     assert accepts_authority_update(resent, good)
+
+
+def test_authority_heartbeat_stops_resending_after_the_resend_bound(bridge_module):
+    """A stall that outlasts `AUTHORITY_RESEND_MAX_S` loses map authority.
+
+    Dead sensors or TF used to publish ``resetting`` so MGG's snapshot and
+    the server's live mapping expired; the re-send must not keep a robot
+    with no fresh map authoritative forever.
+    """
+    from autonomy.map_epochs import robot_run_id
+
+    heartbeat = bridge_module.authority_heartbeat
+    bound = bridge_module.AUTHORITY_RESEND_MAX_S
+    assert bound == 10.0
+    mission = str(uuid.uuid4())
+    run_id = robot_run_id(mission, "robot_0", 0)
+    good = _authority(mission, run_id, 0, 7)
+    identity = dict(
+        robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id
+    )
+
+    message, cache = heartbeat(None, good, **identity, cache_age_s=bound - 0.1)
+    assert message is good and cache is good
+
+    message, cache = heartbeat(None, good, **identity, cache_age_s=bound)
+    assert message == {**identity, "state": "resetting"}
+    assert cache is None
+
+    # A fresh build is always published, whatever the age of the old cache.
+    message, cache = heartbeat(good, None, **identity, cache_age_s=bound * 5)
+    assert message is good and cache is good
+
+
+def test_authority_heartbeat_publisher_sends_resetting_once_snapshot_stops_updating(
+    bridge_module,
+):
+    """A `_snapshot` that never runs again cannot keep authority alive."""
+    from autonomy.map_epochs import robot_run_id
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    bound = bridge_module.AUTHORITY_RESEND_MAX_S
+    published, now = [], [100.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=lambda reason: None, clock=lambda: now[0]
+    )
+    mission = str(uuid.uuid4())
+    run_id = robot_run_id(mission, "robot_0", 0)
+    good = _authority(mission, run_id, 0, 7)
+    publisher.update(good, fresh_at=now[0])
+
+    now[0] += bound - 1.0
+    publisher.tick()
+    assert published[-1] is good
+
+    now[0] += 1.0
+    publisher.tick()
+    assert published[-1] == {
+        "robot_id": "robot_0",
+        "mission_id": mission,
+        "robot_map_epoch": 0,
+        "run_id": run_id,
+        "state": "resetting",
+    }
 
 
 def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updates(
@@ -483,7 +561,11 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     run_id0 = robot_run_id(mission, "robot_0", 0)
     good = _authority(mission, run_id0, 0, 7)
     kwargs0 = dict(
-        robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id0
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=0,
+        run_id=run_id0,
+        cache_age_s=0.0,
     )
 
     message, cache = heartbeat(good, None, **kwargs0)
@@ -503,7 +585,11 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     # starts sending that instead, never the stale authority again.
     run_id1 = robot_run_id(mission, "robot_0", 1)
     kwargs1 = dict(
-        robot_id="robot_0", mission_id=mission, robot_map_epoch=1, run_id=run_id1
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=1,
+        run_id=run_id1,
+        cache_age_s=0.0,
     )
     message, cache = heartbeat(None, cache, **kwargs1)
     assert message["state"] == "resetting" and cache is None
@@ -798,7 +884,9 @@ def test_retired_and_current_bridge_writers_never_share_a_temporary(
         errors = {name: [] for name in writers}
         threads = {
             name: threading.Thread(
-                target=write, args=(name, written[name], go[name], errors[name]), daemon=True
+                target=write,
+                args=(name, written[name], go[name], errors[name]),
+                daemon=True,
             )
             for name in writers
         }
@@ -928,7 +1016,9 @@ def test_close_after_a_join_timeout_leaves_the_thread_fenced(
     bridge.authority_heartbeat_thread.join(timeout=5)
     assert not bridge.authority_heartbeat_thread.is_alive()
     assert "publish" not in bridge.events
-    assert not any(event[0] == "warn" for event in bridge.events if type(event) is tuple)
+    assert not any(
+        event[0] == "warn" for event in bridge.events if type(event) is tuple
+    )
 
 
 def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
@@ -1049,10 +1139,15 @@ def test_heartbeat_gap_reason_separates_a_blocked_send_from_a_late_tick(
 
     now[0] += 4.0
     publisher.tick()
-    assert logged[-1] == "4.0s between sends: heartbeat tick started 4.0s after the last send"
+    assert (
+        logged[-1]
+        == "4.0s between sends: heartbeat tick started 4.0s after the last send"
+    )
 
 
-def test_gap_log_is_rate_limited_and_silent_after_close(tmp_path, bridge_module, monkeypatch):
+def test_gap_log_is_rate_limited_and_silent_after_close(
+    tmp_path, bridge_module, monkeypatch
+):
     bridge, _, _ = _running_bridge(tmp_path, bridge_module, monkeypatch)
     log = bridge_module.Bridge._log_authority_gap
 
@@ -1121,9 +1216,18 @@ def test_an_unserializable_candidate_never_evicts_the_last_good_authority(
     heartbeat = bridge_module.authority_heartbeat
     mission = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
-    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+    kwargs = dict(
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=0,
+        run_id=run_id,
+        cache_age_s=0.0,
+    )
     good = _authority(mission, run_id, 0, 3)
-    invalid = {**_authority(mission, run_id, 0, 4), "T_component_planning": [float("nan")]}
+    invalid = {
+        **_authority(mission, run_id, 0, 4),
+        "T_component_planning": [float("nan")],
+    }
 
     message, cache = heartbeat(invalid, good, **kwargs)
     assert message is good and cache is good
