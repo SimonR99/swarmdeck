@@ -881,6 +881,8 @@ class ArgosBridge(Node):
                     nav_scan_ranges = nav_prox_ranges = None
                 need_hits = points_needed or capture_needed
                 need_rays = (need_hits and (cloud_data is None or hits is None)) or (
+                    capture_needed and hits and points_sha256 is None
+                ) or (
                     scan_needed and scan_ranges is None
                 ) or (prox_needed and prox_ranges is None) or (
                     nav_scan_needed and nav_scan_ranges is None

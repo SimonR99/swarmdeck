@@ -224,6 +224,19 @@ def test_unsubscribed_scan_products_are_not_built_and_late_subscriber_receives_n
     robot.pub_image.publish.assert_not_called()
 
 
+def test_late_capture_subscriber_gets_digest_after_point_cloud_cache_warmed(rig):
+    node, robot = rig
+    robot.pub_capture.get_subscription_count.return_value = 0
+    robot.pub_nav_scan.get_subscription_count.return_value = 0
+    robot.pub_nav_prox.get_subscription_count.return_value = 0
+    read(node, Socket(packet(sensor_tick=90, hits=1)))
+    robot.pub_capture.publish.assert_not_called()
+    robot.pub_capture.get_subscription_count.return_value = 1
+    read(node, Socket(packet(sensor_tick=91, hits=1)))
+    digest = json.loads(robot.pub_capture.publish.call_args.args[0].data)["points_sha256"]
+    assert digest == hashlib.sha256(np.asarray([[2.0, 0.0, 0.0]], dtype="<f4").tobytes()).hexdigest()
+
+
 def test_tick_zero_sensors_are_drained_but_withheld_until_capture_time_exists(rig):
     node, robot = rig
     sock = Socket(packet(sensor_tick=0, hits=1) + packet(sensor_tick=1, hits=1))
