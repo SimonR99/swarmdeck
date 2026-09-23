@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { rebaseViewport } from './mapViewport';
+  import { CanvasViewport, type CanvasView } from './canvasViewport';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
     globalMapMembers,
@@ -70,7 +71,7 @@
     rotateBy?: (angle: number) => void;
     resetRotation?: () => void;
   } | null>(null);
-  let view = $state({ scale: 0.55, tx: 0, ty: 0, rotation: 0, initialised: false });
+  const view = $state<CanvasView>({ scale: 0.55, tx: 0, ty: 0, rotation: 0, initialised: false });
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
@@ -117,33 +118,8 @@
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
 
-  /** Screen px per grid cell, then per metre. */
-  function screenOf(gx: number, gy: number) {
-    const sx_unrot = gx * view.scale;
-    const sy_unrot = gy * view.scale;
-    if (!view.rotation) {
-      return { sx: sx_unrot + view.tx, sy: sy_unrot + view.ty };
-    }
-    const c = Math.cos(view.rotation);
-    const s = Math.sin(view.rotation);
-    return {
-      sx: sx_unrot * c - sy_unrot * s + view.tx,
-      sy: sx_unrot * s + sy_unrot * c + view.ty
-    };
-  }
-
-  function gridOf(sx: number, sy: number) {
-    const dx = sx - view.tx;
-    const dy = sy - view.ty;
-    if (!view.rotation) {
-      return { gx: dx / view.scale, gy: dy / view.scale };
-    }
-    const c = Math.cos(-view.rotation);
-    const s = Math.sin(-view.rotation);
-    const unrot_x = dx * c - dy * s;
-    const unrot_y = dx * s + dy * c;
-    return { gx: unrot_x / view.scale, gy: unrot_y / view.scale };
-  }
+  const viewport = new CanvasViewport(view);
+  const { screenOf, gridOf } = viewport;
 
   function robotsOnMap() {
     // The displayed raster decides who is on it: the optimized scope's robots
@@ -178,10 +154,7 @@
       n++;
     }
     if (!n) return;
-    const cx = sx / n;
-    const cy = sy / n;
-    view.tx = canvas.width / (2 * devicePixelRatio) - cx * view.scale;
-    view.ty = canvas.height / (2 * devicePixelRatio) - cy * view.scale;
+    viewport.centreAt(sx / n, sy / n, canvas.width / devicePixelRatio, canvas.height / devicePixelRatio);
   }
 
   function centreOnSelected() {
@@ -197,10 +170,12 @@
       gx += p.gx;
       gy += p.gy;
     }
-    gx /= selected.length;
-    gy /= selected.length;
-    view.tx = canvas.width / (2 * devicePixelRatio) - gx * view.scale;
-    view.ty = canvas.height / (2 * devicePixelRatio) - gy * view.scale;
+    viewport.centreAt(
+      gx / selected.length,
+      gy / selected.length,
+      canvas.width / devicePixelRatio,
+      canvas.height / devicePixelRatio
+    );
     follow = false;
   }
 
@@ -239,25 +214,14 @@
   function fitMap() {
     const info = mapStore.info;
     if (!info || !host) return;
-    const padding = 32;
-    const width = Math.max(1, host.clientWidth - padding * 2);
-    const height = Math.max(1, host.clientHeight - padding * 2);
-    view.scale = Math.max(0.12, Math.min(6, Math.min(width / info.width, height / info.height)));
-    view.tx = (host.clientWidth - info.width * view.scale) / 2;
-    view.ty = (host.clientHeight - info.height * view.scale) / 2;
+    viewport.fit(host.clientWidth, host.clientHeight, info);
     follow = false;
   }
 
   function zoomBy(factor: number, ax?: number, ay?: number) {
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const px = ax ?? rect.width / 2;
-    const py = ay ?? rect.height / 2;
-    const before = gridOf(px, py);
-    view.scale = Math.max(0.12, Math.min(6, view.scale * factor));
-    const after = screenOf(before.gx, before.gy);
-    view.tx += px - after.sx;
-    view.ty += py - after.sy;
+    viewport.zoomAt(factor, ax ?? rect.width / 2, ay ?? rect.height / 2);
     follow = false;
   }
 
@@ -269,15 +233,7 @@
     }
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const px = ax ?? rect.width / 2;
-    const py = ay ?? rect.height / 2;
-    const before = gridOf(px, py);
-    view.rotation += angleDelta;
-    while (view.rotation > Math.PI) view.rotation -= Math.PI * 2;
-    while (view.rotation < -Math.PI) view.rotation += Math.PI * 2;
-    const after = screenOf(before.gx, before.gy);
-    view.tx += px - after.sx;
-    view.ty += py - after.sy;
+    viewport.rotateAt(angleDelta, ax ?? rect.width / 2, ay ?? rect.height / 2);
     follow = false;
   }
 
@@ -555,48 +511,7 @@
       const otherEntry = entries.find(([id]) => id !== e.pointerId);
       if (otherEntry) {
         const [, otherCur] = otherEntry;
-        const prevA = prev;
-        const prevB = otherCur;
-        const curA = cur;
-        const curB = otherCur;
-
-        const prevMid = {
-          x: (prevA.x + prevB.x) / 2 - rect.left,
-          y: (prevA.y + prevB.y) / 2 - rect.top
-        };
-        const curMid = {
-          x: (curA.x + curB.x) / 2 - rect.left,
-          y: (curA.y + curB.y) / 2 - rect.top
-        };
-
-        const prevD = Math.hypot(prevA.x - prevB.x, prevA.y - prevB.y);
-        const curD = Math.hypot(curA.x - curB.x, curA.y - curB.y);
-
-        const prevAngle = Math.atan2(prevB.y - prevA.y, prevB.x - prevA.x);
-        const curAngle = Math.atan2(curB.y - curA.y, curB.x - curA.x);
-
-        let angleDelta = curAngle - prevAngle;
-        while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
-        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
-
-        const scaleFactor = prevD > 5 ? curD / prevD : 1.0;
-
-        // 1. Grid coordinate under the touch midpoint before moving
-        const anchorGrid = gridOf(prevMid.x, prevMid.y);
-
-        // 2. Apply scale
-        view.scale = Math.max(0.12, Math.min(6, view.scale * scaleFactor));
-
-        // 3. Apply rotation
-        view.rotation += angleDelta;
-        while (view.rotation > Math.PI) view.rotation -= Math.PI * 2;
-        while (view.rotation < -Math.PI) view.rotation += Math.PI * 2;
-
-        // 4. Pin the anchor grid coordinate under the new touch midpoint
-        const afterScreen = screenOf(anchorGrid.gx, anchorGrid.gy);
-        view.tx += curMid.x - afterScreen.sx;
-        view.ty += curMid.y - afterScreen.sy;
-
+        viewport.pinch(prev, cur, otherCur, { x: rect.left, y: rect.top });
         pointers.set(e.pointerId, cur);
         dragged = true;
         follow = false;
@@ -605,14 +520,11 @@
     }
 
     pointers.set(e.pointerId, cur);
-    const dx = cur.x - prev.x;
-    const dy = cur.y - prev.y;
     if (pointerDownPos && Math.hypot(cur.x - pointerDownPos.x, cur.y - pointerDownPos.y) > 6) {
       dragged = true;
       follow = false;
     }
-    view.tx += dx;
-    view.ty += dy;
+    viewport.pan(cur.x - prev.x, cur.y - prev.y);
   }
 
   function onPointerUp(e: PointerEvent) {
