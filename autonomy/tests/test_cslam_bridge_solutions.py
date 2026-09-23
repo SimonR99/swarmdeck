@@ -13,6 +13,7 @@ import importlib
 import json
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -588,6 +589,8 @@ def _claimed_bridge(tmp_path, bridge_module, monkeypatch):
         root=tmp_path / mission / "robot_0",
         authority_pub=NS(publish=lambda message: published.append(message.data)),
         published=published,
+        _authority_send_lock=threading.Lock(),
+        _authority_closed=False,
     )
     message = _authority(mission, robot_run_id(mission, "robot_0", 0), 0, 3)
     return bridge, mission, message
@@ -784,55 +787,168 @@ def test_snapshot_builds_outside_map_epoch_lock_and_fences_each_write(
     assert bridge._authority_heartbeat._message is None
 
 
-def test_authority_heartbeat_thread_join_waits_for_an_in_flight_tick(bridge_module):
-    """`Bridge.close()`'s own shutdown sequence: `self.closed.set()` then
-    `self.authority_heartbeat_thread.join(timeout=...)`, reproduced here with
-    a real thread. Setting `closed` must never let the join return while a
-    tick is mid-publish, and no publish may happen once the join has
-    returned: `close()` runs entirely before the sensor node (which owns
-    `authority_pub`) or the bridge node itself is destroyed.
+def _running_bridge(tmp_path, bridge_module, monkeypatch, *, period_s=0.01):
+    """`_claimed_bridge` plus what the real `Bridge.close()` touches: a
+    heartbeat thread running the real `_send_authority`/`_log_authority_gap`,
+    a recording logger, and stubbed sensor-domain teardown. `bridge.events`
+    records publishes, gap logs, errors and teardown in order.
     """
 
-    import threading
-
-    Publisher = bridge_module.AuthorityHeartbeatPublisher
-    entered = threading.Event()
-    release = threading.Event()
-    published = []
-
-    def slow_publish(message):
-        # Simulates a tick already past `Event.wait()` and inside
-        # `self._publish(message)` -- the DDS write itself, or anything else
-        # that briefly blocks -- at the exact moment shutdown begins.
-        entered.set()
-        release.wait(timeout=5)
-        published.append(message)
-
-    publisher = Publisher(
-        slow_publish, period_s=0.01, log=lambda reason: None
+    bridge, mission, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    Bridge = bridge_module.Bridge
+    events = []
+    bridge.events = events
+    bridge.core = NS(run_id=message["run_id"])
+    bridge.closed = threading.Event()
+    bridge._authority_send_lock = threading.Lock()
+    bridge._authority_closed = False
+    bridge.authority_pub = NS(publish=lambda payload: events.append("publish"))
+    bridge.get_logger = lambda: NS(
+        warn=lambda text, **kwargs: events.append(("warn", text, kwargs)),
+        error=lambda text: events.append(("error", text)),
     )
-    publisher.update("authority-v1")
+    bridge.sensor_executor = NS(shutdown=lambda timeout_sec: events.append("shutdown"))
+    bridge.sensor_thread = None
+    bridge.sensor_context = object()
+    bridge.sensor_node = NS(destroy_node=lambda: events.append("destroy"))
+    bridge._authority_heartbeat = bridge_module.AuthorityHeartbeatPublisher(
+        lambda m: Bridge._send_authority(bridge, m),
+        period_s=period_s,
+        log=lambda reason: Bridge._log_authority_gap(bridge, reason),
+    )
+    bridge._authority_heartbeat.update(message)
+    bridge.authority_heartbeat_thread = threading.Thread(
+        target=bridge._authority_heartbeat.run, args=(bridge.closed,), daemon=True
+    )
+    return bridge, mission, message
 
-    closed = threading.Event()
-    thread = threading.Thread(target=publisher.run, args=(closed,), daemon=True)
-    thread.start()
-    assert entered.wait(timeout=5)  # the first tick is now inside publish(), blocked
 
-    # Shutdown begins while that tick is in flight, exactly as Bridge.close()
-    # does: signal closed, then join with a bound.
-    closed.set()
-    thread.join(timeout=0.05)
-    # The short join must not have succeeded: close() has not "returned"
-    # while the in-flight tick is still inside publish().
-    assert thread.is_alive()
-    assert published == []
+def test_close_waits_for_an_in_flight_send_and_nothing_is_sent_after(
+    tmp_path, bridge_module, monkeypatch
+):
+    """The real `Bridge.close()` with shutdown during a publish in flight:
+    close() does not return until that publish does, and after it returns
+    nothing is published or logged, before or after ROS teardown.
+    """
 
-    release.set()  # let the in-flight tick's publish() finish
-    thread.join(timeout=bridge_module.AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S)
-    assert not thread.is_alive()
-    assert published == ["authority-v1"]
+    bridge, _, _ = _running_bridge(tmp_path, bridge_module, monkeypatch)
+    publishing, release = threading.Event(), threading.Event()
 
-    # Nothing publishes again after the thread (and so close()'s join) has
-    # stopped: run()'s wait() saw `closed` already set and the loop exited
-    # without a second tick.
-    assert published == ["authority-v1"]
+    def blocking_publish(payload):
+        publishing.set()
+        assert release.wait(timeout=5)
+        bridge.events.append("publish")
+
+    bridge.authority_pub = NS(publish=blocking_publish)
+    bridge.authority_heartbeat_thread.start()
+    assert publishing.wait(timeout=5)
+
+    closer = threading.Thread(
+        target=bridge_module.Bridge.close, args=(bridge,), daemon=True
+    )
+    closer.start()
+    closer.join(timeout=0.2)
+    assert closer.is_alive()  # waiting on the publish in flight
+    assert "destroy" not in bridge.events
+
+    release.set()
+    closer.join(timeout=5)
+    assert not closer.is_alive()
+    assert not bridge.authority_heartbeat_thread.is_alive()
+    returned = list(bridge.events)
+    assert returned.index("publish") < returned.index("destroy")
+
+    time.sleep(0.1)  # ten heartbeat periods: nothing more happens
+    assert bridge.events == returned
+    assert [event for event in returned if event == "publish"] == ["publish"]
+
+
+def test_close_after_a_join_timeout_leaves_the_thread_fenced(
+    tmp_path, bridge_module, monkeypatch
+):
+    """The join-timeout path of the real `Bridge.close()`: the heartbeat is
+    blocked on map_epoch_lock (held here, as a slow claim would), close()
+    gives up joining, logs, and tears ROS down. Once the lock is released
+    the thread passes its epoch check but publishes and logs nothing.
+    """
+
+    from autonomy.map_epochs import map_epoch_lock
+
+    bridge, _, _ = _running_bridge(tmp_path, bridge_module, monkeypatch)
+    monkeypatch.setattr(bridge_module, "AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S", 0.05)
+    sending = threading.Event()
+    heartbeat = bridge._authority_heartbeat
+    real_send = heartbeat._send
+
+    def send(message):
+        sending.set()
+        return real_send(message)
+
+    heartbeat._send = send
+    with map_epoch_lock(bridge.root):
+        bridge.authority_heartbeat_thread.start()
+        assert sending.wait(timeout=5)
+        time.sleep(0.05)  # now blocked on map_epoch_lock
+        bridge_module.Bridge.close(bridge)
+        assert bridge.authority_heartbeat_thread.is_alive()
+        assert bridge.events[0][0] == "error"
+        assert bridge.events[1:] == ["shutdown", "destroy"]
+    bridge.authority_heartbeat_thread.join(timeout=5)
+    assert not bridge.authority_heartbeat_thread.is_alive()
+    assert "publish" not in bridge.events
+    assert not any(event[0] == "warn" for event in bridge.events if type(event) is tuple)
+
+
+def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
+    tmp_path, bridge_module, monkeypatch
+):
+    """Every path that takes more than one of the three locks, hammered at
+    once: the heartbeat (cache lock, then map_epoch_lock -> send lock, then
+    send lock to log), the main executor (cache lock via update/invalidate,
+    map_epoch_lock via `_replace_if_current`), other processes' claims
+    (map_epoch_lock) and `close()` (send lock). All finish within bounds.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch
+
+    bridge, mission, message = _running_bridge(
+        tmp_path, bridge_module, monkeypatch, period_s=0.0005
+    )
+    Bridge = bridge_module.Bridge
+    stop = threading.Event()
+    target = bridge.root / "status.json"
+
+    def executor():
+        while not stop.is_set():
+            bridge._authority_heartbeat.update(message)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text("tick")
+            try:
+                Bridge._replace_if_current(bridge, temporary, target)
+            except bridge_module.MapEpochRetired:
+                bridge._authority_heartbeat.invalidate()
+
+    def claimer():
+        for _ in range(20):
+            claim_map_epoch(tmp_path, mission, "robot_0")
+
+    workers = [threading.Thread(target=executor, daemon=True) for _ in range(2)]
+    bridge.authority_heartbeat_thread.start()
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + 5
+    while "publish" not in bridge.events and time.monotonic() < deadline:
+        time.sleep(0.001)
+    workers.append(threading.Thread(target=claimer, daemon=True))
+    workers[-1].start()
+    time.sleep(0.2)
+    closer = threading.Thread(target=Bridge.close, args=(bridge,), daemon=True)
+    closer.start()
+    closer.join(timeout=5)
+    stop.set()
+    for worker in workers:
+        worker.join(timeout=5)
+    assert not closer.is_alive()
+    assert not any(worker.is_alive() for worker in workers)
+    assert not bridge.authority_heartbeat_thread.is_alive()
+    assert "publish" in bridge.events

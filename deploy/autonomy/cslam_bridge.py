@@ -101,10 +101,10 @@ AUTHORITY_SENSOR_TTL_S = 3.0
 # on this period from its own thread, so a snapshot tick that never runs at
 # all (an executor starved by other callbacks) never silences the topic.
 AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
-# Bounds Bridge.close()'s wait for an in-flight tick (a publish call or the
-# epoch/lock decision immediately before it) to finish before any ROS object
-# the heartbeat thread touches is destroyed; well above one period so a
-# normal tick in flight always finishes inside it.
+# Bounds Bridge.close()'s wait for the heartbeat thread to exit. Safety does
+# not depend on it: close() fences every heartbeat publish and log first
+# (`_authority_closed`), so a thread still blocked, e.g. on map_epoch_lock,
+# can touch no ROS object once close() returns.
 AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S = AUTHORITY_HEARTBEAT_PERIOD_S + 5.0
 # A parked robot's scans are the same scan. Swarm-SLAM earns keyframes by
 # distance, and by scene change at most once per
@@ -620,6 +620,11 @@ class Bridge(Node):
         self._last_status_json = None
         # Publishes the cached authority on its own thread, never the main
         # executor `_snapshot` runs on; see `AuthorityHeartbeatPublisher`.
+        # `_authority_send_lock` guards `_authority_closed` and every
+        # heartbeat publish and gap log; close() sets the flag under it.
+        # Lock order: map_epoch_lock, then `_authority_send_lock`.
+        self._authority_send_lock = Lock()
+        self._authority_closed = False
         self._authority_heartbeat = AuthorityHeartbeatPublisher(
             self._send_authority,
             period_s=AUTHORITY_HEARTBEAT_PERIOD_S,
@@ -789,18 +794,20 @@ class Bridge(Node):
             rclpy.try_shutdown(context=self.context)
 
     def close(self):
+        # Fence the heartbeat before anything it touches (self.authority_pub
+        # on self.sensor_node, and the node's logger) is destroyed below or
+        # by `main()`: this waits for a publish or log already in flight,
+        # and every later one sees the flag and does nothing, whether or
+        # not the join below succeeds.
+        with self._authority_send_lock:
+            self._authority_closed = True
         self.closed.set()
-        # Stopped and joined before anything it touches (self.authority_pub,
-        # on self.sensor_node) is destroyed below, or by `main()` right
-        # after this returns: setting `closed` does not wait for a tick
-        # already past `Event.wait()` and into a publish call, and a
-        # publish on a destroyed node/context is never safe.
         self.authority_heartbeat_thread.join(timeout=AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S)
         if self.authority_heartbeat_thread.is_alive():
             self.get_logger().error(
                 "authority heartbeat thread did not stop within "
-                f"{AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S:.1f}s of close(); "
-                "destroying its ROS objects out from under it anyway"
+                f"{AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S:.1f}s of close(); it is "
+                "fenced and can no longer publish or log"
             )
         if self.sensor_executor is not None:
             self.sensor_executor.shutdown(timeout_sec=2.0)
@@ -1269,9 +1276,12 @@ class Bridge(Node):
         just exceeded one heartbeat period.
         """
 
-        self.get_logger().warn(
-            f"map authority heartbeat gap ({reason})", throttle_duration_sec=5.0
-        )
+        with self._authority_send_lock:
+            if self._authority_closed:
+                return
+            self.get_logger().warn(
+                f"map authority heartbeat gap ({reason})", throttle_duration_sec=5.0
+            )
 
     def _send_authority(self, message):
         """Publish `message` only while the durable map epoch names its run.
@@ -1291,7 +1301,10 @@ class Bridge(Node):
                 return "no map epoch claimed"
             if record["run_id"] != message["run_id"]:
                 return "map epoch retired"
-            self.authority_pub.publish(String(data=data))
+            with self._authority_send_lock:
+                if self._authority_closed:
+                    return "bridge closed"
+                self.authority_pub.publish(String(data=data))
         return None
 
     def _replace_if_current(self, temporary, path):
