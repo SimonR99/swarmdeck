@@ -400,6 +400,8 @@ export interface Alert {
   kind: 'unattended' | 'nav_failure' | 'adapter_disconnect' | 'stream_loss' | 'fault';
   robot_id: string | null;
   message: string;
+  /** The raw reason behind `message`, e.g. the planner's own words. */
+  detail?: string | null;
   t_wall: number;
   acknowledged: boolean;
 }

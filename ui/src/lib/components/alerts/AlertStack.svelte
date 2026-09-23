@@ -28,6 +28,9 @@
 
       <div class="min-w-0 flex-1">
         <div class="text-[11px] font-semibold leading-tight">{a.message}</div>
+        {#if a.detail}
+          <div class="mt-1 break-words text-[10px] leading-snug opacity-75">{a.detail}</div>
+        {/if}
         {#if a.robot_id}
           <div class="mt-0.5 text-[10px] opacity-70" style="color:{fleet.colorOf(a.robot_id)}">
             {robotDisplayName(a.robot_id)}

@@ -6,6 +6,7 @@ The backend has no ROS import anywhere — acceptance criterion 12.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import math
 import os
@@ -34,6 +35,7 @@ from ..fleet.registry import registry
 from ..mapsvc.service import map_service
 from .broadcast import JsonBroadcaster
 from .deployment_raster import deployment_raster_loop
+from .navigation_alerts import explain_navigation_failure
 
 # Protocol 2 optionally carries peer SLAM status; protocol 1 remains accepted.
 PROTOCOL_VERSION = 2
@@ -83,6 +85,10 @@ _alerts: dict[str, dict[str, Any]] = {}
 _departure_task: asyncio.Task | None = None
 # alert_id → wall-clock time until which raise_alert is a no-op (after acknowledge)
 _alert_suppress_until: dict[str, float] = {}
+# robot_id → its current navigation-failure alert. One id per failure, so an
+# acknowledged failure's suppression cannot silence the next one.
+_nav_failure_alerts: dict[str, str] = {}
+_nav_failure_serial = itertools.count(1)
 _camera_frames: dict[str, tuple[bytes, float, int]] = {}
 _detections: dict[str, dict[str, Any]] = {}
 # Live camera tracks above; operator-validated map objects below. They are
@@ -365,7 +371,12 @@ def reapply_detection_floors(settings: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def raise_alert(
-    alert_id: str, level: str, kind: str, message: str, robot_id: str | None = None
+    alert_id: str,
+    level: str,
+    kind: str,
+    message: str,
+    robot_id: str | None = None,
+    detail: str | None = None,
 ) -> None:
     if alert_id in _alerts:
         return
@@ -380,6 +391,7 @@ async def raise_alert(
         "kind": kind,
         "robot_id": robot_id,
         "message": message,
+        "detail": detail,
         "t_wall": time.time(),
         "acknowledged": False,
     }
@@ -391,6 +403,37 @@ async def raise_alert(
 async def clear_alert(alert_id: str) -> None:
     if _alerts.pop(alert_id, None) is not None:
         await broadcast({"type": "alert_clear", "id": alert_id})
+
+
+async def sync_navigation_alert(robot) -> None:
+    """One alert per navigation failure, saying why; retired once the robot
+    navigates again, succeeds or stops."""
+    rid = robot.robot_id
+    current = _nav_failure_alerts.get(rid)
+    if robot.nav_status != "failed":
+        if current is not None:
+            del _nav_failure_alerts[rid]
+            await clear_alert(current)
+        return
+    reason = robot.nav_failure_reason
+    if current is None:
+        current = f"nav_failed_{rid}_{next(_nav_failure_serial)}"
+        _nav_failure_alerts[rid] = current
+    else:
+        alert = _alerts.get(current)
+        # Acknowledged, or already saying this. The reason can arrive a state
+        # message after the status, so a reason that appears late replaces it.
+        if alert is None or reason is None or alert.get("detail") == reason:
+            return
+        await clear_alert(current)
+    await raise_alert(
+        current,
+        "warn",
+        "nav_failure",
+        explain_navigation_failure(reason),
+        rid,
+        detail=reason,
+    )
 
 
 def suppress_alert(alert_id: str) -> None:
@@ -1375,6 +1418,8 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         if registry._sinks.get(msg.get("robot_id")) is not ws:
             return False
         robot = registry.update_state(msg)
+        if robot is not None:
+            await sync_navigation_alert(robot)
         network = msg.get("network")
         pose = msg.get("pose")
         if robot is not None and isinstance(network, dict) and isinstance(pose, dict):
