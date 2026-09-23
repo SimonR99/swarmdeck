@@ -146,14 +146,20 @@ def publish_snapshot_if_new(
     snapshot: dict,
     graph_revision: int,
     published_graph_revision: int,
+    replace: Callable[[Path, Path], object] = os.replace,
 ) -> int:
-    """Atomically publish a snapshot only when its map graph has advanced."""
+    """Atomically publish a snapshot only when its map graph has advanced.
+
+    ``replace(temporary, path)`` moves the written temporary into place; a
+    caller that must fence the rename (the bridge, under map_epoch_lock)
+    passes its own.
+    """
 
     if graph_revision == published_graph_revision:
         return published_graph_revision
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(snapshot, allow_nan=False))
-    os.replace(temporary, path)
+    replace(temporary, path)
     return graph_revision
 
 

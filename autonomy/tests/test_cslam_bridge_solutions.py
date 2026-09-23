@@ -10,7 +10,9 @@ acceptance by the adopted order after the core moved acceptance to
 from __future__ import annotations
 
 import importlib
+import json
 import sys
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -325,11 +327,10 @@ def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updat
         published.append,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: None,
         clock=lambda: now[0],
     )
 
-    publisher.update("authority-v1", "epoch-0")
+    publisher.update("authority-v1")
     # `update` is never called again here, simulating a `_snapshot` timer
     # that stalls for minutes; every scheduled tick still republishes the
     # last cached message, on schedule, independent of that stall.
@@ -361,7 +362,6 @@ def test_authority_heartbeat_publisher_never_logs_a_gap_while_resending_a_stale_
         published.append,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: None,
         clock=lambda: now[0],
     )
 
@@ -369,7 +369,7 @@ def test_authority_heartbeat_publisher_never_logs_a_gap_while_resending_a_stale_
         # `_snapshot` re-sends the same cached authority every tick because
         # a fresh one could not be built (e.g. sensor input stale), exactly
         # as `authority_heartbeat` decides.
-        publisher.update("authority-v1", "epoch-0")
+        publisher.update("authority-v1")
         now[0] += 1.0
         publisher.tick()
 
@@ -386,7 +386,6 @@ def test_authority_heartbeat_publisher_logs_no_authority_yet_before_any_update(
         published.append,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: None,
         clock=lambda: now[0],
     )
 
@@ -416,11 +415,10 @@ def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
         published.append,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: None,
         clock=lambda: now[0],
     )
 
-    publisher.update("authority-v1", "epoch-0")
+    publisher.update("authority-v1")
     now[0] += 1.0
     publisher.tick()
     assert logged == []
@@ -431,7 +429,7 @@ def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
     now[0] += 1.5
     publisher.tick()
     assert published == ["authority-v1"] * 2
-    assert logged == ["the thread was late"]
+    assert logged == ["the heartbeat was late"]
 
 
 def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
@@ -462,10 +460,9 @@ def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
         fake_publish,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: None,
         clock=lambda: now[0],
     )
-    publisher.update("authority-v1", "epoch-0")
+    publisher.update("authority-v1")
 
     now[0] += 1.0
     publisher.tick()  # completes at t=1
@@ -477,7 +474,7 @@ def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
     assert published == ["authority-v1"] * 2
     # The true 11 s gap since the first completion (t=1) is caught here,
     # exactly because completion is stamped after `_publish` returns.
-    assert logged == ["the thread was late"]
+    assert logged == ["the heartbeat was late"]
 
     now[0] += 1.0
     publisher.tick()  # starts at t=13; `_publish` is instant, completes at t=13
@@ -486,7 +483,7 @@ def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
     # completion (t=12) is 1 s. A pre-publish timestamp would have compared
     # this tick's start (t=13) against the second tick's *pre-call* sample
     # (t=2) instead, falsely reporting an ~11 s gap that never happened.
-    assert logged == ["the thread was late"]
+    assert logged == ["the heartbeat was late"]
 
 
 def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
@@ -510,7 +507,6 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
         published.append,
         period_s=1.0,
         log=lambda reason: None,
-        epoch_identity=lambda: "epoch-0",
         clock=lambda: now[0],
     )
 
@@ -522,14 +518,14 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
 
     message, cache = heartbeat(good, None, **kwargs0)
-    publisher.update(message, "epoch-0")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == good
 
     # The build is momentarily gated (e.g. sensor stale): the cache is
     # resent verbatim, never silently dropped.
     message, cache = heartbeat(None, cache, **kwargs0)
-    publisher.update(message, "epoch-0")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == good
 
@@ -542,7 +538,7 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
     message, cache = heartbeat(None, cache, **kwargs1)
     assert message["state"] == "resetting" and cache is None
-    publisher.update(message, "epoch-0")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == message
     assert published[-1] != good
@@ -557,11 +553,10 @@ def test_authority_heartbeat_publisher_invalidate_clears_the_cache_immediately(
         published.append,
         period_s=1.0,
         log=logged.append,
-        epoch_identity=lambda: "epoch-0",
         clock=lambda: now[0],
     )
 
-    publisher.update("authority-v1", "epoch-0")
+    publisher.update("authority-v1")
     now[0] += 1.0
     publisher.tick()
     assert published == ["authority-v1"]
@@ -574,60 +569,219 @@ def test_authority_heartbeat_publisher_invalidate_clears_the_cache_immediately(
 
     now[0] += 1.0
     publisher.tick()
-    assert logged[-1] == "epoch retired"
+    assert logged[-1] == "map epoch retired"
 
 
-def test_authority_heartbeat_stops_resending_after_the_durable_epoch_changes(
-    tmp_path, bridge_module
+def _claimed_bridge(tmp_path, bridge_module, monkeypatch):
+    """A namespace standing in for `Bridge`, on a claimed epoch 0 under
+    `tmp_path`, whose `authority_pub` records every published payload.
+    Returns (bridge, mission, message) where `message` names epoch 0's run.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch, robot_run_id
+
+    monkeypatch.setattr(bridge_module, "String", lambda data: NS(data=data))
+    mission = str(uuid.uuid4())
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 0
+    published = []
+    bridge = NS(
+        root=tmp_path / mission / "robot_0",
+        authority_pub=NS(publish=lambda message: published.append(message.data)),
+        published=published,
+    )
+    message = _authority(mission, robot_run_id(mission, "robot_0", 0), 0, 3)
+    return bridge, mission, message
+
+
+def test_send_authority_stops_once_a_new_epoch_is_claimed(
+    tmp_path, bridge_module, monkeypatch
 ):
-    """The reviewer's exact scenario: change the on-disk epoch while the old
-    bridge is alive. `tick`'s own stat-level check of map-epoch.json
-    (`_file_identity`, the real function, and `claim_map_epoch`, the real
-    durable-epoch writer) stops the heartbeat from resending the old
-    authority, with no `Bridge.snapshot()` call involved at all: an executor
-    stall on the old bridge, or simply the old process not yet having
-    exited, must never let it keep broadcasting a retired epoch.
+    """The real `Bridge._send_authority` and the real `claim_map_epoch`:
+    no `Bridge.snapshot()` involved, so an old bridge whose executor is
+    stalled still stops sending the moment the durable epoch moves on.
     """
 
     from autonomy.map_epochs import claim_map_epoch
 
-    file_identity = bridge_module._file_identity
-    mission = str(uuid.uuid4())
-    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 0, the old bridge's own
-    epoch_path = tmp_path / mission / "robot_0" / "map-epoch.json"
+    bridge, mission, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    send = bridge_module.Bridge._send_authority
 
-    Publisher = bridge_module.AuthorityHeartbeatPublisher
-    published, logged, now = [], [], [0.0]
-    publisher = Publisher(
-        published.append,
-        period_s=1.0,
-        log=logged.append,
-        epoch_identity=lambda: file_identity(epoch_path),
-        clock=lambda: now[0],
+    assert send(bridge, message) is None
+    assert bridge.published == [json.dumps(message, allow_nan=False)]
+
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 1 retires epoch 0
+    assert send(bridge, message) == "map epoch retired"
+    assert len(bridge.published) == 1
+
+
+def test_send_authority_fails_closed_when_the_epoch_cannot_be_read(
+    tmp_path, bridge_module, monkeypatch
+):
+    """A corrupt epoch record raises (the heartbeat reports it as a failed
+    send), and an absent one is declined: never "probably still current".
+    """
+
+    bridge, _, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    send = bridge_module.Bridge._send_authority
+
+    (bridge.root / "map-epoch.json").write_text("{not json")
+    with pytest.raises(ValueError):
+        send(bridge, message)
+    (bridge.root / "map-epoch.json").unlink()
+    assert send(bridge, message) == "no map epoch claimed"
+    assert bridge.published == []
+
+    logged, now = [], [0.0]
+    publisher = bridge_module.AuthorityHeartbeatPublisher(
+        lambda m: send(bridge, m), period_s=1.0, log=logged.append, clock=lambda: now[0]
     )
-
-    # The old bridge built and cached its authority under epoch 0, exactly
-    # as `Bridge._snapshot` does (the identity it validated `record` under).
-    publisher.update("authority-epoch-0", file_identity(epoch_path))
-    now[0] += 1.0
+    (bridge.root / "map-epoch.json").write_text("{not json")
+    publisher.update(message)
+    now[0] += 2.0
     publisher.tick()
-    assert published == ["authority-epoch-0"]
+    assert bridge.published == []
+    assert logged and logged[-1].startswith("send failed (")
 
-    # A fresh launch claims a new epoch on disk (`peer.launch.py`'s own
-    # startup path, `garbage_collect_missions`/`checkpoint_wal`'s neighbour).
+
+def test_heartbeat_never_sends_a_message_selected_before_a_new_epoch_claim(
+    tmp_path, bridge_module, monkeypatch
+):
+    """The heartbeat reads its cached epoch-0 message, then another thread
+    claims epoch 1 before the send: barriers pin exactly that interleaving,
+    and the send is declined because it re-reads the epoch under the lock.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch
+
+    bridge, mission, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    selected, claimed = threading.Event(), threading.Event()
+    logged = []
+
+    def send(selected_message):
+        selected.set()  # tick() has read the cache
+        assert claimed.wait(timeout=5)
+        return bridge_module.Bridge._send_authority(bridge, selected_message)
+
+    now = [0.0]
+    publisher = bridge_module.AuthorityHeartbeatPublisher(
+        send, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+    publisher.update(message)
+    now[0] += 2.0
+    thread = threading.Thread(target=publisher.tick, daemon=True)
+    thread.start()
+    assert selected.wait(timeout=5)
     claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 1
+    claimed.set()
+    thread.join(timeout=5)
 
-    now[0] += 1.0
-    publisher.tick()
-    # Never resent: the durable epoch moved on since this authority was
-    # built, caught by `tick`'s own check, not by `snapshot()` (never
-    # called here at all).
-    assert published == ["authority-epoch-0"]
+    assert not thread.is_alive()
+    assert bridge.published == []
+    assert logged == ["map epoch retired"]
 
-    now[0] += 1.0
-    publisher.tick()
-    assert published == ["authority-epoch-0"]
-    assert logged[-1] == "epoch retired"
+
+def test_epoch_claim_waits_for_an_in_flight_send_then_retires_it(
+    tmp_path, bridge_module, monkeypatch
+):
+    """A send in flight holds map_epoch_lock from its epoch check through
+    its publish: a concurrent `claim_map_epoch()` blocks until the publish
+    returns, and the next send is declined. The claim can never land
+    between the check and the publish.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch
+
+    bridge, mission, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    publishing, release = threading.Event(), threading.Event()
+
+    def blocking_publish(payload):
+        publishing.set()
+        assert release.wait(timeout=5)
+        bridge.published.append(payload.data)
+
+    bridge.authority_pub = NS(publish=blocking_publish)
+    send = bridge_module.Bridge._send_authority
+    sender = threading.Thread(target=send, args=(bridge, message), daemon=True)
+    sender.start()
+    assert publishing.wait(timeout=5)
+
+    claimer = threading.Thread(
+        target=claim_map_epoch, args=(tmp_path, mission, "robot_0"), daemon=True
+    )
+    claimer.start()
+    claimer.join(timeout=0.2)
+    assert claimer.is_alive()  # blocked on map_epoch_lock behind the send
+
+    release.set()
+    sender.join(timeout=5)
+    claimer.join(timeout=5)
+    assert not sender.is_alive() and not claimer.is_alive()
+    assert len(bridge.published) == 1
+    assert send(bridge, message) == "map epoch retired"
+    assert len(bridge.published) == 1
+
+
+def _map_epoch_lock_is_free(peer_root):
+    """Probe `map_epoch_lock` from a separate open file, without waiting."""
+
+    import fcntl
+
+    with (peer_root / "map-epoch.lock").open("a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(stream, fcntl.LOCK_UN)
+        return True
+
+
+def test_snapshot_builds_outside_map_epoch_lock_and_fences_each_write(
+    tmp_path, bridge_module, monkeypatch
+):
+    """`Bridge.snapshot()` no longer holds map_epoch_lock while `_snapshot`
+    reads the product and builds the authority (the heartbeat needs that
+    lock before every send); each file write re-validates the epoch under
+    the lock instead, and a retired epoch writes nothing.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch
+
+    bridge, mission, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    Bridge = bridge_module.Bridge
+    bridge.core = NS(run_id=message["run_id"])
+    bridge._authority_heartbeat = bridge_module.AuthorityHeartbeatPublisher(
+        lambda m: None, period_s=1.0, log=lambda reason: None
+    )
+    status = bridge.root / "status.json"
+    free_during_build, claim_mid_tick = [], []
+
+    def _snapshot():
+        free_during_build.append(_map_epoch_lock_is_free(bridge.root))
+        bridge._authority_heartbeat.update(message)
+        if claim_mid_tick:
+            claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 1, mid-tick
+        bridge_module.write_text_if_changed(
+            status,
+            "tick",
+            None,
+            replace=lambda temporary, path: Bridge._replace_if_current(
+                bridge, temporary, path
+            ),
+        )
+
+    bridge._snapshot = _snapshot
+    Bridge.snapshot(bridge)
+    assert free_during_build == [True]
+    assert status.read_text() == "tick"
+
+    # A claim landing after the early epoch check: the fenced write
+    # refuses, leaves no temporary behind, and the cache is invalidated.
+    claim_mid_tick.append(True)
+    Bridge.snapshot(bridge)
+    assert free_during_build == [True, True]
+    assert not status.exists()  # the claim deleted it; nothing recreated it
+    assert not status.with_suffix(".tmp").exists()
+    assert bridge._authority_heartbeat._message is None
 
 
 def test_authority_heartbeat_thread_join_waits_for_an_in_flight_tick(bridge_module):
@@ -655,9 +809,9 @@ def test_authority_heartbeat_thread_join_waits_for_an_in_flight_tick(bridge_modu
         published.append(message)
 
     publisher = Publisher(
-        slow_publish, period_s=0.01, log=lambda reason: None, epoch_identity=lambda: None
+        slow_publish, period_s=0.01, log=lambda reason: None
     )
-    publisher.update("authority-v1", None)
+    publisher.update("authority-v1")
 
     closed = threading.Event()
     thread = threading.Thread(target=publisher.run, args=(closed,), daemon=True)
