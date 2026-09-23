@@ -20,6 +20,7 @@ export class GaussianLayer {
   private busy = false;
   private lastView = '';
   private lastSort = 0;
+  private sortRetry: ReturnType<typeof setTimeout> | null = null;
   constructor() {
     this.worker = new Worker(new URL('./gaussian.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<{ id: number; order: Uint32Array }>) => {
@@ -141,14 +142,30 @@ export class GaussianLayer {
     const view = camera.matrixWorldInverse.elements;
     // Translation does not change the depth ordering.
     const signature = [view[2], view[6], view[10]].map((v) => v.toFixed(4)).join(',');
-    if (!this.busy && signature !== this.lastView && performance.now() - this.lastSort > 100) {
-      this.busy = true;
-      this.lastView = signature;
-      this.lastSort = performance.now();
-      this.worker.postMessage({ view, id: this.generation });
+    if (this.busy || signature === this.lastView) return;
+    const now = performance.now();
+    const remaining = 100 - (now - this.lastSort);
+    if (remaining > 0) {
+      // On-demand rendering may stop at this viewpoint. Keep one wake-up so
+      // it gets sorted even if neither camera nor telemetry changes again.
+      if (this.sortRetry === null) {
+        this.sortRetry = setTimeout(() => {
+          this.sortRetry = null;
+          this.onDirty();
+        }, remaining);
+      }
+      return;
     }
+    if (this.sortRetry !== null) clearTimeout(this.sortRetry);
+    this.sortRetry = null;
+    this.busy = true;
+    this.lastView = signature;
+    this.lastSort = now;
+    this.worker.postMessage({ view, id: this.generation });
   }
   public clear() {
+    if (this.sortRetry !== null) clearTimeout(this.sortRetry);
+    this.sortRetry = null;
     this.bounds.makeEmpty();
     this.generation++;
     this.busy = false;
