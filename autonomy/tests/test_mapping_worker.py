@@ -215,15 +215,15 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                     "output_size_bytes": len(artifact),
                     "output_sha256": hashlib.sha256(artifact).hexdigest(),
                 }}
-                if {first_failure!r} == "wrong_hash_second" and request_number == 2:
-                    response["output_sha256"] = "0" * 64
+                if {first_failure!r} == "wrong_output_size_second" and request_number == 2:
+                    response["output_size_bytes"] = len(artifact) + 1
                 if "planner_output_path" in request:
                     planner = b"planner|" + artifact
                     Path(request["planner_output_path"]).write_bytes(planner)
                     response["planner_output_size_bytes"] = len(planner)
                     response["planner_output_sha256"] = hashlib.sha256(planner).hexdigest()
-                    if {first_failure!r} == "wrong_planner_hash_second" and request_number == 2:
-                        response["planner_output_sha256"] = "0" * 64
+                    if {first_failure!r} == "wrong_planner_size_second" and request_number == 2:
+                        response["planner_output_size_bytes"] = len(planner) + 1
                 with (root / "applies.log").open("a") as stream:
                     stream.write(json.dumps({{
                         "pid": os.getpid(),
@@ -329,11 +329,15 @@ def test_planner_products_reuse_unchanged_components_and_prune_pairs(tmp_path):
 
 
 def test_invalid_planner_product_keeps_previous_generation(tmp_path):
+    """A native response whose claimed planner size disagrees with the file
+    it actually wrote is still rejected: the worker trusts a fresh output's
+    reported hash, but `stat`s its size rather than trusting that blindly.
+    """
     peer = tmp_path / "mission" / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
     worker = MolaWorker(
         tmp_path,
-        importer=fake_runtime(tmp_path, "wrong_planner_hash_second"),
+        importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
         planner_maps=True,
         timeout_s=1,
     )
@@ -426,6 +430,65 @@ def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None
         # Reused, not rebuilt: only component:b's manifest triggered a native
         # request.
         assert len(runtime_requests(tmp_path)) == 3
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """A component or planner map the persistent native runtime just wrote is
+    published by trusting its reported hash, not by re-hashing the file: the
+    process that wrote the bytes already hashed them, in the same request.
+    `stat` still catches a size disagreement (a truncated or wrong write).
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        result = worker.process_peer(peer)
+        assert result.published
+        index = json.loads((peer / "mola/index.json").read_text())
+        artifact = index["artifacts"][0]
+        artifact_path = peer / "mola" / artifact["path"]
+        # The published sha256 is exactly what the fake runtime reported,
+        # which happens to be correct here; the point is it was never
+        # locally recomputed to get there (`forbidden` never raised above).
+        assert artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_still_rejects_a_size_mismatch_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """Trusting the native runtime's reported hash does not mean trusting an
+    unrelated file: a response whose claimed output size disagrees with what
+    is actually on disk is rejected by `stat` alone, never by hashing.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "wrong_output_size_second"),
+        timeout_s=1,
+    )
+    try:
+        assert worker.process_peer(peer).published
+        second = manifest("component:a", 1)
+        write_snapshot(peer, "b" * 64, [second])
+        with pytest.raises(WorkerError, match="does not match its response"):
+            worker.process_peer(peer)
     finally:
         worker.close()
 
@@ -819,12 +882,17 @@ def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -
 
 
 def test_native_artifact_claim_mismatch_keeps_last_complete_index(tmp_path) -> None:
+    """A native response whose claimed output size disagrees with the file it
+    actually wrote is still rejected: the worker trusts a fresh output's
+    reported hash (deploy/autonomy/mola_worker.py `_stat_matches`), but
+    `stat`s its size rather than trusting that blindly too.
+    """
     peer = tmp_path / "mission" / "robot_0"
     first = manifest("component:a", 1)
     write_snapshot(peer, "a" * 64, [first])
     worker = MolaWorker(
         tmp_path,
-        importer=fake_runtime(tmp_path, "wrong_hash_second"),
+        importer=fake_runtime(tmp_path, "wrong_output_size_second"),
         timeout_s=1,
     )
     try:

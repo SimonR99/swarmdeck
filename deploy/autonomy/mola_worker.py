@@ -253,13 +253,18 @@ def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
 def _stat_matches(path: Path, expected_size: object, maximum: int) -> bool:
     """True when ``path`` is a file of exactly ``expected_size`` bytes.
 
-    Used to decide whether a previously published artifact this worker wrote
-    once and never modifies (module docstring) may still be reused, trusting
-    its recorded sha256 rather than re-hashing a component that may be
-    several megabytes on every poll that finds nothing else to build. A
-    freshly produced artifact is still cross-checked byte-for-byte against
-    what the native runtime reports, the one point corrupted or mismatched
-    output would first be observable.
+    Two callers trust a sha256 they never recompute from `path`'s bytes: a
+    previously published artifact this worker wrote once and never modifies
+    (module docstring), trusting its own recorded sha256; and a component or
+    planner map the persistent native runtime just wrote in this build,
+    trusting the hash it reported for the exact bytes it wrote. Re-hashing a
+    component that may be several megabytes, on every poll that finds
+    nothing else to build, or a second time right after the process that
+    wrote it already hashed it, costs as much as the import itself for a
+    hash that would only ever match; `stat` still catches a missing,
+    truncated or oversized file either way. Local hashing
+    (`_sha256_file`) remains only for the legacy non-persistent runner mode,
+    which has no reported hash to trust.
     """
 
     if not isinstance(expected_size, int) or not 0 < expected_size <= maximum:
@@ -778,13 +783,21 @@ class MolaWorker:
                         ),
                         self.timeout_s,
                     )
-                size, digest = _sha256_file(output_path, self.max_output_bytes)
-                if response is not None and (
-                    response.get("output_size_bytes") != size
-                    or response.get("output_sha256") != digest
-                ):
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("native artifact does not match its response")
+                if response is not None:
+                    # `_validate_runtime_response` already checked
+                    # `output_size_bytes` and `output_sha256` are well-formed;
+                    # the native runtime computed that hash itself from the
+                    # exact bytes it wrote, so trust it rather than re-reading
+                    # and re-hashing what may be a multi-megabyte artifact
+                    # only to compare against a hash that came from the same
+                    # process in the first place. `stat` still catches a
+                    # truncated, missing or oversized write.
+                    size, digest = response["output_size_bytes"], response["output_sha256"]
+                    if not _stat_matches(output_path, size, self.max_output_bytes):
+                        self._invalidate_runtime(peer_root)
+                        raise WorkerError("native artifact does not match its response")
+                else:
+                    size, digest = _sha256_file(output_path, self.max_output_bytes)
                 final_path = components_root / filename
                 staged.append((output_path, final_path))
                 artifacts.append(
@@ -802,13 +815,18 @@ class MolaWorker:
                 )
                 if planner_path is not None:
                     assert response is not None
-                    planner_size, planner_sha = _sha256_file(
-                        planner_path, self.max_output_bytes
-                    )
+                    # `_validate_runtime_response` does not cover the planner
+                    # fields (only sent when planner_maps is on), so their
+                    # shape is checked here before trusting them the same way.
+                    planner_size = response.get("planner_output_size_bytes")
+                    planner_sha = response.get("planner_output_sha256")
                     if (
-                        type(response.get("planner_output_size_bytes")) is not int
-                        or response["planner_output_size_bytes"] != planner_size
-                        or response.get("planner_output_sha256") != planner_sha
+                        not isinstance(planner_sha, str)
+                        or len(planner_sha) != 64
+                        or any(c not in "0123456789abcdef" for c in planner_sha)
+                        or not _stat_matches(
+                            planner_path, planner_size, self.max_output_bytes
+                        )
                     ):
                         self._invalidate_runtime(peer_root)
                         raise WorkerError(
