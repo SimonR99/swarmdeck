@@ -227,9 +227,12 @@ class AuthorityHeartbeatPublisher:
     thread keeps running.
 
     `log(reason)` is called whenever the interval between two completed
-    sends exceeds `period_s`; that interruption of the wire heartbeat is
-    what MGG observes as a gap. A completed send is stamped only after
-    `send` returns, so a send that blocks shows up as its own gap. A
+    sends exceeds 1.5 × `period_s`; that interruption of the wire heartbeat
+    is what MGG observes as a gap. (`run` waits a full period after each
+    send, so every interval is a little over one period; only the excess
+    beyond half a period is a real delay.) A completed send is stamped only
+    after `send` returns, so a send that blocks shows up as its own gap,
+    and the reason says whether the send blocked or the tick started late. A
     `_snapshot` build failure that still leaves a valid cached message to
     re-send is never a gap (`status.json`'s ``authority_gap_*`` records
     those). Callers rate-limit repeated reasons themselves.
@@ -238,6 +241,7 @@ class AuthorityHeartbeatPublisher:
     def __init__(self, send, *, period_s, log, clock=time.monotonic):
         self._send = send
         self._period_s = period_s
+        self._gap_s = 1.5 * period_s
         self._log = log
         self._clock = clock
         # Guards the cached message against `update`/`invalidate` from the
@@ -273,6 +277,7 @@ class AuthorityHeartbeatPublisher:
     def tick(self):
         """Send the cached message, if any, and log an actual send gap."""
 
+        started = self._clock()
         with self._lock:
             message = self._message
             reason = self._no_message_reason
@@ -284,10 +289,17 @@ class AuthorityHeartbeatPublisher:
                 reason = f"send failed ({type(exc).__name__}: {exc})"
             if reason is None:
                 self._last_sent_at = self._clock()
-                reason = "the heartbeat was late"
+                blocked = self._last_sent_at - started
+                if blocked > self._period_s / 2:
+                    reason = f"send blocked {blocked:.1f}s (map epoch lock or DDS)"
+                else:
+                    reason = (
+                        f"heartbeat tick started {started - last:.1f}s "
+                        "after the last send"
+                    )
         now = self._clock()
-        if now - last > self._period_s:
-            self._log(reason)
+        if now - last > self._gap_s:
+            self._log(f"{now - last:.1f}s between sends: {reason}")
 
     def run(self, closed):
         """Tick every `period_s` until `closed` is set (a `threading.Event`)."""

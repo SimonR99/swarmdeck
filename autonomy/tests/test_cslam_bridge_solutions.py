@@ -395,42 +395,10 @@ def test_authority_heartbeat_publisher_logs_no_authority_yet_before_any_update(
     publisher.tick()
     assert published == [] and logged == []
 
-    now[0] += 1.5
+    now[0] += 2.0
     publisher.tick()
     assert published == []
-    assert logged == ["no authority yet"]
-
-
-def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
-    bridge_module,
-):
-    """A message was ready the whole time; only the thread's own schedule
-    slipped (GIL/OS contention on the heartbeat thread itself, never the
-    ROS executor `_snapshot` runs on, since the heartbeat thread does not
-    touch it).
-    """
-
-    Publisher = bridge_module.AuthorityHeartbeatPublisher
-    published, logged, now = [], [], [0.0]
-    publisher = Publisher(
-        published.append,
-        period_s=1.0,
-        log=logged.append,
-        clock=lambda: now[0],
-    )
-
-    publisher.update("authority-v1")
-    now[0] += 1.0
-    publisher.tick()
-    assert logged == []
-
-    # `run()` should have ticked at now=2.0; it does not until now=2.5, a
-    # missed schedule slot attributable only to the thread itself, since a
-    # message was cached and ready the entire time.
-    now[0] += 1.5
-    publisher.tick()
-    assert published == ["authority-v1"] * 2
-    assert logged == ["the heartbeat was late"]
+    assert logged == ["2.0s between sends: no authority yet"]
 
 
 def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
@@ -475,7 +443,7 @@ def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
     assert published == ["authority-v1"] * 2
     # The true 11 s gap since the first completion (t=1) is caught here,
     # exactly because completion is stamped after `_publish` returns.
-    assert logged == ["the heartbeat was late"]
+    assert logged == ["11.0s between sends: send blocked 10.0s (map epoch lock or DDS)"]
 
     now[0] += 1.0
     publisher.tick()  # starts at t=13; `_publish` is instant, completes at t=13
@@ -484,7 +452,7 @@ def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
     # completion (t=12) is 1 s. A pre-publish timestamp would have compared
     # this tick's start (t=13) against the second tick's *pre-call* sample
     # (t=2) instead, falsely reporting an ~11 s gap that never happened.
-    assert logged == ["the heartbeat was late"]
+    assert logged == ["11.0s between sends: send blocked 10.0s (map epoch lock or DDS)"]
 
 
 def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
@@ -570,7 +538,7 @@ def test_authority_heartbeat_publisher_invalidate_clears_the_cache_immediately(
 
     now[0] += 1.0
     publisher.tick()
-    assert logged[-1] == "map epoch retired"
+    assert logged[-1].endswith(": map epoch retired")
 
 
 def _claimed_bridge(tmp_path, bridge_module, monkeypatch):
@@ -643,7 +611,7 @@ def test_send_authority_fails_closed_when_the_epoch_cannot_be_read(
     now[0] += 2.0
     publisher.tick()
     assert bridge.published == []
-    assert logged and logged[-1].startswith("send failed (")
+    assert logged and logged[-1].startswith("2.0s between sends: send failed (")
 
 
 def test_heartbeat_never_sends_a_message_selected_before_a_new_epoch_claim(
@@ -680,7 +648,7 @@ def test_heartbeat_never_sends_a_message_selected_before_a_new_epoch_claim(
 
     assert not thread.is_alive()
     assert bridge.published == []
-    assert logged == ["map epoch retired"]
+    assert logged == ["2.0s between sends: map epoch retired"]
 
 
 def test_epoch_claim_waits_for_an_in_flight_send_then_retires_it(
@@ -952,3 +920,78 @@ def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
     assert not any(worker.is_alive() for worker in workers)
     assert not bridge.authority_heartbeat_thread.is_alive()
     assert "publish" in bridge.events
+
+
+def test_heartbeat_on_a_real_clock_logs_no_gap_while_sends_complete_on_time(
+    bridge_module,
+):
+    """`run()` with the real monotonic clock and an instant send: waiting
+    one period after each send makes every interval slightly longer than
+    the period, which is scheduling jitter, not a gap MGG can observe.
+    """
+
+    sent, logged = [], []
+    publisher = bridge_module.AuthorityHeartbeatPublisher(
+        lambda message: sent.append(message), period_s=0.02, log=logged.append
+    )
+    publisher.update("authority-v1")
+    closed = threading.Event()
+    thread = threading.Thread(target=publisher.run, args=(closed,), daemon=True)
+    thread.start()
+    time.sleep(0.3)
+    closed.set()
+    thread.join(timeout=5)
+    assert len(sent) >= 5
+    assert logged == []
+
+
+def test_heartbeat_gap_reason_separates_a_blocked_send_from_a_late_tick(
+    bridge_module,
+):
+    """A real gap is logged once the interval between completed sends
+    exceeds 1.5 periods, naming whether the send itself blocked (on
+    map_epoch_lock or DDS) or the tick started late.
+    """
+
+    now, logged = [0.0], []
+    blocking = []
+
+    def send(message):
+        if blocking:
+            now[0] += blocking.pop()
+
+    publisher = bridge_module.AuthorityHeartbeatPublisher(
+        send, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+    publisher.update("authority-v1")
+    now[0] += 1.0
+    publisher.tick()
+    now[0] += 1.4  # jitter below 1.5 periods: not a gap
+    publisher.tick()
+    assert logged == []
+
+    now[0] += 1.0
+    blocking.append(2.0)
+    publisher.tick()
+    assert logged == ["3.0s between sends: send blocked 2.0s (map epoch lock or DDS)"]
+
+    now[0] += 4.0
+    publisher.tick()
+    assert logged[-1] == "4.0s between sends: heartbeat tick started 4.0s after the last send"
+
+
+def test_gap_log_is_rate_limited_and_silent_after_close(tmp_path, bridge_module, monkeypatch):
+    bridge, _, _ = _running_bridge(tmp_path, bridge_module, monkeypatch)
+    log = bridge_module.Bridge._log_authority_gap
+
+    log(bridge, "3.0s between sends: map epoch retired")
+    assert bridge.events == [
+        (
+            "warn",
+            "map authority heartbeat gap (3.0s between sends: map epoch retired)",
+            {"throttle_duration_sec": 5.0},
+        )
+    ]
+    bridge._authority_closed = True
+    log(bridge, "anything")
+    assert len(bridge.events) == 1
