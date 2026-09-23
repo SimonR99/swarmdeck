@@ -109,3 +109,36 @@ def test_new_lifetime_home_is_first_capture_and_old_solution_cannot_apply(tmp_pa
     assert fresh.frame_history[1].T_component_home[0][3] == 12.5
     assert not fresh.solution(solution(mission, [0, 0], 100, target=0))
     assert fresh.poses[fresh.key(0)][0][3] == 12.5
+
+
+def test_map_epoch_lock_with_a_timeout_gives_up_on_a_busy_lock(tmp_path):
+    """`timeout` polls instead of blocking: it yields False, holding nothing,
+    once the lock has stayed busy that long, and True when it gets it.
+    Existing callers pass no timeout and still block.
+    """
+    import threading
+    import time
+
+    from autonomy.map_epochs import map_epoch_lock
+
+    with map_epoch_lock(tmp_path) as held:
+        assert held is True
+        result = []
+
+        def contend():
+            started = time.monotonic()
+            with map_epoch_lock(tmp_path, timeout=0.1) as acquired:
+                result.append((acquired, time.monotonic() - started))
+
+        thread = threading.Thread(target=contend)
+        thread.start()
+        thread.join(timeout=5)
+        acquired, waited = result[0]
+        assert acquired is False
+        assert 0.1 <= waited < 0.5
+
+    with map_epoch_lock(tmp_path, timeout=0.1) as acquired:
+        assert acquired is True
+        # Held for real: a second non-waiting attempt is refused.
+        with map_epoch_lock(tmp_path, timeout=0.0) as again:
+            assert again is False

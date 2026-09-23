@@ -1058,3 +1058,44 @@ def test_gap_log_is_rate_limited_and_silent_after_close(tmp_path, bridge_module,
     bridge._authority_closed = True
     log(bridge, "anything")
     assert len(bridge.events) == 1
+
+
+def test_heartbeat_skips_a_tick_instead_of_stalling_behind_a_slow_lock_holder(
+    tmp_path, bridge_module, monkeypatch
+):
+    """Another thread holds map_epoch_lock (a slow claim, worker fsync or
+    watermark write): the tick gives up after `AUTHORITY_EPOCH_LOCK_WAIT_S`
+    without sending, and the gap log names the cause.
+    """
+
+    from autonomy.map_epochs import map_epoch_lock
+
+    bridge, _, message = _claimed_bridge(tmp_path, bridge_module, monkeypatch)
+    monkeypatch.setattr(bridge_module, "AUTHORITY_EPOCH_LOCK_WAIT_S", 0.1)
+    logged = []
+    publisher = bridge_module.AuthorityHeartbeatPublisher(
+        lambda m: bridge_module.Bridge._send_authority(bridge, m),
+        period_s=0.2,
+        log=logged.append,
+    )
+    publisher.update(message)
+    holding, release = threading.Event(), threading.Event()
+
+    def slow_holder():
+        with map_epoch_lock(bridge.root):
+            holding.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=slow_holder, daemon=True)
+    holder.start()
+    assert holding.wait(timeout=5)
+    time.sleep(0.3)  # more than 1.5 periods since the publisher started
+    started = time.monotonic()
+    publisher.tick()
+    elapsed = time.monotonic() - started
+    release.set()
+    holder.join(timeout=5)
+
+    assert 0.1 <= elapsed < 0.2  # bounded by the lock wait, not the holder
+    assert bridge.published == []
+    assert len(logged) == 1 and logged[0].endswith("s between sends: epoch lock busy")

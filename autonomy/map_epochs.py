@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from uuid import UUID, uuid5
 
 _ROBOT = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+MAP_EPOCH_LOCK_POLL_S = 0.01
 
 
 def robot_run_id(mission_id: str, robot_id: str, map_epoch: int) -> str:
@@ -33,14 +35,33 @@ def robot_run_id(mission_id: str, robot_id: str, map_epoch: int) -> str:
 
 
 @contextmanager
-def map_epoch_lock(peer_root: str | Path):
-    """Serialize lifetime changes against product/snapshot publication."""
+def map_epoch_lock(peer_root: str | Path, timeout: float | None = None):
+    """Serialize lifetime changes against product/snapshot publication.
+
+    Without ``timeout`` this blocks until the lock is held and yields True.
+    With ``timeout`` (seconds) it polls instead, and yields False, holding
+    nothing, if the lock is still busy after that long: the map authority
+    heartbeat uses this so a slow holder costs it one tick, never a stall.
+    """
     root = Path(peer_root)
     root.mkdir(parents=True, exist_ok=True)
     with (root / "map-epoch.lock").open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        yield False
+                        return
+                    time.sleep(min(MAP_EPOCH_LOCK_POLL_S, remaining))
         try:
-            yield
+            yield True
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 

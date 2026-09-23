@@ -106,6 +106,11 @@ AUTHORITY_SENSOR_TTL_S = 3.0
 # on this period from its own thread, so a snapshot tick that never runs at
 # all (an executor starved by other callbacks) never silences the topic.
 AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
+# The longest a heartbeat send waits for map_epoch_lock. Other holders
+# (claims, the worker's publication renames and directory fsyncs, the peer
+# epoch watermark) can be slow; a send that cannot get the lock in time is
+# skipped ("epoch lock busy"), never blocked behind them.
+AUTHORITY_EPOCH_LOCK_WAIT_S = AUTHORITY_HEARTBEAT_PERIOD_S / 2
 # Bounds Bridge.close()'s wait for the heartbeat thread to exit. Safety does
 # not depend on it: close() fences every heartbeat publish and log first
 # (`_authority_closed`), so a thread still blocked, e.g. on map_epoch_lock,
@@ -1305,13 +1310,17 @@ class Bridge(Node):
         Called on the heartbeat thread. The epoch record is re-read and the
         message published under map_epoch_lock, the lock `claim_map_epoch()`
         holds while it retires a run, so no claim can land between this
-        check and the publish. Returns None once published, otherwise the
+        check and the publish. The lock wait is bounded
+        (`AUTHORITY_EPOCH_LOCK_WAIT_S`): a busy lock skips this send. Returns
+        None once published, otherwise the
         reason; an unreadable record raises, which the heartbeat reports as
         a failed send (fail closed).
         """
 
         data = json.dumps(message, allow_nan=False)
-        with map_epoch_lock(self.root):
+        with map_epoch_lock(self.root, timeout=AUTHORITY_EPOCH_LOCK_WAIT_S) as locked:
+            if not locked:
+                return "epoch lock busy"
             record = read_map_epoch(self.root)
             if record is None:
                 return "no map epoch claimed"
