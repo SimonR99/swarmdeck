@@ -392,7 +392,14 @@ average ~4.8, two minutes after boot). Two runs, ns per query:
 | settings_state | 0.1 | 0.1 |
 | detection_review | 0.1 | 0.0 |
 
-### Plan-to-motion latency (MGG plan → robot displacement > 0.10 m)
+### Plan-log-to-displacement (proxy; MGG plan → pose displacement > 0.10 m)
+
+These historical proxy samples predate registration/reset rejection and
+next-plan window cut-offs. World-pose corrections and later plans may have
+been counted as motion for earlier plans; these are not dispatch latency
+measurements and need remeasurement. CPU and planner-cycle measurements are
+unaffected.
+
 - MGG plan cycles in window: 35
   - Clock: host UTC wall clock (docker log timestamps vs container time.time()); typical error < 1 ms
   - **robot_0**; replan cadence: median 7.81 s, p90 13.07 s, max 31.28 s (11 intervals); latency: median 1.33 s, p90 3.55 s, max 6.64 s (11 samples)
@@ -463,10 +470,11 @@ drift, RTX 4070), real-time factor 1.00 throughout:
 - **Idle stack:** 136 % -> 133 %; tuf's idle load was already small. The
   17:31 idle sample was taken while the fleet was still settling after the
   exploration run, so its total (174 %) is not comparable.
-- **New finding, plan-to-motion latency:** a median of ~1.3 s from an MGG plan to
-  0.1 m of robot motion (p90 1.5-3.6 s, max 6.6 s), and a replan every 8-11 s.
-  On tuf this now exceeds the planning time (0.19 s); it is the next
-  exploration-pace target. `robot_3` (Spot) produced no latency samples: its log
+- **Historical plan-log-to-displacement proxy (before the fixes above):**
+  median ~1.3 s from an MGG plan to 0.1 m of reported pose displacement
+  (p90 1.5-3.6 s, max 6.6 s), and a replan every 8-11 s.
+  Remeasure before comparing this proxy to planning time (0.19 s) or treating
+  it as an exploration-pace target. `robot_3` (Spot) produced no latency samples: its log
   shows lost peer reservations and "controller patience exceeded".
 - **Not measured yet:** dashboard browser CPU (`--browser`), sim-container idle
   target (29 % against < 60 %: met), server idle target (1-2 %: met).

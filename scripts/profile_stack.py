@@ -33,6 +33,7 @@ import argparse
 import collections
 import datetime as dt
 import json
+import math
 import os
 import re
 import statistics
@@ -75,6 +76,8 @@ _PLAYWRIGHT_MODULES_HINT = Path.home() / ".npm/_npx"
 
 # Motion threshold for plan-to-motion latency (metres)
 _MOTION_THRESHOLD_M = 0.10
+# Reject registration boundaries beyond 1 mm translation or 1 mrad yaw.
+_REGISTRATION_TOLERANCE = 0.001
 
 
 def sh(args, **kwargs) -> subprocess.CompletedProcess:
@@ -654,12 +657,15 @@ async def main():
                 try:
                     msg = json.loads(m)
                     if msg.get("type") == "robot_state" and "pose" in msg:
-                        events.append([
-                            time.time(),
-                            str(msg.get("robot_id", "?")),
-                            float(msg["pose"].get("x", 0.0)),
-                            float(msg["pose"].get("y", 0.0)),
-                        ])
+                        events.append({
+                            "utc": time.time(), "robot_id": msg["robot_id"],
+                            "pose": msg["pose"],
+                            "navigation_transform": msg.get("navigation_transform"),
+                        })
+                    elif msg.get("type") == "robot_map_reset":
+                        events.append({"utc": time.time(), "reset": [msg["robot_id"]]})
+                    elif msg.get("type") == "sim_reset":
+                        events.append({"utc": time.time(), "reset": msg.get("robots")})
                 except Exception:
                     pass
     except Exception:
@@ -668,6 +674,14 @@ async def main():
 
 asyncio.run(main())
 """
+
+
+def _registration_changed(before: tuple | None, after: tuple | None) -> bool:
+    if before is None or after is None:
+        return before != after
+    angle = math.remainder(after[2] - before[2], 2 * math.pi)
+    return (math.hypot(after[0] - before[0], after[1] - before[1]) > _REGISTRATION_TOLERANCE
+            or abs(angle) > _REGISTRATION_TOLERANCE)
 
 
 def latency_trace(window: float) -> dict:
@@ -708,12 +722,20 @@ def latency_trace(window: float) -> dict:
     except (IndexError, json.JSONDecodeError):
         return {"error": (ws_result.stderr or ws_result.stdout).strip()[-300:]}
 
-    # events: [[utc_s, robot_id, x, y], ...]
-    robot_events: dict[str, list[tuple[float, float, float]]] = collections.defaultdict(list)
+    robot_events: dict[str, list[tuple]] = collections.defaultdict(list)
+    resets = [(row["utc"], row["reset"]) for row in raw_events if "reset" in row]
     for row in raw_events:
-        utc, rid, x, y = row
-        if rid != "__error__":
-            robot_events[rid].append((float(utc), float(x), float(y)))
+        if "pose" not in row:
+            continue
+        transform = row.get("navigation_transform")
+        tx, ty, yaw = (float((transform or {}).get(key, 0)) for key in ("x", "y", "yaw"))
+        x, y = float(row["pose"]["x"]) - tx, float(row["pose"]["y"]) - ty
+        c, s = math.cos(yaw), math.sin(yaw)
+        # Undo the GUI world placement: compare in the navigation frame.
+        robot_events[row["robot_id"]].append((
+            float(row["utc"]), c * x + s * y, -s * x + c * y,
+            (tx, ty, yaw) if transform is not None else None,
+        ))
 
     # Fetch MGG logs with a generous --since window (+60 s) to avoid missing
     # the boundary, then filter to [start_epoch, end_epoch] so that plan
@@ -746,19 +768,21 @@ def latency_trace(window: float) -> dict:
         # already exceed _MOTION_THRESHOLD_M, making the very next
         # post-plan sample appear as immediate motion even if the robot
         # has not moved since the path was dispatched.
-        ref_pos = None
-        for utc, x, y in reversed(events):
-            if utc <= plan_epoch:
-                ref_pos = (x, y)
-                break
-        if ref_pos is None:
-            ref_pos = (events[0][1], events[0][2])
-        # find first event after plan_epoch where displacement > threshold
-        for utc, x, y in events:
+        robot_resets = [utc for utc, ids in resets if ids is None or robot in ids]
+        last_reset = max((utc for utc in robot_resets if utc <= plan_epoch), default=-math.inf)
+        events = [event for event in events if event[0] > last_reset]
+        if not events:
+            continue
+        reference = next((event for event in reversed(events) if event[0] <= plan_epoch), events[0])
+        _, ref_x, ref_y, ref_transform = reference
+        next_reset = min((utc for utc in robot_resets if utc > plan_epoch), default=math.inf)
+        # A reset or registration correction invalidates this plan's frame.
+        for utc, x, y, transform in events:
             if utc <= plan_epoch:
                 continue
-            dist = ((x - ref_pos[0]) ** 2 + (y - ref_pos[1]) ** 2) ** 0.5
-            if dist >= _MOTION_THRESHOLD_M:
+            if utc >= next_reset or _registration_changed(ref_transform, transform):
+                break
+            if math.hypot(x - ref_x, y - ref_y) >= _MOTION_THRESHOLD_M:
                 latencies[robot].append(utc - plan_epoch)
                 break
 

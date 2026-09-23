@@ -360,3 +360,61 @@ assert.equal(cpuPercent(0, 2, 100), 0);
 assert.throws(() => cpuPercent(10, 0, 100));
 assert.throws(() => cpuPercent(10, 1, 0));
 ''')
+
+
+def _trace(monkeypatch, events, plans=(10,), start=0, end=30):
+    """Run the actual collector/correlator with captured external command output."""
+    import json
+    import subprocess
+    import profile_stack
+
+    clock = iter((start, end))
+    monkeypatch.setattr(profile_stack.time, 'time', lambda: next(clock))
+    results = iter((
+        subprocess.CompletedProcess([], 0, stdout=json.dumps(events), stderr=''),
+        subprocess.CompletedProcess([], 0, stdout='\n'.join(
+            _make_ts_line(t, _PLAN_CONTENT) for t in plans), stderr=''),
+    ))
+    monkeypatch.setattr(profile_stack, 'sh', lambda *a, **kw: next(results))
+    return profile_stack.latency_trace(end - start)
+
+
+def _pose(utc, x, y=0, transform=None):
+    return {'utc': utc, 'robot_id': 'robot_0', 'pose': {'x': x, 'y': y},
+            'navigation_transform': transform}
+
+
+def test_latency_registration_only_change_is_not_motion(monkeypatch):
+    result = _trace(monkeypatch, [
+        _pose(9, 0, transform={'x': 0, 'y': 0, 'yaw': 0}),
+        _pose(11, .2, transform={'x': .2, 'y': 0, 'yaw': 0}),
+        _pose(12, .4, transform={'x': .2, 'y': 0, 'yaw': 0}),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_inverts_small_registration_rotation_before_comparing(monkeypatch):
+    import math
+    # Below the transform-change tolerance but enough world movement at range
+    # to exceed the displacement threshold. The robot is stationary locally.
+    yaw = .0009
+    result = _trace(monkeypatch, [
+        _pose(9, 200, transform={'x': 0, 'y': 0, 'yaw': 0}),
+        _pose(11, 200 * math.cos(yaw), 200 * math.sin(yaw),
+              transform={'x': 0, 'y': 0, 'yaw': yaw}),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_reset_cannot_be_motion(monkeypatch):
+    result = _trace(monkeypatch, [
+        _pose(9, 0), {'utc': 10.5, 'reset': ['robot_0']}, _pose(11, 1),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_real_motion_in_navigation_frame(monkeypatch):
+    transform = {'x': 5, 'y': 4, 'yaw': 1.57}
+    result = _trace(monkeypatch, [_pose(9, 5, 4, transform),
+                                _pose(11, 5, 4.2, transform)])
+    assert result['latency_s'] == {'robot_0': [1]}
