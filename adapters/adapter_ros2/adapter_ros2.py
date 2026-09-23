@@ -795,6 +795,7 @@ class HardwareBridge(
             return {
                 "x": t.translation.x,
                 "y": t.translation.y,
+                "z": t.translation.z,
                 "yaw": yaw_of(t.rotation),
             }
         except Exception:

@@ -27,11 +27,14 @@ T_CN_0 = (
     (0.0, 0.0, 1.0, 2.0),
     (0.0, 0.0, 0.0, 1.0),
 )
-TRANSFORMS = {"robot_0": (1.0, 2.0, math.pi / 2), "robot_1": (-3.0, 0.5, 0.0)}
+TRANSFORMS = {
+    "robot_0": (1.0, 2.0, 0.0, math.pi / 2),
+    "robot_1": (-3.0, 0.5, 0.0, 0.0),
+}
 SUBMAP_X = {"robot_0": 2.0, "robot_1": -1.0}
 
 
-def se2(x, y, yaw):
+def se2(x, y, _z, yaw):
     c, s = math.cos(yaw), math.sin(yaw)
     return np.array([[c, -s, 0, x], [s, c, 0, y], [0, 0, 1, 0], [0, 0, 0, 1]])
 
@@ -179,7 +182,7 @@ def test_composite_needs_two_placed_members(setup):
         setup["map_service"],
     )
     # Placing robot_2 adds it; removing robot_1's placement drops it.
-    map_service.transforms["robot_2"] = (0.0, 0.0, 0.0)
+    map_service.transforms["robot_2"] = (0.0, 0.0, 0.0, 0.0)
     del map_service.transforms["robot_1"]
     entries = client.get("/api/autonomy/replicas/components").json()["components"]
     (entry,) = [entry for entry in entries if entry.get("composite")]
@@ -302,13 +305,23 @@ def test_composite_publication_identity_follows_placement(setup):
 
     first = view()
     assert view()["snapshot_id"] == first["snapshot_id"]
-    map_service.transforms["robot_1"] = (-3.0, 4.5, 0.0)
+    map_service.transforms["robot_1"] = (-3.0, 4.5, 0.0, 0.0)
     moved = view()
     assert moved["snapshot_id"] != first["snapshot_id"]
     assert (
         moved["selected"]["geometry_revision"] == first["selected"]["geometry_revision"]
     )
     assert moved["chunks"] == first["chunks"]
+
+
+def test_deployment_placement_retains_surveyed_start_z(setup):
+    session, map_service = setup["session"], setup["map_service"]
+    map_service.transforms["robot_1"] = (-3.0, 0.5, -1.25, 0.0)
+
+    placements = replica_views.deployment_placements(session)
+    world_navigation = np.array(placements["robot_1"]["T_world_navigation"])
+    assert world_navigation[:3, 3] == pytest.approx([-3.0, 0.5, -1.25])
+    assert world_navigation[:3, :3] == pytest.approx(np.eye(3))
 
 
 def test_oversized_composite_answers_413_and_is_listed_unavailable(setup, monkeypatch):
@@ -385,7 +398,7 @@ def test_live_frame_places_member_poses_with_the_world_navigation_transform(setu
 
 def test_live_frame_drops_a_member_with_stale_or_foreign_authority(setup):
     client, session, registry = setup["client"], setup["session"], setup["registry"]
-    setup["map_service"].transforms["robot_2"] = (0.0, 0.0, 0.0)
+    setup["map_service"].transforms["robot_2"] = (0.0, 0.0, 0.0, 0.0)
     # Stale telemetry keeps robot_1's geometry placed but hides its pose; a
     # robot whose authority moved to another component leaves the composite.
     registry.robots["robot_1"].live_mapping_received_at -= 4

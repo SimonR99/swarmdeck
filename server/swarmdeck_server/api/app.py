@@ -150,7 +150,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     new_service = type(map_service)()
     for rid, pose in (mcfg.get("start_poses") or {}).items():
         new_service.set_transform(
-            rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0)
+            rid,
+            pose.get("x", 0.0),
+            pose.get("y", 0.0),
+            pose.get("yaw", 0.0),
+            pose.get("z", 0.0),
         )
     map_service.__dict__.update(new_service.__dict__)
     _camera_frames.clear()
@@ -479,14 +483,16 @@ def robot_state(robot: Any) -> dict[str, Any]:
     if robot.coordinate_frame == "merged":
         return state
     with map_service._state_lock:
-        transform = map_service.transforms.get(robot.robot_id, (0.0, 0.0, 0.0))
-    tx, ty, yaw = transform
+        values = map_service.transforms.get(robot.robot_id, (0.0, 0.0, 0.0, 0.0))
+    tx, ty, tz, yaw = map_service._placement(values)
     c, s = math.cos(yaw), math.sin(yaw)
 
     def to_world(point: dict[str, float]) -> dict[str, float]:
         value = dict(point)
         x, y = float(point["x"]), float(point["y"])
         value["x"], value["y"] = tx + x * c - y * s, ty + x * s + y * c
+        if "z" in point:
+            value["z"] = tz + float(point["z"])
         if "yaw" in point:
             value["yaw"] = map_service._wrap_yaw(float(point["yaw"]) + yaw)
         return value

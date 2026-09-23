@@ -117,12 +117,11 @@ def current_catalogue(session_id: str | None):
         return catalogue
 
 
-# ----------------------------------------------------------- deployment composite
-#
 # Transforms follow the autonomy contract: ``T_a_b`` maps frame ``b`` into
 # frame ``a``. The map service places each robot's navigation frame in the
-# merged world frame with an SE(2) ``(x, y, yaw)``; a robot's live authority
-# places that same navigation frame in its component frame with
+# merged world frame with a surveyed SE(3) translation (yaw-only rotation);
+# the 2D fleet map projects the same placement to SE(2). A robot's live
+# authority places that navigation frame in its component frame with
 # ``T_component_navigation``. Their composition places the component:
 #
 #     T_world_component = T_world_navigation @ inv(T_component_navigation)
@@ -136,14 +135,22 @@ def is_deployment_component(component_id: Any) -> bool:
     return isinstance(component_id, str) and component_id.startswith(DEPLOYMENT_PREFIX)
 
 
-def _se2_matrix(x: float, y: float, yaw: float) -> tuple[tuple[float, ...], ...]:
+def _se3_matrix(
+    x: float, y: float, z: float, yaw: float
+) -> tuple[tuple[float, ...], ...]:
     c, s = math.cos(yaw), math.sin(yaw)
     return (
         (c, -s, 0.0, float(x)),
         (s, c, 0.0, float(y)),
-        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0, float(z)),
         (0.0, 0.0, 0.0, 1.0),
     )
+
+
+def _placement_matrix(values) -> tuple[tuple[float, ...], ...]:
+    """Build the world placement matrix from canonical ``(x, y, z, yaw)``."""
+    x, y, z, yaw = values
+    return _se3_matrix(float(x), float(y), float(z), float(yaw))
 
 
 def _matmul(a, b) -> tuple[tuple[float, ...], ...]:
@@ -197,7 +204,7 @@ def deployment_placements(session_id: str | None) -> dict[str, dict[str, Any]]:
             transform = transforms.get(robot.robot_id)
             if transform is None:
                 continue
-            world_navigation = _se2_matrix(*transform)
+            world_navigation = _placement_matrix(transform)
         try:
             component_navigation = validate_se3(
                 live["T_component_navigation"], "T_component_navigation"
@@ -597,6 +604,7 @@ def build_view(
                         "replaces_geometry_revision"
                     ),
                     "observed_at_ns": submap.get("observed_at_ns", 0),
+                    "sensor_origins": submap.get("sensor_origins", []),
                     "chunks": [
                         {
                             "sha256": chunk.get("sha256"),

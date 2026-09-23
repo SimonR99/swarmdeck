@@ -15,17 +15,10 @@ def bridge_cls(sim_module):
 
 
 def make_bridge(bridge_cls):
-    bridge = bridge_cls.__new__(bridge_cls)
-    bridge.node = MagicMock()
-    bridge.id = "robot_0"
-    bridge.navigation_frame = "robot_0/odom"
-    bridge._odom_to_base = None
-    bridge._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    bridge._warned_no_tf_base = False
-    return bridge
+    return bridge_cls(MagicMock(), "robot_0", "http://server:8080")
 
 
-def tf_message(pairs):
+def tf_message(pairs, *, z=0.0):
     transforms = []
     for parent, child, x, y, yaw in pairs:
         transforms.append(
@@ -33,7 +26,7 @@ def tf_message(pairs):
                 header=types.SimpleNamespace(frame_id=parent),
                 child_frame_id=child,
                 transform=types.SimpleNamespace(
-                    translation=types.SimpleNamespace(x=x, y=y, z=0.0),
+                    translation=types.SimpleNamespace(x=x, y=y, z=z),
                     rotation=types.SimpleNamespace(
                         x=0.0,
                         y=0.0,
@@ -46,11 +39,6 @@ def tf_message(pairs):
     return types.SimpleNamespace(transforms=transforms)
 
 
-def test_navigation_frame_is_the_robot_odom_frame(bridge_cls):
-    bridge = make_bridge(bridge_cls)
-    assert bridge.navigation_frame == "robot_0/odom"
-
-
 def test_tf_base_link_is_preferred_over_the_wheel_odometry_topic(bridge_cls):
     bridge = make_bridge(bridge_cls)
     bridge._on_tf(
@@ -58,7 +46,8 @@ def test_tf_base_link_is_preferred_over_the_wheel_odometry_topic(bridge_cls):
             [
                 ("robot_0/map", "robot_0/odom", 99.0, 99.0, 0.0),
                 ("robot_0/odom", "robot_0/base_link", 10.56, 0.18, 0.0),
-            ]
+            ],
+            z=-2.5,
         )
     )
     bridge._on_odom(
@@ -75,6 +64,7 @@ def test_tf_base_link_is_preferred_over_the_wheel_odometry_topic(bridge_cls):
     assert bridge.map_pose() == {
         "x": pytest.approx(10.56),
         "y": pytest.approx(0.18),
+        "z": -2.5,
         "yaw": 0.0,
     }
 
@@ -85,14 +75,14 @@ def test_wheel_odometry_is_a_loud_fallback_when_tf_is_missing(bridge_cls):
         types.SimpleNamespace(
             pose=types.SimpleNamespace(
                 pose=types.SimpleNamespace(
-                    position=types.SimpleNamespace(x=2.0, y=1.0, z=0.0),
+                    position=types.SimpleNamespace(x=2.0, y=1.0, z=-4.0),
                     orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
                 )
             )
         )
     )
 
-    assert bridge.map_pose() == {"x": 2.0, "y": 1.0, "yaw": 0.0}
+    assert bridge.map_pose() == {"x": 2.0, "y": 1.0, "z": -4.0, "yaw": 0.0}
     bridge.node.get_logger.return_value.warn.assert_called_once()
 
 

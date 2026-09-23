@@ -21,7 +21,11 @@ from .output import network_robot_ids, network_snapshot, take_network_patch
 class MapService:
     def __init__(self, resolution: float = 0.25, size_m: float = 30.0) -> None:
         self._state_lock = threading.RLock()
-        self.transforms: dict[str, tuple[float, float, float]] = {}
+        # Deployment placements retain the surveyed vertical origin as well as
+        # x/y/yaw.  Consumers that publish the 2D map header intentionally
+        # project this to SE(2), while 3D replica composition uses all four
+        # values to build an SE(3) transform.
+        self.transforms: dict[str, tuple[float, float, float, float]] = {}
         self._network_resolution = float(resolution)
         self._network_size = float(size_m)
         self._network_grids: dict[str, NetworkGridAccumulator] = {}
@@ -33,30 +37,41 @@ class MapService:
     def _wrap_yaw(yaw: float) -> float:
         return (float(yaw) + math.pi) % (2.0 * math.pi) - math.pi
 
-    def set_transform(self, robot_id: str, x: float, y: float, yaw: float) -> None:
-        values = (float(x), float(y), self._wrap_yaw(float(yaw)))
+    def set_transform(
+        self, robot_id: str, x: float, y: float, yaw: float, z: float = 0.0
+    ) -> None:
+        values = (float(x), float(y), float(z), self._wrap_yaw(float(yaw)))
         if not all(math.isfinite(value) for value in values):
             raise ValueError("deployment transform must be finite")
         with self._state_lock:
             self.transforms[str(robot_id)] = values
 
+    @staticmethod
+    def _placement(values) -> tuple[float, float, float, float]:
+        """Return the canonical surveyed ``(x, y, z, yaw)`` placement."""
+        x, y, z, yaw = values
+        return float(x), float(y), float(z), float(yaw)
+
     def status(self) -> dict[str, Any]:
         with self._state_lock:
-            transforms = {
-                robot_id: {"x": x, "y": y, "yaw": yaw}
-                for robot_id, (x, y, yaw) in sorted(self.transforms.items())
-            }
+            transforms = {}
+            for robot_id, values in sorted(self.transforms.items()):
+                x, y, _z, yaw = self._placement(values)
+                transforms[robot_id] = {"x": x, "y": y, "yaw": yaw}
         return {"transforms": transforms, "members": sorted(transforms)}
 
     def robot_to_world(
         self, robot_id: str, point: dict[str, float]
     ) -> dict[str, float]:
         with self._state_lock:
-            tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+            values = self.transforms.get(robot_id, (0.0, 0.0, 0.0, 0.0))
+        tx, ty, tz, yaw = self._placement(values)
         c, s = math.cos(yaw), math.sin(yaw)
         result = dict(point)
         x, y = float(point["x"]), float(point["y"])
         result["x"], result["y"] = tx + x * c - y * s, ty + x * s + y * c
+        if "z" in point:
+            result["z"] = tz + float(point["z"])
         if "yaw" in point:
             result["yaw"] = self._wrap_yaw(float(point["yaw"]) + yaw)
         return result
@@ -65,11 +80,14 @@ class MapService:
         self, robot_id: str, point: dict[str, float]
     ) -> dict[str, float]:
         with self._state_lock:
-            tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+            values = self.transforms.get(robot_id, (0.0, 0.0, 0.0, 0.0))
+        tx, ty, tz, yaw = self._placement(values)
         c, s = math.cos(yaw), math.sin(yaw)
         dx, dy = float(point["x"]) - tx, float(point["y"]) - ty
         result = dict(point)
         result["x"], result["y"] = dx * c + dy * s, -dx * s + dy * c
+        if "z" in point:
+            result["z"] = float(point["z"]) - tz
         if "yaw" in point:
             result["yaw"] = self._wrap_yaw(float(point["yaw"]) - yaw)
         return result

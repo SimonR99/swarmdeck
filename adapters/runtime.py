@@ -289,6 +289,7 @@ class AdapterSensorMixin:
         self._odom_pose = {
             "x": p.position.x,
             "y": p.position.y,
+            "z": p.position.z,
             "yaw": yaw_of(p.orientation),
         }
 

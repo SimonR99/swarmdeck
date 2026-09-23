@@ -110,6 +110,8 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         "y": float(body["y"]),
         "yaw": float(body.get("yaw", 0.0)),
     }
+    if "z" in body:
+        goal["z"] = float(body["z"])
     taken_by = app.goal_taken(goal, exclude=robot_id)
     if taken_by:
         return JSONResponse(

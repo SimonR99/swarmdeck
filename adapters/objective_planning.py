@@ -157,6 +157,29 @@ class MggObjectivePlanning:
             if transform is None:
                 raise ValueError("objective has no navigation transform")
             resolved.update(navigation_goal(component_goal, transform))
+        if "z" not in resolved:
+            # A 2-D goal has no absolute floor selection. Seed ground projection
+            # from the robot's current altitude, not the odometry origin.
+            current = self.bridge.map_pose()
+            if not isinstance(current, dict) or "z" not in current:
+                raise ValueError("objective has no current navigation altitude")
+            height = current["z"]
+            if self.frame != self.bridge.navigation_frame.lstrip("/"):
+                import numpy as np
+                from adapters.mapping_authority import authority_for_frame
+
+                source = authority_for_frame(
+                    self._raw_authority(), self.bridge.navigation_frame
+                )
+                transform = np.linalg.solve(
+                    np.asarray(authority["T_component_navigation"]),
+                    np.asarray(source["T_component_navigation"]),
+                )
+                position = transform @ np.array(
+                    [current["x"], current["y"], current["z"], 1.0]
+                )
+                height = position[2]
+            resolved["z"] = height
         values = [resolved.get(key, 0.0) for key in ("x", "y", "z", "yaw")]
         try:
             values = [float(value) for value in values]

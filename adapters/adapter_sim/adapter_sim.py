@@ -33,6 +33,8 @@ import websockets
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import FollowPath
+from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path as NavPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -401,6 +403,7 @@ class RobotBridge(
         self._odom_topic_pose = {
             "x": p.position.x,
             "y": p.position.y,
+            "z": p.position.z,
             "yaw": yaw_of(p.orientation),
         }
 
@@ -418,6 +421,7 @@ class RobotBridge(
             self._odom_to_base = {
                 "x": t.translation.x,
                 "y": t.translation.y,
+                "z": t.translation.z,
                 "yaw": yaw_of(t.rotation),
             }
 

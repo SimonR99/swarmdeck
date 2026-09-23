@@ -110,8 +110,23 @@ def test_stop_all_reaches_every_registered_robot(monkeypatch):
     assert all(message["type"] == "stop" for _, message in sent)
 
 
+def test_robot_state_leaves_already_merged_pose_untouched():
+    state = {"pose": {"x": 4.0, "y": -2.0, "z": 1.5, "yaw": 0.2}}
+
+    class MergedRobot:
+        coordinate_frame = "merged"
+        robot_id = "r0"
+
+        def to_state(self):
+            return dict(state)
+
+    assert robot_state(MergedRobot()) == state
+
+
 def test_map_status_reports_deployment_transforms_and_roundtrips_pose():
-    map_service.set_transform("r0", 4.0, -2.0, math.pi / 2)
+    # The public optimized-map header remains SE(2), while the canonical
+    # placement used by 3D composition retains the surveyed start height.
+    map_service.set_transform("r0", 4.0, -2.0, math.pi / 2, z=1.5)
 
     with TestClient(app) as client:
         response = client.get("/api/map/status")
@@ -124,7 +139,9 @@ def test_map_status_reports_deployment_transforms_and_roundtrips_pose():
         "yaw": math.pi / 2,
     }
     assert "r0" in payload["members"]
-    local = {"x": 2.0, "y": 1.0, "yaw": -0.4}
+    local = {"x": 2.0, "y": 1.0, "z": -0.25, "yaw": -0.4}
     world = map_service.robot_to_world("r0", local)
-    assert world == pytest.approx({"x": 3.0, "y": 0.0, "yaw": math.pi / 2 - 0.4})
+    assert world == pytest.approx(
+        {"x": 3.0, "y": 0.0, "z": 1.25, "yaw": math.pi / 2 - 0.4}
+    )
     assert map_service.world_to_robot("r0", world) == pytest.approx(local)

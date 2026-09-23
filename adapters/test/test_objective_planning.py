@@ -100,6 +100,7 @@ def rig(monkeypatch, responder):
     bridge.id = "robot_1"
     bridge.navigation_frame = "robot_1/navigation_frame"
     bridge.cfg = {}
+    bridge.map_pose.return_value = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
     bridge._mapping_authority = NS(current=lambda: authority())
     bridge._goal_generation = 4
     bridge._goal_lock = threading.RLock()
