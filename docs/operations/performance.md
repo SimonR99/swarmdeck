@@ -29,20 +29,27 @@ Each report header now includes the short git commit (`--commit SHA` to
 override; default is auto-detected from the script's own repo). Use this to
 correlate each dated entry with the code it measured.
 
-`--browser [--browser-url URL] [--browser-idle-s N]` measures browser
-main-thread CPU via headless Chromium + Playwright CDP. Opens the dashboard
-at URL (default `http://localhost:5173`), records CDP
-`TaskDuration`/`ScriptDuration` over an idle window and then over synthetic
-mouse-drag panning events. Requires `node` ≥ 18 and the Playwright package
-(pre-installed via `npx playwright` on the workstation and tuf). Prints a
-clear message and continues without crashing if no browser is available.
+`--browser [--browser-url URL] [--browser-idle-s N]` measures the launched
+Chromium process tree's CPU from Linux `/proc` (100 % = one core), including
+GPU/compositor descendants, and WebGL frames per second. Opens the dashboard
+at URL (default `http://localhost:5173`) for an idle window and synthetic
+mouse-drag panning. A WebGL frame is an animation-frame interval containing
+clear/draw work; Canvas2D work is not counted as WebGL. The browser report
+records `nproc` alongside the one-core CPU units. Endpoint process sampling
+can miss short-lived processes. Linux only; requires `node` ≥ 18,
+Playwright and its Chromium binary. The probe forces SwiftShader software
+rendering, which inflates CPU per frame and cannot establish a real-GPU idle
+CPU target. Prints an unavailable result if the optional probe fails.
 
-`--latency` measures plan-to-motion latency and replan cadence. Collects
-`robot_state` WebSocket events from the server container and MGG
-`docker logs --timestamps` output over the measurement window, then reports
-median/p90/max latency (from MGG plan completion — used as a proxy for
-adapter path dispatch, lag < 10 ms — to robot pose displacement > 0.10 m)
-and replan cadence per robot. Clock: host UTC wall clock; typical error < 1 ms.
+`--latency` measures **plan-log-to-displacement (proxy)** and replan cadence.
+It collects `robot_state` WebSocket events and resets from the server container
+and MGG `docker logs --timestamps`, then reports median/p90/max time from a
+plan log to navigation-frame displacement >= 0.10 m. Each plan's window ends
+at the next plan for that robot or a reset; registration changes beyond 1 mm
+or 1 mrad also cut it off. Reports include the count of plans cut off without
+a displacement sample. This is not dispatch latency: reservations can delay
+or reject a logged plan. Clock: host UTC wall clock; typical error < 1 ms.
+Telemetry cadence and the displacement threshold also affect this proxy.
 
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
@@ -392,7 +399,14 @@ average ~4.8, two minutes after boot). Two runs, ns per query:
 | settings_state | 0.1 | 0.1 |
 | detection_review | 0.1 | 0.0 |
 
-### Plan-to-motion latency (MGG plan → robot displacement > 0.10 m)
+### Plan-log-to-displacement (proxy; MGG plan → pose displacement > 0.10 m)
+
+These historical proxy samples predate registration/reset rejection and
+next-plan window cut-offs. World-pose corrections and later plans may have
+been counted as motion for earlier plans; these are not dispatch latency
+measurements and need remeasurement. CPU and planner-cycle measurements are
+unaffected.
+
 - MGG plan cycles in window: 35
   - Clock: host UTC wall clock (docker log timestamps vs container time.time()); typical error < 1 ms
   - **robot_0**; replan cadence: median 7.81 s, p90 13.07 s, max 31.28 s (11 intervals); latency: median 1.33 s, p90 3.55 s, max 6.64 s (11 samples)
@@ -463,10 +477,11 @@ drift, RTX 4070), real-time factor 1.00 throughout:
 - **Idle stack:** 136 % -> 133 %; tuf's idle load was already small. The
   17:31 idle sample was taken while the fleet was still settling after the
   exploration run, so its total (174 %) is not comparable.
-- **New finding, plan-to-motion latency:** a median of ~1.3 s from an MGG plan to
-  0.1 m of robot motion (p90 1.5-3.6 s, max 6.6 s), and a replan every 8-11 s.
-  On tuf this now exceeds the planning time (0.19 s); it is the next
-  exploration-pace target. `robot_3` (Spot) produced no latency samples: its log
+- **Historical plan-log-to-displacement proxy (before the fixes above):**
+  median ~1.3 s from an MGG plan to 0.1 m of reported pose displacement
+  (p90 1.5-3.6 s, max 6.6 s), and a replan every 8-11 s.
+  Remeasure before comparing this proxy to planning time (0.19 s) or treating
+  it as an exploration-pace target. `robot_3` (Spot) produced no latency samples: its log
   shows lost peer reservations and "controller patience exceeded".
 - **Not measured yet:** dashboard browser CPU (`--browser`), sim-container idle
   target (29 % against < 60 %: met), server idle target (1-2 %: met).
@@ -487,10 +502,11 @@ Two alternating runs each, 15 s idle, then three mouse-drag pans.
 | 2D | old | - | 1458 / 1478 | - | - |
 | 2D | new | - | 81 / 81 (56 in a later run) | - | - |
 
-- A parked fleet no longer redraws the maps. Keep-alives that change only
-  clocks and float noise are ignored, and the replica poll redraws only on
-  visible change. The 3D map draws only while something moves or the pointer
-  pans.
+- A parked fleet without animated decoration no longer redraws the maps.
+  Keep-alives that change only clocks and float noise are ignored, and the
+  replica poll redraws only on visible change. The 3D map renders on demand,
+  while movement or panning uses the quality-tier cap. A selected robot's
+  decoration still draws at 12 frames per second; a hidden tab draws nothing.
 - The last ~400 % was the browser re-blurring the panels over the map every
   display frame (`backdrop-blur`); the panels are now opaque, without blur.
 - The plan's target, the dashboard tab under 25 % CPU at idle, was set for

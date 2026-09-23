@@ -34,6 +34,11 @@ map to inspect interiors. It does not change robot navigation maps.
 | Balanced | 160,000 | 20,000 | 80,000 | 1.5 | 45 |
 | High detail | 300,000 | 40,000 | 150,000 | 2 | 60 |
 
+Rendering is on demand: a scene change requests a draw, and movement or camera
+interaction uses the profile's FPS cap. Decoration alone, such as a selected
+robot's reticle, draws at `DECORATION_FPS = 12`. A parked scene without animated
+decoration stops drawing; a hidden tab draws nothing.
+
 These are workload limits, not measured FPS guarantees. Shadows and multisample
 antialiasing are disabled. Geometry preparation and Gaussian sorting use workers.
 Only selected terrain representations allocate GPU geometry; switching modes
@@ -48,6 +53,10 @@ pauses behind the 3D view. Three.js is loaded when 3D is first opened. Switching
 to 2D retains the bounded 3D scene, camera, and display settings while stopping
 its animation loop and map requests. Returning to 3D immediately resumes the
 loaded tactical map, including when the server returns 304 or is unavailable.
+
+Robot trails are recorded from telemetry in both map views. A source registration
+change beyond 1 mm or 1 mrad clears that robot's trail rather than mixing world
+points from different registrations into a fictitious path.
 
 The server accumulates Robot SLAM clouds in each robot's own map frame on a
 10 cm voxel lattice. A new registered scan adds coverage instead of replacing

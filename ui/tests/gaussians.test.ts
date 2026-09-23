@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import { RenderScheduler } from '../src/lib/components/map3d/renderScheduler.ts';
 
 /** Stands in for the sort worker: records posts, replies when the test says so. */
@@ -46,6 +47,52 @@ function quietScene() {
   layer.onDirty = () => scheduler.markDirty();
   return { scheduler, layer, worker: FakeWorker.last! };
 }
+
+test('a throttled final orientation gets one delayed sort retry in a quiet scene', (t) => {
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { scheduler, layer, worker } = quietScene();
+  const camera = new THREE.Camera();
+  const renderer = { getDrawingBufferSize() {} } as unknown as THREE.WebGLRenderer;
+  layer.load(model(3), 10);
+  layer.update(camera, renderer, 10);
+  const { id } = worker.posted[0];
+  worker.reply(id, new Uint32Array([0, 1, 2]));
+  scheduler.frame({ now, hidden: false, moving: false, decorating: false, fps: 30 });
+  assert.equal(worker.posted.length, 2);
+  now = 1050;
+  camera.matrixWorldInverse.makeRotationY(0.5);
+  layer.update(camera, renderer, 10);
+  layer.update(camera, renderer, 10);
+  assert.equal(worker.posted.length, 2);
+  assert.equal(scheduler.pending, false);
+  now = 1100;
+  t.mock.timers.tick(50);
+  assert.equal(scheduler.pending, true);
+  layer.update(camera, renderer, 10);
+  assert.equal(worker.posted.length, 3);
+  assert.deepEqual(worker.posted[2].view, camera.matrixWorldInverse.elements);
+  worker.reply(id, new Uint32Array([2, 1, 0]));
+  scheduler.frame({ now, hidden: false, moving: false, decorating: false, fps: 30 });
+  t.mock.timers.tick(500);
+  assert.equal(scheduler.pending, false);
+  layer.dispose();
+});
+
+test('clearing a model cancels its pending throttled retry', (t) => {
+  t.mock.method(performance, 'now', () => 50);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { layer } = quietScene();
+  layer.load(model(1), 10);
+  layer.update(new THREE.Camera(), { getDrawingBufferSize() {} } as unknown as THREE.WebGLRenderer, 10);
+  layer.clear();
+  let dirty = 0;
+  layer.onDirty = () => dirty++;
+  t.mock.timers.tick(200);
+  assert.equal(dirty, 0);
+  layer.dispose();
+});
 
 test('an accepted depth sort marks a quiet scene dirty', () => {
   const { scheduler, layer, worker } = quietScene();

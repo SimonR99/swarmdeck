@@ -15,6 +15,7 @@ import {
   RasterTrailProjectionCache
 } from '../src/lib/components/map2d/mapFrames.ts';
 import type { Point, Pose, RobotState } from '../src/lib/types/protocol.ts';
+import { TrailRecorder } from '../src/lib/stores/trailRecorder.ts';
 const transform = { x: 10, y: 20, yaw: Math.PI / 2 };
 
 
@@ -95,6 +96,18 @@ test('a recorded trail is placed on the raster with the robot that drove it', ()
   assert.deepEqual(projectTrailToRaster(trail, rasterProjection(robot, undefined)), []);
   const legacy = { ...robot, navigation_transform: undefined };
   assert.equal(projectTrailToRaster(trail, rasterProjection(legacy, undefined)), trail);
+});
+
+test('mixed registration packets cannot create a fictitious trail on an unchanged raster', () => {
+  const recorder = new TrailRecorder();
+  const raster = { r0: { x: 0, y: 0, yaw: 0 } };
+  let robot = packet(raster.r0, { x: 0, y: 0, yaw: 0 });
+  recorder.record('r0', robot.pose.x, robot.pose.y, robot.navigation_transform);
+  const cache = new RasterTrailProjectionCache();
+  assert.deepEqual(cache.project(robot, recorder.points('r0'), raster), [{ x: 0, y: 0 }]);
+  robot = packet({ x: 1, y: 0, yaw: 0 }, { x: 0, y: 0, yaw: 0 });
+  recorder.record('r0', robot.pose.x, robot.pose.y, robot.navigation_transform);
+  assert.deepEqual(cache.project(robot, recorder.points('r0'), raster), [{ x: 0, y: 0 }]);
 });
 
 test('trail placement is recomputed for a new point or a new raster, not for a redraw', () => {

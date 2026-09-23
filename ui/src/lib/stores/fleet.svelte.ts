@@ -202,7 +202,7 @@ export const fleet = {
     if (update.drawable) state.sceneRevision++;
     // Where the robot has been is recorded from its telemetry, so it is the
     // same history whichever map view is on screen.
-    trails.record(msg.robot_id, msg.pose.x, msg.pose.y);
+    trails.record(msg.robot_id, msg.pose.x, msg.pose.y, msg.navigation_transform);
   },
 
   sync(robots: RobotState[]) {

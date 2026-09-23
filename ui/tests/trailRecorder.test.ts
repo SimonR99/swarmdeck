@@ -62,6 +62,26 @@ test('trails are per robot and can be retired one at a time', () => {
   assert.equal(recorder.all().size, 0);
 });
 
+test('registration changes clear history even when the world pose stays still', () => {
+  const recorder = new TrailRecorder();
+  const source = { x: 0, y: 0, yaw: 0 };
+  recorder.record('robot_0', 0, 0, source);
+  recorder.record('robot_0', .5, 0, source);
+  recorder.record('robot_0', .5, 0, { ...source, yaw: .01 });
+  assert.deepEqual(recorder.points('robot_0'), [{ x: .5, y: 0 }]);
+  recorder.record('robot_0', .6, 0);
+  assert.deepEqual(recorder.points('robot_0'), [{ x: .6, y: 0 }]);
+});
+
+test('sub-tolerance registration noise preserves history but cumulative drift clears it', () => {
+  const recorder = new TrailRecorder();
+  recorder.record('robot_0', 0, 0, { x: 0, y: 0, yaw: Math.PI });
+  recorder.record('robot_0', .1, 0, { x: .0005, y: 0, yaw: -Math.PI });
+  assert.equal(recorder.points('robot_0').length, 2);
+  recorder.record('robot_0', .2, 0, { x: .002, y: 0, yaw: Math.PI });
+  assert.deepEqual(recorder.points('robot_0'), [{ x: .2, y: 0 }]);
+});
+
 test('telemetry without a finite pose is ignored', () => {
   const recorder = new TrailRecorder();
   assert.equal(recorder.record('robot_0', Number.NaN, 0), false);

@@ -192,123 +192,58 @@ def _make_ts_line(epoch_s: float, content: str) -> str:
     return f"{ts.strftime('%Y-%m-%dT%H:%M:%S')}.{frac}Z {content}"
 
 
-def test_latency_window_filter_drops_pre_window_plans():
-    """Plan events before start_epoch must be excluded from the filtered list."""
-    start_epoch = 2000.0
-    end_epoch   = 2100.0
-
-    # one plan well before the window, one inside
-    old_line    = _make_ts_line(1000.0, _PLAN_CONTENT)
-    inside_line = _make_ts_line(2050.0, _PLAN_CONTENT)
-    log_text = old_line + "\n" + inside_line + "\n"
-
-    all_events = parse_timestamped_plan_lines(log_text)
-    assert len(all_events) == 2, "both raw lines must parse"
-
-    # apply the same filter latency_trace uses
-    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
-    assert len(filtered) == 1, "only the inside-window plan must survive"
-    assert abs(filtered[0][0] - 2050.0) < 1.0
+def test_latency_window_filter_uses_probe_window(monkeypatch):
+    result = _trace(monkeypatch, [_pose(2049, 0), _pose(2051, .2)],
+                    plans=(1000, 2050, 2200), start=2000, end=2100)
+    assert result['plan_count'] == 1
+    assert result['latency_s'] == {'robot_0': [1]}
 
 
-def test_latency_window_filter_drops_post_window_plans():
-    """Plan events after end_epoch must also be excluded."""
-    start_epoch = 2000.0
-    end_epoch   = 2100.0
-
-    inside_line = _make_ts_line(2050.0, _PLAN_CONTENT)
-    after_line  = _make_ts_line(2200.0, _PLAN_CONTENT)
-    log_text = inside_line + "\n" + after_line + "\n"
-
-    all_events = parse_timestamped_plan_lines(log_text)
-    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
-    assert len(filtered) == 1
-    assert abs(filtered[0][0] - 2050.0) < 1.0
-
-
-def test_latency_window_filter_empty_when_all_outside():
-    """All plans outside the window → empty filtered list."""
-    start_epoch = 5000.0
-    end_epoch   = 5100.0
-
-    log_text = (
-        _make_ts_line(1000.0, _PLAN_CONTENT) + "\n"
-        + _make_ts_line(9000.0, _PLAN_CONTENT) + "\n"
-    )
-    all_events = parse_timestamped_plan_lines(log_text)
-    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
-    assert filtered == []
+def test_latency_window_filter_empty_when_all_outside(monkeypatch):
+    result = _trace(monkeypatch, [_pose(2050, 0)],
+                    plans=(1000, 9000), start=2000, end=2100)
+    assert result['plan_count'] == 0
 
 
 # ---------------------------------------------------------------------------
 # Reference-pose selection (fix 2): last pre-plan pose, not first
 # ---------------------------------------------------------------------------
 
-def _last_pre_plan_pos(events, plan_epoch):
-    """Reimplementation of the fixed reference-pose logic for unit testing.
-
-    events: sorted list of (utc_s, x, y)
-    Returns (x, y) of the latest sample at or before plan_epoch.
-    """
-    ref_pos = None
-    for utc, x, y in reversed(events):
-        if utc <= plan_epoch:
-            ref_pos = (x, y)
-            break
-    if ref_pos is None:
-        ref_pos = (events[0][1], events[0][2])
-    return ref_pos
+def test_ref_pos_uses_last_pre_plan_sample(monkeypatch):
+    result = _trace(monkeypatch, [_pose(1, 0), _pose(9, 1),
+                                _pose(11, 1.01), _pose(12, 1.2)])
+    assert result['latency_s'] == {'robot_0': [2]}
 
 
-def test_ref_pos_uses_last_pre_plan_sample():
-    """The reference pose must be the latest sample at-or-before the plan."""
-    # Robot moved from (0,0) to (1,0) at t=100, then the plan arrives at t=200.
-    # Correct ref = (1,0) -- the pose just before the plan -- NOT (0,0).
-    events = [
-        (50.0,  0.0, 0.0),
-        (100.0, 1.0, 0.0),  # robot moved here before the plan
-        (150.0, 1.0, 0.0),
-        (250.0, 1.1, 0.0),  # tiny post-plan movement (0.1 m from 1.0)
-    ]
-    plan_epoch = 200.0
-    ref = _last_pre_plan_pos(events, plan_epoch)
-    assert ref == (1.0, 0.0), f"expected last pre-plan pos (1,0), got {ref}"
+def test_ref_pos_fallback_when_no_pre_plan_events(monkeypatch):
+    result = _trace(monkeypatch, [_pose(11, 2), _pose(12, 2.2)])
+    assert result['latency_s'] == {'robot_0': [2]}
 
 
-def test_ref_pos_old_first_logic_gives_wrong_answer():
-    """Show that the old 'first pre-plan' logic produces the wrong reference."""
-    events = [
-        (50.0,  0.0, 0.0),
-        (100.0, 1.0, 0.0),
-        (150.0, 1.0, 0.0),
-        (250.0, 1.1, 0.0),
-    ]
-    plan_epoch = 200.0
-    # OLD behaviour: next((x,y) for utc,x,y in events if utc <= plan_epoch)
-    old_ref = next(
-        ((x, y) for utc, x, y in events if utc <= plan_epoch),
-        (events[0][1], events[0][2]),
-    )
-    # Old logic returns the FIRST pre-plan pose (0, 0), not the last (1, 0)
-    assert old_ref == (0.0, 0.0), f"old logic should give (0,0), got {old_ref}"
-
-    # With old ref (0,0): displacement at t=250 is ~1.1 m already exceeded,
-    # so the latency would be falsely short (250-200=50 s) even though the
-    # 1.0 m displacement happened BEFORE the plan.
-    # With new ref (1,0): displacement at t=250 is 0.1 m -- correct.
-    new_ref = _last_pre_plan_pos(events, plan_epoch)
-    assert new_ref == (1.0, 0.0)
+def test_latency_superseded_plan_cannot_borrow_later_motion(monkeypatch):
+    result = _trace(monkeypatch, [_pose(9, 0), _pose(19, 0), _pose(21, .2)],
+                    plans=(10, 20))
+    assert result['latency_s'] == {'robot_0': [1]}
+    assert result['cut_off_plan_count'] == 1
 
 
-def test_ref_pos_fallback_when_no_pre_plan_events():
-    """When all events are after the plan, fall back to the first known pose."""
-    events = [
-        (300.0, 2.0, 3.0),
-        (400.0, 2.5, 3.0),
-    ]
-    plan_epoch = 100.0  # earlier than all events
-    ref = _last_pre_plan_pos(events, plan_epoch)
-    assert ref == (2.0, 3.0), "should fall back to events[0] when none precede the plan"
+def test_latency_reset_cuts_off_plan_even_without_later_telemetry(monkeypatch):
+    result = _trace(monkeypatch, [_pose(9, 0), {'utc': 11, 'reset': None}])
+    assert result['latency_s'] == {}
+    assert result['cut_off_plan_count'] == 1
+
+
+def test_latency_no_reset_spanning_reference_for_a_new_plan(monkeypatch):
+    result = _trace(monkeypatch, [_pose(9, 0), {'utc': 11, 'reset': ['robot_0']},
+                                _pose(21, 1), _pose(22, 1.2)], plans=(20,))
+    assert result['latency_s'] == {'robot_0': [2]}
+    assert result['cut_off_plan_count'] == 0
+
+
+def test_latency_displacement_exactly_at_next_plan_is_cut_off(monkeypatch):
+    result = _trace(monkeypatch, [_pose(9, 0), _pose(20, .2)], plans=(10, 20))
+    assert result['latency_s'] == {}
+    assert result['cut_off_plan_count'] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +295,118 @@ assert.equal(cpuPercent(0, 2, 100), 0);
 assert.throws(() => cpuPercent(10, 0, 100));
 assert.throws(() => cpuPercent(10, 1, 0));
 ''')
+
+
+def _trace(monkeypatch, events, plans=(10,), start=0, end=30):
+    """Run the actual collector/correlator with captured external command output."""
+    import json
+    import subprocess
+    import profile_stack
+
+    clock = iter((start, end))
+    monkeypatch.setattr(profile_stack.time, 'time', lambda: next(clock))
+    results = iter((
+        subprocess.CompletedProcess([], 0, stdout=json.dumps(events), stderr=''),
+        subprocess.CompletedProcess([], 0, stdout='\n'.join(
+            _make_ts_line(t, _PLAN_CONTENT) for t in plans), stderr=''),
+    ))
+    monkeypatch.setattr(profile_stack, 'sh', lambda *a, **kw: next(results))
+    return profile_stack.latency_trace(end - start)
+
+
+def _pose(utc, x, y=0, transform=None):
+    return {'utc': utc, 'robot_id': 'robot_0', 'pose': {'x': x, 'y': y},
+            'navigation_transform': transform}
+
+
+def test_latency_registration_only_change_is_not_motion(monkeypatch):
+    result = _trace(monkeypatch, [
+        _pose(9, 0, transform={'x': 0, 'y': 0, 'yaw': 0}),
+        _pose(11, .2, transform={'x': .2, 'y': 0, 'yaw': 0}),
+        _pose(12, .4, transform={'x': .2, 'y': 0, 'yaw': 0}),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_inverts_small_registration_rotation_before_comparing(monkeypatch):
+    import math
+    # Below the transform-change tolerance but enough world movement at range
+    # to exceed the displacement threshold. The robot is stationary locally.
+    yaw = .0009
+    result = _trace(monkeypatch, [
+        _pose(9, 200, transform={'x': 0, 'y': 0, 'yaw': 0}),
+        _pose(11, 200 * math.cos(yaw), 200 * math.sin(yaw),
+              transform={'x': 0, 'y': 0, 'yaw': yaw}),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_reset_cannot_be_motion(monkeypatch):
+    result = _trace(monkeypatch, [
+        _pose(9, 0), {'utc': 10.5, 'reset': ['robot_0']}, _pose(11, 1),
+    ])
+    assert result['latency_s'] == {}
+
+
+def test_latency_real_motion_in_navigation_frame(monkeypatch):
+    transform = {'x': 5, 'y': 4, 'yaw': 1.57}
+    result = _trace(monkeypatch, [_pose(9, 5, 4, transform),
+                                _pose(11, 5, 4.2, transform)])
+    assert result['latency_s'] == {'robot_0': [1]}
+
+
+def test_browser_timeout_returns_unavailable(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+    monkeypatch.setattr(profile_stack, 'sh', timeout)
+    result = profile_stack.browser_cpu('http://localhost:5173', idle_s=1, pans=0)
+    assert 'timed out' in result['error']
+
+
+def test_browser_result_records_nproc(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def command(args, **kwargs):
+        output = '20\n' if args == ['nproc'] else '{"idle_cpu_pct": 35}\n'
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr='')
+    monkeypatch.setattr(profile_stack, 'sh', command)
+    result = profile_stack.browser_cpu('http://localhost:5173')
+    assert result['nproc'] == 20
+    assert result['idle_cpu_pct'] == 35
+
+
+def test_browser_report_prints_nproc(monkeypatch):
+    import argparse
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, 'git_commit', lambda *a: 'test')
+    monkeypatch.setattr(profile_stack, 'running_containers', lambda: ['test'])
+    monkeypatch.setattr(profile_stack, 'real_time_factor', lambda *a: {'error': 'offline'})
+    monkeypatch.setattr(profile_stack, 'cpu_sample', lambda *a: ({}, []))
+    monkeypatch.setattr(profile_stack, 'mgg_cycles', lambda *a: [])
+    monkeypatch.setattr(profile_stack, 'websocket_traffic', lambda *a: {})
+    metrics = {f'{phase}_{metric}': 1 for phase in ('idle', 'pan') for metric in
+               ('cpu_pct', 'webgl_frames_per_s', 'clears_per_s', 'draws_per_s', 'wall_s')}
+    monkeypatch.setattr(profile_stack, 'browser_cpu', lambda *a, **kw: {**metrics, 'nproc': 20})
+    args = argparse.Namespace(label='', start_explore=False, window=1, top=1,
+                              perf_mgg=False, profiles=False, browser=True)
+    assert 'nproc: 20' in profile_stack.report(args)
+
+
+def test_browser_missing_nproc_is_unavailable_not_a_crash(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def command(args, **kwargs):
+        if args == ['nproc']:
+            raise FileNotFoundError('nproc unavailable')
+        return subprocess.CompletedProcess(args, 0, stdout='{}', stderr='')
+    monkeypatch.setattr(profile_stack, 'sh', command)
+    assert 'nproc unavailable' in profile_stack.browser_cpu('http://localhost:5173')['error']

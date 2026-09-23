@@ -7,6 +7,8 @@ import {
   type RenderRequest
 } from '../src/lib/components/map3d/renderScheduler.ts';
 
+import { LayerUpdateGate } from '../src/lib/components/map3d/layerUpdateGate.ts';
+
 const FPS = 30;
 
 function request(overrides: Partial<RenderRequest> = {}): RenderRequest {
@@ -133,6 +135,29 @@ test('an expiry with no further response still marks a quiet scene dirty at the 
   clock.advanceTo(3000);
   assert.equal(scheduler.pending, true);
   assert.equal(clock.pendingCount, 0);
+});
+
+test('two freshness expiries within the layer budget both remove expired layers without later responses', () => {
+  const clock = fakeClock();
+  const scheduler = new RenderScheduler();
+  const layers = new LayerUpdateGate();
+  const expiries = [1001, 1101];
+  let drawn = [...expiries];
+  scheduler.frame(request());
+  const wakeup = new DeadlineWakeup(
+    (now) => expiries.find((expiry) => expiry > now) ?? null,
+    () => { layers.invalidateFreshness(); scheduler.markDirty(); },
+    clock.now, clock.timers
+  );
+  wakeup.arm();
+  for (const now of expiries) {
+    clock.advanceTo(now);
+    assert.equal(scheduler.frame(request({ now })).render, true);
+    if (layers.take(now)) drawn = expiries.filter((expiry) => expiry > now);
+    assert.deepEqual(drawn, expiries.filter((expiry) => expiry > now));
+  }
+  assert.equal(clock.pendingCount, 0);
+  assert.equal(scheduler.frame(request({ now: 1200 })).again, false);
 });
 
 test('re-arming replaces the pending wake-up instead of adding one', () => {
