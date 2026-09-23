@@ -25,6 +25,16 @@ cannot share `/dev/shm`. Override `FASTRTPS_DEFAULT_PROFILES_FILE` with its moun
 path for such probes; `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` alone does not override
 an XML profile with `useBuiltinTransports=false`.
 
+## Simulation static mounts
+
+`session.launch.py` starts one `sensor_mounts` process for the whole fleet,
+replacing four `static_transform_publisher` processes per robot. It publishes
+one reliable, transient-local TFMessage per `/<robot>/tf_static`, containing
+all four existing mount edges (lidar, IMU, proximity lidar, camera), then stays
+alive to serve late subscribers. Mount geometry and frame IDs are unchanged;
+Nav2 and peer consumers keep their namespaced TF subscriptions. The old
+`/<robot>/{lidar,imu,proximity_lidar,camera}_tf` diagnostic node names disappear.
+
 ## Validate on a running fleet
 
 Compare an identical domain, fleet size and scenario before/after. Inspect

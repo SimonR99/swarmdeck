@@ -16,7 +16,6 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 REPO = Path(__file__).resolve().parents[4]
@@ -162,7 +161,7 @@ def argos_actions(
     return actions
 
 
-def sensor_mount_transforms(ns: str, robot) -> list[Node]:
+def sensor_mount_transforms(ns: str, robot) -> list[dict]:
     """Static ``base_link -> sensor`` edges for one simulated robot.
 
     The ARGoS bridge stamps sensor messages ``<ns>/base_link/<sensor>``, which
@@ -173,31 +172,19 @@ def sensor_mount_transforms(ns: str, robot) -> list[Node]:
     from their URDF instead.
     """
     mounts = (
-        ("lidar_tf", "lidar", f"{robot.lidar_x:.4f}", f"{robot.lidar_z:.4f}"),
-        ("imu_tf", "imu", "0", "0"),
-        ("proximity_lidar_tf", "proximity_lidar", "0.24", "0.05"),
-        ("camera_tf", "camera", f"{robot.camera_x:.4f}", f"{robot.camera_z:.4f}"),
+        ("lidar", round(robot.lidar_x, 4), round(robot.lidar_z, 4)),
+        ("imu", 0.0, 0.0),
+        ("proximity_lidar", 0.24, 0.05),
+        ("camera", round(robot.camera_x, 4), round(robot.camera_z, 4)),
     )
     return [
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name=name,
-            namespace=ns,
-            arguments=[
-                "--x",
-                x,
-                "--z",
-                z,
-                "--frame-id",
-                f"{ns}/base_link",
-                "--child-frame-id",
-                f"{ns}/base_link/{sensor}",
-            ],
-            parameters=[{"use_sim_time": True}],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
-        )
-        for name, sensor, x, z in mounts
+        {
+            "frame_id": f"{ns}/base_link",
+            "child_frame_id": f"{ns}/base_link/{sensor}",
+            "x": x,
+            "z": z,
+        }
+        for sensor, x, z in mounts
     ]
 
 
@@ -252,14 +239,31 @@ def setup(context, *args, **kwargs):
         odometry,
     )
 
+    mounts = {
+        f"{prefix}{i}": sensor_mount_transforms(f"{prefix}{i}", robot_spec(types[i]))
+        for i in range(count)
+    }
+    actions.append(
+        ExecuteProcess(
+            cmd=[
+                "python3",
+                str(Path(__file__).with_name("static_mounts.py")),
+                json.dumps(mounts),
+                "--ros-args",
+                "-p",
+                "use_sim_time:=true",
+            ],
+            output="screen",
+        )
+    )
+
     for i in range(count):
         ns = f"{prefix}{i}"
         robot = robot_spec(types[i])
         actions.append(
             TimerAction(
                 period=BRINGUP_DELAY + i * ROBOT_STAGGER,
-                actions=sensor_mount_transforms(ns, robot)
-                + [
+                actions=[
                     IncludeLaunchDescription(
                         PythonLaunchDescriptionSource(
                             [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
