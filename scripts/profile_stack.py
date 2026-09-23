@@ -67,12 +67,11 @@ _DOCKER_TS = re.compile(
     r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)Z\s+(.*)"
 )
 
-# Path to Playwright's bundled Chromium (populated by `npx playwright install`)
-_PLAYWRIGHT_CHROMIUM = (
-    Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
-)
-# Path to Playwright's Node modules (from npx cache)
-_PLAYWRIGHT_MODULES = Path.home() / ".npm/_npx/e41f203b7505f1fb/node_modules"
+# Hint for the Playwright node-modules search: the npx-cache entry that is
+# most likely to exist on a freshly installed host.  _find_playwright_modules()
+# always does a full directory scan as a fallback, so this hint going stale
+# (after a Playwright version bump) is not fatal.
+_PLAYWRIGHT_MODULES_HINT = Path.home() / ".npm/_npx"
 
 # Motion threshold for plan-to-motion latency (metres)
 _MOTION_THRESHOLD_M = 0.10
@@ -466,11 +465,13 @@ function metric(arr, name) {
 
 
 def _find_playwright_modules() -> Path | None:
-    """Return path to a node_modules directory that contains playwright."""
-    if (_PLAYWRIGHT_MODULES / "playwright").exists():
-        return _PLAYWRIGHT_MODULES
-    # fall back: search npx cache
-    npx_cache = Path.home() / ".npm/_npx"
+    """Return path to a node_modules directory that contains playwright.
+
+    Searches the npx cache directory (~/.npm/_npx) for any entry that
+    contains playwright or playwright-core, sorted for reproducibility.
+    No hard-coded cache hash: works after a Playwright version upgrade.
+    """
+    npx_cache = _PLAYWRIGHT_MODULES_HINT
     if npx_cache.is_dir():
         for entry in sorted(npx_cache.iterdir()):
             candidate = entry / "node_modules"
