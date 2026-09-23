@@ -465,7 +465,6 @@ export type ServerMessage =
   | { type: 'alert_clear'; id: string }
   | { type: 'settings_state'; settings: AppSettings }
   | ({ type: 'detection_review' } & DetectionReview)
-  | { type: 'slam_graph'; robot_id: string; graph: SlamGraph }
   | SimReset;
 
 /* ---------- GUI → server ---------- */

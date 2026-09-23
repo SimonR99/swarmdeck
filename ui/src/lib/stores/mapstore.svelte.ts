@@ -208,11 +208,6 @@ export const mapStore = {
   clearNetwork(robotId: string | null = null) { clearNetworkLayer(robotId); state.revision++; },
   get robotMapEpochs() { return state.robotMapEpochs; },
 
-  applySlamGraph(robotId: string, graph: SlamGraph) {
-    state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
-    state.revision++;
-  },
-
   applyRobotMapReset(robotId: string, missionId: string, epoch: number) {
     const identity = `${missionId}:${epoch}`;
     if (state.robotMapEpochs[robotId] === identity) return;

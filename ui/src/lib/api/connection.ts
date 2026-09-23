@@ -182,9 +182,6 @@ function dispatch(msg: ServerMessage) {
     case 'detection_review':
       review.apply(msg);
       break;
-    case 'slam_graph':
-      mapStore.applySlamGraph(msg.robot_id, msg.graph);
-      break;
     case 'sim_reset':
       session.applySimReset(msg);
       break;
