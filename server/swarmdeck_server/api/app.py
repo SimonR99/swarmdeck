@@ -129,6 +129,9 @@ _reset_pending: set[str] = set()
 
 STATE_LOOP_INTERVAL_S = 0.2
 STATE_KEEPALIVE_S = 1.0
+# Compare floats at 1e-6 absolute resolution to ignore recomputation noise;
+# outgoing messages retain their original precision.
+STATE_SIGNATURE_FLOAT_DIGITS = 6
 _state_loop_cache: dict[str, tuple[str, float]] = {}
 # robot_id → the `steps` map from a reset_done that reported ok: false. Held
 # until reset_fleet() has finished clearing, so the alert survives that clear.
@@ -471,7 +474,19 @@ def _robot_state_signature(message: dict[str, Any]) -> str:
             for key, value in stable["live_mapping"].items()
             if key != "authority_age_s"
         }
-    return json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    def rounded(value: Any) -> Any:
+        if isinstance(value, float):
+            # Normalize signed zero too: JSON distinguishes -0.0 from 0.0.
+            return round(value, STATE_SIGNATURE_FLOAT_DIGITS) or 0.0
+        if isinstance(value, dict):
+            return {key: rounded(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [rounded(item) for item in value]
+        return value
+
+    return json.dumps(
+        rounded(stable), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
 
 
 async def state_loop_tick(now: float | None = None) -> None:

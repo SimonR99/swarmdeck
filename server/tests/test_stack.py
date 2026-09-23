@@ -230,6 +230,52 @@ def test_state_loop_refreshes_authority_age_only_on_keepalive(monkeypatch):
     assert [msg["live_mapping"]["authority_age_s"] for msg in sent] == [0.18, 0.99]
 
 
+@pytest.mark.parametrize("move_cm", [False, True], ids=["parked", "one_cm_move"])
+def test_state_loop_ignores_float_noise_but_sends_motion(monkeypatch, move_cm):
+    from swarmdeck_server.api import app as app_module
+
+    sent = []
+
+    async def capture(message):
+        sent.append(message)
+
+    monkeypatch.setattr(app_module, "broadcast", capture)
+    app_module._gui_clients.add(object())
+    robot = app_registry.hello({"robot_id": "r0"}, sink=None)
+    original_y = 2.5337561943629553e-05
+    noisy_y = 2.5337561943629543e-05
+    robot.live_mapping = {
+        "authority_age_s": 0.18,
+        "pose": {"x": 0.0, "y": original_y, "yaw": 0.0},
+    }
+    robot.pose = {"x": 0.0, "y": original_y, "yaw": 0.0}
+    robot.footprint = [[original_y, 0.0]]
+    asyncio.run(state_loop_tick(now=10.0))
+    robot.live_mapping = {
+        "authority_age_s": 0.99,
+        "pose": {"x": 0.0, "y": noisy_y, "yaw": -1e-20},
+    }
+    robot.pose = {"x": 0.0, "y": noisy_y, "yaw": -1e-20}
+    robot.footprint = [[noisy_y, -1e-20]]
+    asyncio.run(state_loop_tick(now=10.2))
+    assert len(sent) == 1
+
+    if move_cm:
+        robot.pose = {"x": 0.01, "y": noisy_y, "yaw": 0.0}
+        asyncio.run(state_loop_tick(now=10.4))
+        assert len(sent) == 2
+        assert sent[-1]["pose"]["x"] == 0.01
+        assert sent[-1]["pose"]["y"] == noisy_y
+    else:
+        asyncio.run(state_loop_tick(now=10.8))
+        assert len(sent) == 1
+        asyncio.run(state_loop_tick(now=11.0))
+        assert len(sent) == 2
+        assert sent[-1]["live_mapping"] == robot.live_mapping
+        assert sent[-1]["footprint"] == [[noisy_y, -1e-20]]
+    assert sent[0]["live_mapping"]["pose"]["y"] == original_y
+
+
 def test_state_loop_skips_robot_state_without_gui_clients(monkeypatch):
     from swarmdeck_server.api import app as app_module
 
