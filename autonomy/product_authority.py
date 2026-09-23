@@ -40,7 +40,11 @@ from .map_epochs import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .cslam import FrameState
 
-MAX_PRODUCT_BYTES = 4 * 1024 * 1024
+# Matches MAX_SNAPSHOT_BYTES (deploy/autonomy/mola_worker.py, the source.json
+# the worker reads to build this product) and MGG's own product limit: a
+# reader must never reject a product the worker and MGG both accept. 4 MiB
+# was a latent failure at about 2,400 keyframes.
+MAX_PRODUCT_BYTES = 64 * 1024 * 1024
 MAX_PRODUCT_COMPONENTS = 256
 DEFAULT_READ_ATTEMPTS = 3
 READ_RETRY_PAUSE_S = 0.005

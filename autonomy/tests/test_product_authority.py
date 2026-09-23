@@ -290,6 +290,18 @@ def test_index_must_cover_every_source_component(tmp_path):
     assert read_published_product(tmp_path) is None
 
 
+def test_product_just_above_4_mib_is_accepted_by_the_default_limit(tmp_path):
+    """MAX_PRODUCT_BYTES rose from 4 MiB to 64 MiB, the worker's and MGG's own
+    limit (a latent failure at about 2,400 keyframes): a reader must never
+    reject a product they both accept.
+    """
+    value = snapshot(manifest("component:a", 0, 4))
+    value["padding"] = "x" * (4 * 1024 * 1024)
+    source_raw, _ = write_product(tmp_path, value)
+    assert 4 * 1024 * 1024 < len(source_raw) < product_authority.MAX_PRODUCT_BYTES
+    assert read_published_product(tmp_path) is not None
+
+
 def test_oversized_or_malformed_files_are_ignored(tmp_path):
     value = snapshot(manifest("component:a", 0, 4))
     write_product(tmp_path, value)
