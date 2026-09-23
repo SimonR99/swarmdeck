@@ -4,6 +4,7 @@ import {
   LIVE_REPLICA_FRESHNESS_BUDGET_S,
   liveRobotToMapRobot,
   liveReplicaDrawChanged,
+  liveReplicaFreshnessDeadline,
   liveReplicaMatchesSelection,
   parseLiveReplicaFrame,
   postLiveReplicaGoal
@@ -188,4 +189,23 @@ test('a live robot that went stale since its last frame redraws whether or not i
   stillStale.robots[0].freshness = { pose_s: 4, goal_s: 4, path_s: 4 };
   const next = { frame: parseLiveReplicaFrame(stillStale), receivedAt: 5000 };
   assert.equal(liveReplicaDrawChanged(previous, next, 5000), true);
+});
+
+test('the next freshness deadline is the first drawn pose, goal or path to go stale', () => {
+  const frame = parseLiveReplicaFrame(payload());
+  frame.robots[0].freshness = { pose_s: 0.5, goal_s: 1, path_s: 2 };
+  const live = { frame, receivedAt: 1000 };
+  const budgetMs = LIVE_REPLICA_FRESHNESS_BUDGET_S * 1000;
+  // Stale strictly after the budget, so the wake-up lands just past each deadline.
+  assert.equal(liveReplicaFreshnessDeadline(live, 1000), 1000 + budgetMs - 2000 + 1);
+  assert.equal(liveReplicaFreshnessDeadline(live, 2001), 1000 + budgetMs - 1000 + 1);
+  assert.equal(liveReplicaFreshnessDeadline(live, 3001), 1000 + budgetMs - 500 + 1);
+  assert.equal(liveReplicaFreshnessDeadline(live, 3501), null);
+  assert.equal(liveReplicaFreshnessDeadline(null, 1000), null);
+});
+
+test('a missing goal or path has no freshness deadline', () => {
+  const frame = parseLiveReplicaFrame({ ...payload(), robots: [{ ...payload().robots[0], goal: null }] });
+  frame.robots[0].freshness = { pose_s: 0.5, goal_s: 0, path_s: null };
+  assert.equal(liveReplicaFreshnessDeadline({ frame, receivedAt: 0 }, 0), LIVE_REPLICA_FRESHNESS_BUDGET_S * 1000 - 500 + 1);
 });

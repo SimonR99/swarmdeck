@@ -356,6 +356,28 @@ export function liveReplicaDrawChanged(
   return !sameDrawnValue({ ...before, robots: [] }, { ...after, robots: [] });
 }
 
+/**
+ * When the next drawn pose, goal or path of `live` goes stale, in the clock of
+ * `receivedAt`, or null when nothing drawn is still fresh at `now`.
+ *
+ * An item is fresh while its age is at most the budget, so the returned time
+ * is one millisecond past the last fresh instant.
+ */
+export function liveReplicaFreshnessDeadline(live: LiveReplicaSelection | null, now: number): number | null {
+  if (!live) return null;
+  let next: number | null = null;
+  for (const robot of live.frame.robots) {
+    const ages = [robot.freshness.pose_s];
+    if (robot.goal !== null && robot.freshness.goal_s !== null) ages.push(robot.freshness.goal_s);
+    if (robot.freshness.path_s !== null) ages.push(robot.freshness.path_s);
+    for (const age of ages) {
+      const lastFresh = live.receivedAt + (LIVE_REPLICA_FRESHNESS_BUDGET_S - age) * 1000;
+      if (lastFresh >= now && (next === null || lastFresh + 1 < next)) next = lastFresh + 1;
+    }
+  }
+  return next;
+}
+
 export function liveRobotToMapRobot(robot: LiveReplicaRobot, base?: MapRobot, elapsedS = 0): MapRobot {
   const geometry = projectedGeometry(robot);
   const fresh = liveRobotFreshness(robot, elapsedS);

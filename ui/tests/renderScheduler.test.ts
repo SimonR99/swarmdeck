@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DECORATION_FPS,
+  DeadlineWakeup,
   RenderScheduler,
   type RenderRequest
 } from '../src/lib/components/map3d/renderScheduler.ts';
@@ -75,4 +76,80 @@ test('a change while only decoration animates is not delayed to the decoration r
   assert.equal(scheduler.frame(request({ now: 20, decorating: true })).render, false);
   scheduler.markDirty();
   assert.equal(scheduler.frame(request({ now: 40, decorating: true })).render, true);
+});
+
+/** setTimeout stand-in driven by a hand-advanced clock. */
+function fakeClock() {
+  let now = 0;
+  let next = 1;
+  const pending = new Map<number, { at: number; run: () => void }>();
+  return {
+    now: () => now,
+    timers: {
+      set: (run: () => void, delayMs: number) => {
+        const handle = next++;
+        pending.set(handle, { at: now + delayMs, run });
+        return handle;
+      },
+      clear: (handle: unknown) => void pending.delete(handle as number)
+    },
+    advanceTo(time: number) {
+      for (;;) {
+        const due = [...pending.entries()].filter(([, t]) => t.at <= time).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        pending.delete(due[0]);
+        now = due[1].at;
+        due[1].run();
+      }
+      now = time;
+    },
+    get pendingCount() {
+      return pending.size;
+    }
+  };
+}
+
+test('an expiry with no further response still marks a quiet scene dirty at the deadline', () => {
+  const clock = fakeClock();
+  const scheduler = new RenderScheduler();
+  // Settle the scene: one frame drawn, nothing moving, no more frames wanted.
+  assert.deepEqual(scheduler.frame(request({ now: 0 })), { render: true, again: false });
+  // Two drawn items go stale at 2000 and 3000; no new frame ever arrives.
+  const deadlines = [2000, 3000];
+  const wakeup = new DeadlineWakeup(
+    (now) => deadlines.find((deadline) => deadline > now) ?? null,
+    () => scheduler.markDirty(),
+    clock.now,
+    clock.timers
+  );
+  wakeup.arm();
+  clock.advanceTo(1999);
+  assert.equal(scheduler.pending, false);
+  clock.advanceTo(2000);
+  assert.equal(scheduler.pending, true);
+  assert.equal(scheduler.frame(request({ now: 2000 })).render, true);
+  clock.advanceTo(2999);
+  assert.equal(scheduler.pending, false);
+  clock.advanceTo(3000);
+  assert.equal(scheduler.pending, true);
+  assert.equal(clock.pendingCount, 0);
+});
+
+test('re-arming replaces the pending wake-up instead of adding one', () => {
+  const clock = fakeClock();
+  let wakes = 0;
+  let deadline: number | null = 2000;
+  const wakeup = new DeadlineWakeup(() => deadline, () => wakes++, clock.now, clock.timers);
+  wakeup.arm();
+  deadline = 5000;
+  wakeup.arm();
+  assert.equal(clock.pendingCount, 1);
+  clock.advanceTo(4000);
+  assert.equal(wakes, 0);
+  deadline = null;
+  clock.advanceTo(5000);
+  assert.equal(wakes, 1);
+  wakeup.arm();
+  wakeup.cancel();
+  assert.equal(clock.pendingCount, 0);
 });

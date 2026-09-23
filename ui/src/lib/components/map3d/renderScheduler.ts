@@ -101,3 +101,61 @@ export class RenderScheduler {
     this.resumePending = false;
   }
 }
+
+/** The timer functions DeadlineWakeup uses; a test passes its own clock. */
+export interface WakeTimers {
+  set(run: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const browserTimers: WakeTimers = {
+  set: (run, delayMs) => setTimeout(run, delayMs),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+};
+
+/**
+ * Wakes the renderer when something drawn expires on its own clock.
+ *
+ * The map draws only when an input changes, but an item that is drawn only
+ * while fresh — a replica robot, goal or path — goes stale without any input
+ * changing, and without the poll succeeding again. This keeps exactly one
+ * timer, set for the next deadline `nextDeadline(now)` reports; when it fires
+ * it calls `wake` and arms itself for the deadline after that.
+ */
+export class DeadlineWakeup {
+  private handle: unknown = null;
+  private readonly nextDeadline: (now: number) => number | null;
+  private readonly wake: () => void;
+  private readonly clock: () => number;
+  private readonly timers: WakeTimers;
+
+  constructor(
+    nextDeadline: (now: number) => number | null,
+    wake: () => void,
+    clock: () => number = () => performance.now(),
+    timers: WakeTimers = browserTimers
+  ) {
+    this.nextDeadline = nextDeadline;
+    this.wake = wake;
+    this.clock = clock;
+    this.timers = timers;
+  }
+
+  /** Read the next deadline again, replacing any wake-up already pending. */
+  arm() {
+    this.cancel();
+    const now = this.clock();
+    const deadline = this.nextDeadline(now);
+    if (deadline === null) return;
+    this.handle = this.timers.set(() => {
+      this.handle = null;
+      this.wake();
+      this.arm();
+    }, Math.max(0, deadline - now));
+  }
+
+  cancel() {
+    if (this.handle !== null) this.timers.clear(this.handle);
+    this.handle = null;
+  }
+}

@@ -38,6 +38,7 @@
   import {
     fetchLiveReplicaFrame,
     liveReplicaDrawChanged,
+    liveReplicaFreshnessDeadline,
     liveRobotFreshness,
     liveRobotToMapRobot,
     liveReplicaMatchesSelection,
@@ -45,7 +46,7 @@
     type LiveReplicaSelection
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
+  import { DeadlineWakeup, MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
@@ -127,9 +128,17 @@
   let liveReplicaPending: AbortController | null = null;
   let liveReplicaKey = '';
 
+  // A drawn replica pose, goal or path disappears when it goes stale, which
+  // no input change announces: polls that fail or return 404 adopt no frame.
+  const freshnessWakeup = new DeadlineWakeup(
+    (now) => liveReplicaFreshnessDeadline(liveReplica, now),
+    () => requestRender()
+  );
+
   function setLiveReplica(next: LiveReplicaSelection | null) {
     const redraw = liveReplicaDrawChanged(liveReplica, next, performance.now());
     liveReplica = next;
+    freshnessWakeup.arm();
     // Called from effects too, which must not come to depend on the counter.
     if (redraw) liveReplicaRevision = untrack(() => liveReplicaRevision) + 1;
   }
@@ -939,6 +948,7 @@
       worker = null;
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
+      freshnessWakeup.cancel();
       if (rafId) cancelAnimationFrame(rafId);
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
