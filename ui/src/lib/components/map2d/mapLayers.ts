@@ -397,7 +397,8 @@ export interface RobotLayerOptions {
   info: MapInfo;
   view: Viewport;
   screenOf: ScreenOf;
-  trails: Map<string, { x: number; y: number }[]>;
+  /** Recorded history, already placed on the displayed raster by the caller. */
+  trailOf: (robotId: string) => readonly { x: number; y: number }[];
   showTrails: boolean;
   showPlans: boolean;
   showSensors: boolean;
@@ -442,24 +443,14 @@ export function drawRobots(
   robots: MapRobot[],
   options: RobotLayerOptions
 ) {
-  const { info, view, screenOf, trails, showTrails, showPlans, showSensors, showLabels } = options;
+  const { info, view, screenOf, trailOf, showTrails, showPlans, showSensors, showLabels } = options;
   for (const robot of robots) {
     const color = fleet.colorOf(robot.robot_id);
     const g = mapStore.worldToGrid(robot.pose.x, robot.pose.y);
     if (!g) continue;
     const { sx, sy } = screenOf(g.gx, g.gy);
 
-    let trail = trails.get(robot.robot_id);
-    if (!trail) trails.set(robot.robot_id, (trail = []));
-    const last = trail[trail.length - 1];
-    const distFromLast = last ? Math.hypot(last.x - robot.pose.x, last.y - robot.pose.y) : 0;
-    if (distFromLast > 3.0) {
-      trail.length = 0;
-    }
-    if (!last || distFromLast > 0.08) {
-      trail.push({ x: robot.pose.x, y: robot.pose.y });
-      if (trail.length > 600) trail.shift();
-    }
+    const trail = trailOf(robot.robot_id);
     if (showTrails && trail.length > 1) {
       ctx.beginPath();
       let started = false;

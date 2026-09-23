@@ -9,7 +9,10 @@ import {
   hasQualifiedRasterFrame,
   overlayFrameOnGlobalGrid,
   projectRobotToRaster,
-  RasterRobotProjectionCache
+  projectTrailToRaster,
+  rasterProjection,
+  RasterRobotProjectionCache,
+  RasterTrailProjectionCache
 } from '../src/lib/components/map2d/mapFrames.ts';
 import type { Point, Pose, RobotState } from '../src/lib/types/protocol.ts';
 const transform = { x: 10, y: 20, yaw: Math.PI / 2 };
@@ -74,6 +77,37 @@ test('moving telemetry and a corrected source frame stay fixed on an older raste
   assert.equal(cache.project(nextPacket, raster), cache.project(nextPacket, raster));
   const correctedRaster = { r0: { x: -2, y: 7, yaw: -0.6 } };
   assert.notEqual(cache.project(nextPacket, correctedRaster), cache.project(nextPacket, raster));
+});
+
+test('a recorded trail is placed on the raster with the robot that drove it', () => {
+  const raster = { r0: { x: -3, y: 7, yaw: -0.6 } };
+  const source = { x: 2, y: 1, yaw: 0.2 };
+  const robot = packet(source, { x: 0, y: 0, yaw: 0 });
+  // The trail holds the poses the robot reported, so projecting the trail and
+  // projecting the robot must put the last point under the robot.
+  const trail = [{ x: robot.pose.x, y: robot.pose.y }];
+  const placed = projectTrailToRaster(trail, rasterProjection(robot, raster));
+  const projected = projectRobotToRaster(robot, raster)!;
+  assert.ok(Math.hypot(placed[0].x - projected.pose.x, placed[0].y - projected.pose.y) < 1e-12);
+
+  // A robot the raster cannot place has nothing to draw; a robot that needs no
+  // correction keeps its recorded points.
+  assert.deepEqual(projectTrailToRaster(trail, rasterProjection(robot, undefined)), []);
+  const legacy = { ...robot, navigation_transform: undefined };
+  assert.equal(projectTrailToRaster(trail, rasterProjection(legacy, undefined)), trail);
+});
+
+test('trail placement is recomputed for a new point or a new raster, not for a redraw', () => {
+  const raster = { r0: { x: -3, y: 7, yaw: -0.6 } };
+  const robot = packet({ x: 2, y: 1, yaw: 0.2 }, { x: 0, y: 0, yaw: 0 });
+  const trail = [{ x: 1, y: 1 }];
+  const cache = new RasterTrailProjectionCache();
+  const first = cache.project(robot, trail, raster);
+  assert.equal(cache.project(robot, trail, raster), first);
+  trail.push({ x: 1.4, y: 1 });
+  assert.notEqual(cache.project(robot, trail, raster), first);
+  const moved = cache.project(robot, trail, raster);
+  assert.notEqual(cache.project(robot, trail, { r0: { x: -2, y: 7, yaw: -0.6 } }), moved);
 });
 
 test('missing raster provenance blocks projection and navigation qualification', () => {

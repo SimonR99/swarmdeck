@@ -9,7 +9,7 @@
     "preview": "vite preview --host",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "npm run test:fleet && npm run test:video && npm run test:replicas && npm run test:replica-acceptance && npm run test:map3d",
-    "test:fleet": "node --experimental-strip-types --test tests/navigationStatus.test.ts tests/peerStatus.test.ts tests/resetHttp.test.ts tests/robotStateMerge.test.ts",
+    "test:fleet": "node --experimental-strip-types --test tests/navigationStatus.test.ts tests/peerStatus.test.ts tests/resetHttp.test.ts tests/robotStateMerge.test.ts tests/trailRecorder.test.ts",
     "test:video": "node --experimental-strip-types --test tests/cameraStream.test.ts",
     "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts tests/replicaCatalogue.test.ts tests/liveReplicaFrame.test.ts",
     "test:replica-acceptance": "node --experimental-strip-types --test tests/liveReplicaAcceptance.test.ts",

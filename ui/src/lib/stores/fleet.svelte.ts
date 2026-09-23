@@ -1,6 +1,7 @@
 import type { RobotState, Capability, RobotConnectionSettings } from '$lib/types/protocol';
 import { settings, DEFAULT_ROBOT_COLORS, colorForRobot } from './settings.svelte';
 import { mergeRobotState } from './robotStateMerge';
+import { trails } from './trails.svelte';
 
 /** Identity colour per robot. Named hardware robots keep a fixed colour; others use settings or the theme palette. */
 export const ROBOT_COLORS = DEFAULT_ROBOT_COLORS;
@@ -189,6 +190,9 @@ export const fleet = {
     if (merged !== previous) {
       state.robots[msg.robot_id] = merged;
       state.revision++;
+      // Where the robot has been is recorded from its telemetry, so it is the
+      // same history whichever map view is on screen.
+      trails.record(msg.robot_id, msg.pose.x, msg.pose.y);
     }
   },
 
@@ -204,6 +208,7 @@ export const fleet = {
 
   remove(id: string) {
     delete state.robots[id];
+    trails.clear(id);
     state.revision++;
     state.order = state.order.filter((r) => r !== id);
     state.selected = state.selected.filter((r) => r !== id);
@@ -263,6 +268,7 @@ export const fleet = {
     state.order = [];
     state.selected = [];
     state.activeCamera = null;
+    trails.clear();
     state.revision++;
   }
 };
