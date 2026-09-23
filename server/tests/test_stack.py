@@ -98,6 +98,17 @@ def test_robot_state_network_sample_is_stored_at_the_same_pose():
     assert snapshot["h"] == snapshot["height"]
 
 
+def test_network_patch_skips_when_revision_has_not_changed():
+    assert map_service.ingest_network_sample("r0", 0.0, 0.0, 50.0)
+    first = map_service.take_network_patch("r0")
+    assert first is not None
+    assert map_service.take_network_patch("r0") is None
+    assert map_service.ingest_network_sample("r0", 0.5, 0.0, 60.0)
+    second = map_service.take_network_patch("r0")
+    assert second is not None
+    assert second["seq"] == first["seq"] + 1
+
+
 def test_stop_all_reaches_every_registered_robot(monkeypatch):
     from swarmdeck_server.api import app as app_module
 

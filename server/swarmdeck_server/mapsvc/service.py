@@ -30,6 +30,7 @@ class MapService:
         self._network_size = float(size_m)
         self._network_grids: dict[str, NetworkGridAccumulator] = {}
         self._network_prev: dict[str, Any] = {}
+        self._network_sent_revision: dict[str, int] = {}
         self._network_seq: dict[str, int] = {}
         self._ingest_lock = asyncio.Lock()
 
@@ -126,11 +127,13 @@ class MapService:
                 ids = sorted(set(self.transforms) | set(self._network_grids))
                 self._network_grids.clear()
                 self._network_prev.clear()
+                self._network_sent_revision.clear()
                 self._network_seq.clear()
                 return ids
             existed = robot_id in self.transforms or robot_id in self._network_grids
             self._network_grids.pop(robot_id, None)
             self._network_prev.pop(robot_id, None)
+            self._network_sent_revision.pop(robot_id, None)
             self._network_seq.pop(robot_id, None)
             return [robot_id] if existed else []
 

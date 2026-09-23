@@ -77,6 +77,12 @@ def take_network_patch(service: Any, robot_id: str) -> dict[str, Any] | None:
         acc = service._network_grids.get(robot_id)
         if acc is None:
             return None
+        revision = acc.revision
+        if (
+            service._network_sent_revision.get(robot_id) == revision
+            and robot_id in service._network_prev
+        ):
+            return None
         # Accumulators use ordinary Cartesian row order (low y first); browser
         # canvases are top-down, so patches are flipped here.
         display = np.flipud(acc.quality_grid())
@@ -87,11 +93,13 @@ def take_network_patch(service: Any, robot_id: str) -> dict[str, Any] | None:
         else:
             changed = display != previous
             if not changed.any():
+                service._network_sent_revision[robot_id] = revision
                 return None
             ys, xs = np.where(changed)
             y0, y1 = int(ys.min()), int(ys.max()) + 1
             x0, x1 = int(xs.min()), int(xs.max()) + 1
         service._network_prev[robot_id] = display.copy()
+        service._network_sent_revision[robot_id] = revision
         seq = service._network_seq.get(robot_id, 0) + 1
         service._network_seq[robot_id] = seq
         meta = GridMeta(
