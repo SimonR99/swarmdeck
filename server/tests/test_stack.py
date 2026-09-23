@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ from swarmdeck_server.api.app import (
     review_store,
     robot_state,
     settings_store,
+    state_loop_tick,
 )
 from swarmdeck_server.fleet.registry import Registry
 from swarmdeck_server.fleet.registry import registry as app_registry
@@ -34,11 +36,17 @@ def _cfg(monkeypatch, tmp_path):
     map_service.reset_robot()
     app_registry.robots.clear()
     app_registry._sinks.clear()
+    app_module._gui_clients.clear()
+    app_module._state_loop_cache.clear()
+    app_module._alerts.clear()
     yield
     app_registry.robots.clear()
     app_registry._sinks.clear()
     map_service.reset_robot()
     review_store.reset()
+    app_module._gui_clients.clear()
+    app_module._state_loop_cache.clear()
+    app_module._alerts.clear()
 
 
 def test_registry_preserves_capabilities_frame_and_footprint():
@@ -145,3 +153,56 @@ def test_map_status_reports_deployment_transforms_and_roundtrips_pose():
         {"x": 3.0, "y": 0.0, "z": 1.25, "yaw": math.pi / 2 - 0.4}
     )
     assert map_service.world_to_robot("r0", world) == pytest.approx(local)
+
+
+def test_state_loop_sends_changes_and_one_hz_keepalive(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+
+    sent = []
+
+    async def capture(message):
+        sent.append(message)
+
+    monkeypatch.setattr(app_module, "broadcast", capture)
+    app_module._gui_clients.add(object())
+    robot = app_registry.hello({"robot_id": "r0"}, sink=None)
+
+    asyncio.run(state_loop_tick(now=10.0))
+    asyncio.run(state_loop_tick(now=10.2))
+    robot.pose = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    asyncio.run(state_loop_tick(now=10.4))
+    asyncio.run(state_loop_tick(now=11.4))
+
+    assert [message["pose"]["x"] for message in sent] == [0.0, 1.0, 1.0]
+
+
+def test_state_loop_skips_robot_state_without_gui_clients(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+
+    def should_not_build(_robot):
+        raise AssertionError("robot_state should not be built without GUI clients")
+
+    monkeypatch.setattr(app_module, "robot_state", should_not_build)
+    app_registry.hello({"robot_id": "r0"}, sink=None)
+    asyncio.run(state_loop_tick(now=10.0))
+
+
+def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.fleet.registry import OFFLINE_AFTER_S
+
+    logged = []
+    monkeypatch.setattr(app_module.events, "log", lambda kind, payload: logged.append((kind, payload)))
+    settings_store.value["unattended_threshold_s"] = 1.0
+    unattended = app_registry.hello({"robot_id": "r0"}, sink=None)
+    unattended.last_attended = time.monotonic() - 5.0
+    disconnected = app_registry.hello({"robot_id": "r1"}, sink=None)
+    disconnected.last_seen = time.monotonic() - OFFLINE_AFTER_S - 1.0
+
+    asyncio.run(state_loop_tick(now=10.0))
+
+    assert app_module._alerts["unattended_r0"]["kind"] == "unattended"
+    assert app_module._alerts["disconnect_r1"]["kind"] == "adapter_disconnect"
+    logged_kinds = [payload["alert"]["kind"] for kind, payload in logged if kind == "alert"]
+    assert "unattended" in logged_kinds
+    assert "adapter_disconnect" in logged_kinds
