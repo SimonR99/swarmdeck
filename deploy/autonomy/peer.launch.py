@@ -24,6 +24,11 @@ from launch.events import Shutdown
 from launch_ros.actions import Node
 
 from autonomy.map_epochs import claim_map_epoch, robot_run_id
+from autonomy.mission_gc import (
+    DEFAULT_KEEP_RECENT,
+    checkpoint_wal,
+    garbage_collect_missions,
+)
 
 
 def reset_minimum(mission, robot):
@@ -92,10 +97,23 @@ def generate_launch_description():
         {} if inter_robot_closures else {"frontend.inter_robot_loop_closure_budget": 0}
     )
     store_root = Path(os.environ.get("SWARMDECK_MAP_STORE", "/maps"))
+    # Startup is the one point guaranteed to run before any node opens this
+    # peer's stores: reclaim old missions under store_root and fold back the
+    # geometry store's WAL from the previous run.
+    garbage_collect_missions(
+        store_root,
+        mission,
+        keep_recent=int(
+            os.environ.get("SWARMDECK_MISSION_GC_KEEP_RECENT", DEFAULT_KEEP_RECENT)
+        ),
+        dry_run=os.environ.get("SWARMDECK_MISSION_GC_DRY_RUN", "false").strip().lower()
+        == "true",
+    )
     map_epoch = claim_map_epoch(
         store_root, mission, robot, minimum=reset_minimum(mission, robot)
     )
     run_id = robot_run_id(mission, robot, map_epoch)
+    checkpoint_wal(store_root / mission / robot / "geometry" / "mapping.sqlite3")
     common = [
         config,
         {
