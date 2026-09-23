@@ -949,6 +949,11 @@ def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
     Bridge = bridge_module.Bridge
     stop = threading.Event()
     target = bridge.root / "status.json"
+    # Any thread dying on an exception would also leave it "not alive".
+    thread_errors = []
+    monkeypatch.setattr(
+        threading, "excepthook", lambda args: thread_errors.append(args.exc_value)
+    )
 
     def executor():
         while not stop.is_set():
@@ -983,6 +988,10 @@ def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
     assert not any(worker.is_alive() for worker in workers)
     assert not bridge.authority_heartbeat_thread.is_alive()
     assert "publish" in bridge.events
+    assert thread_errors == []
+    # The heartbeat turns a failing send into a logged reason, not a crash.
+    warnings = [event[1] for event in bridge.events if type(event) is tuple]
+    assert not any("send failed" in text for text in warnings), warnings
 
 
 def test_heartbeat_on_a_real_clock_logs_no_gap_while_sends_complete_on_time(
