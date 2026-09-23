@@ -15,10 +15,12 @@ is called merely by launching the dashboard or containers.
 
 ## Interface checked
 
-MGG is built from the `swarmdeck` branch of
+MGG is built from the `ros2` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`54ca865a41685094d689e5216f2d50be8c0c089e` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`bb454037859cbb21b9bebaa34b6ba3c530b65c31` (which indexes MOLA grid cells with a
+flat hash table instead of binary searches; see
+[performance](performance.md)), selected by `MGG_REV` in
+`deploy/docker/Dockerfile.mgg`, `Dockerfile.sim` and `Dockerfile.robot-ros2`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images. Upstream `902e868` alone does not
