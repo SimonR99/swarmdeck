@@ -7,7 +7,7 @@ Run on the host that runs the stack, while it runs:
     scripts/profile_stack.py --profiles      # plus py-spy of the Python hot spots
     scripts/profile_stack.py --window 60 --label "after lattice cache"
     scripts/profile_stack.py --browser       # browser process-tree CPU and WebGL frames/s (item 6)
-    scripts/profile_stack.py --latency       # plan-to-motion latency trace (item 2)
+    scripts/profile_stack.py --latency       # plan-log-to-displacement proxy (item 2)
 
 It reports what the clean-up plan (docs/superpowers/plans/
 2026-09-23-cleanup-optimization.md) is measured by:
@@ -18,7 +18,7 @@ It reports what the clean-up plan (docs/superpowers/plans/
   the planner's own log lines within the window;
 - GUI WebSocket traffic: messages and bytes per second by type;
 - optionally, browser process-tree CPU and WebGL frames/s at idle and while panning (--browser);
-- optionally, plan-to-motion latency and replan cadence per robot (--latency);
+- optionally, plan-log-to-displacement (proxy) and replan cadence per robot (--latency);
 - optionally, py-spy profiles of the Python processes, taken from a
   throwaway sidecar container that joins each container's PID namespace,
   so nothing in the stack is modified.
@@ -74,7 +74,7 @@ _DOCKER_TS = re.compile(
 # (after a Playwright version bump) is not fatal.
 _PLAYWRIGHT_MODULES_HINT = Path.home() / ".npm/_npx"
 
-# Motion threshold for plan-to-motion latency (metres)
+# Displacement threshold for the plan-log proxy (metres)
 _MOTION_THRESHOLD_M = 0.10
 # Reject registration boundaries beyond 1 mm translation or 1 mrad yaw.
 _REGISTRATION_TOLERANCE = 0.001
@@ -577,7 +577,7 @@ def browser_cpu(
     return {"error": (result.stderr or result.stdout).strip()[-300:]}
 
 
-# ------------------------------------------------------ plan-to-motion latency
+# -------------------------------------------- plan-log-to-displacement proxy
 
 
 def parse_timestamped_plan_lines(log_text: str) -> list[tuple[float, dict]]:
@@ -685,21 +685,16 @@ def _registration_changed(before: tuple | None, after: tuple | None) -> bool:
 
 
 def latency_trace(window: float) -> dict:
-    """Measure plan-to-motion latency and replan cadence.
+    """Measure plan-log-to-displacement (proxy) and replan cadence.
 
-    Approach:
-    1. Collect ``robot_state`` WebSocket events from the server container
-       for ``window`` seconds. Each event carries ``time.time()`` (container
-       wall clock) and the robot's pose ``(x, y)``.
-    2. Parse ``docker logs --timestamps`` of the mgg container to get UTC
-       timestamps for each MGG plan-cycle log line in the same window.
-    3. The MGG plan completion time is used as a proxy for "path dispatched":
-       the adapter subscribes to the MGG path topic and sends it to Nav2
-       within the same ROS spin cycle (< 10 ms typical on the same host).
-    4. For each plan event (per robot), find the earliest robot_state event
-       after that timestamp where pose displacement exceeds
-       _MOTION_THRESHOLD_M from the pose at plan time.
-    5. Latency = motion_start_time - plan_timestamp.
+    Collect robot_state poses and navigation transforms plus reset events,
+    timestamped with container time.time(), and MGG docker log timestamps.
+    Compare robot-local displacement against the last pose at/before each
+    plan (or the first later sample when no earlier pose is available).
+    Stop at the next plan for that robot, reset, or material registration
+    change. Count plans cut off without a displacement sample separately.
+    This is not dispatch latency: a logged plan can be delayed or rejected
+    by peer reservations, and there is no dispatch event in this trace.
 
     Clock: host UTC wall clock. Docker log timestamps are set by the Docker
     daemon from the host clock. ``time.time()`` inside the server container
@@ -707,7 +702,7 @@ def latency_trace(window: float) -> dict:
     Typical error between the two: < 1 ms.
 
     Returns a dict with per-robot ``latency_s`` and ``cadence_s`` lists,
-    ``plan_count``, and an ``error`` key if the stack is unreachable.
+    ``plan_count``, ``cut_off_plan_count``, and an ``error`` key if unreachable.
     """
     probe = _WS_ROBOT_STATE_PROBE.replace("WINDOW", str(window))
     start_epoch = time.time()
@@ -757,37 +752,37 @@ def latency_trace(window: float) -> dict:
     cadences = replan_cadence(plan_events)
     latencies: dict[str, list[float]] = collections.defaultdict(list)
 
-    for plan_epoch, cycle in plan_events:
+    cut_off_plans = 0
+    for index, (plan_epoch, cycle) in enumerate(plan_events):
         robot = cycle["robot"]
-        events = robot_events.get(robot, [])
-        if not events:
-            continue
-        # Robot position at plan time: use the LAST sample at or before the
-        # plan timestamp, not the first. Using the first would mean a large
-        # pre-plan displacement (robot moved earlier in the window) could
-        # already exceed _MOTION_THRESHOLD_M, making the very next
-        # post-plan sample appear as immediate motion even if the robot
-        # has not moved since the path was dispatched.
         robot_resets = [utc for utc, ids in resets if ids is None or robot in ids]
         last_reset = max((utc for utc in robot_resets if utc <= plan_epoch), default=-math.inf)
-        events = [event for event in events if event[0] > last_reset]
-        if not events:
-            continue
-        reference = next((event for event in reversed(events) if event[0] <= plan_epoch), events[0])
-        _, ref_x, ref_y, ref_transform = reference
         next_reset = min((utc for utc in robot_resets if utc > plan_epoch), default=math.inf)
-        # A reset or registration correction invalidates this plan's frame.
-        for utc, x, y, transform in events:
-            if utc <= plan_epoch:
-                continue
-            if utc >= next_reset or _registration_changed(ref_transform, transform):
-                break
-            if math.hypot(x - ref_x, y - ref_y) >= _MOTION_THRESHOLD_M:
-                latencies[robot].append(utc - plan_epoch)
-                break
+        next_plan = next((t for t, c in plan_events[index + 1:] if c["robot"] == robot), math.inf)
+        cutoff = min(next_plan, next_reset)
+        cut_off = math.isfinite(cutoff)
+        # Never borrow a reference from before a reset or after the cutoff.
+        events = [event for event in robot_events.get(robot, []) if last_reset < event[0] < cutoff]
+        measured = False
+        if events:
+            reference = next((event for event in reversed(events) if event[0] <= plan_epoch), events[0])
+            _, ref_x, ref_y, ref_transform = reference
+            for utc, x, y, transform in events:
+                if utc <= plan_epoch:
+                    continue
+                if _registration_changed(ref_transform, transform):
+                    cut_off = True
+                    break
+                if math.hypot(x - ref_x, y - ref_y) >= _MOTION_THRESHOLD_M:
+                    latencies[robot].append(utc - plan_epoch)
+                    measured = True
+                    break
+        if cut_off and not measured:
+            cut_off_plans += 1
 
     return {
         "plan_count": len(plan_events),
+        "cut_off_plan_count": cut_off_plans,
         "latency_s": dict(latencies),
         "cadence_s": cadences,
     }
@@ -911,14 +906,15 @@ def report(args) -> str:
     if getattr(args, "latency", False):
         lines += [
             "",
-            "### Plan-to-motion latency"
-            f" (MGG plan \u2192 robot displacement > {_MOTION_THRESHOLD_M:.2f} m)",
+            "### Plan-log-to-displacement (proxy)"
+            f" (MGG plan \u2192 navigation-frame displacement >= {_MOTION_THRESHOLD_M:.2f} m)",
         ]
         lt = latency_trace(args.window)
         if "error" in lt:
             lines.append(f"- latency trace unavailable: {lt['error']}")
         else:
             lines.append(f"- MGG plan cycles in window: {lt['plan_count']}")
+            lines.append(f"- Cut-off plans without a displacement sample: {lt['cut_off_plan_count']}")
             lines.append(
                 "  - Clock: host UTC wall clock (docker log timestamps vs "
                 "container time.time()); typical error < 1 ms"
@@ -993,7 +989,7 @@ def main() -> int:
     parser.add_argument(
         "--latency",
         action="store_true",
-        help="measure plan-to-motion latency and replan cadence per robot",
+        help="measure plan-log-to-displacement (proxy) and replan cadence per robot",
     )
     args = parser.parse_args()
     text = report(args)
