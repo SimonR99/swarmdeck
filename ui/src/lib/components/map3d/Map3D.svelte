@@ -36,17 +36,13 @@
     type ReplicaTacticalCloud
   } from './replicaTactical';
   import {
-    fetchLiveReplicaFrame,
-    liveReplicaDrawChanged,
-    liveReplicaFreshnessDeadline,
     liveRobotFreshness,
     liveRobotToMapRobot,
     liveReplicaMatchesSelection,
-    postLiveReplicaGoal,
-    type LiveReplicaSelection
+    postLiveReplicaGoal
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { DeadlineWakeup } from './renderScheduler';
+  import { LiveReplicaPoll } from './liveReplicaPoll';
   import { RenderLoop } from './renderLoop';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
@@ -123,33 +119,32 @@
   let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
-  // Read by the frame but not reactive: every poll brings new freshness ages,
-  // so setLiveReplica() bumps liveReplicaRevision only when what is drawn changed.
-  let liveReplica: LiveReplicaSelection | null = null;
+  // The live robot telemetry over a replica, polled by liveReplicaPoll.ts.
+  // Its frame is read by the draw but not reactive: every poll brings new
+  // freshness ages, so liveReplicaRevision advances only when what is drawn
+  // changed.
   let liveReplicaRevision = $state(0);
-  let liveReplicaPending: AbortController | null = null;
-  let liveReplicaKey = '';
-
-  // A drawn replica pose, goal or path disappears when it goes stale, which
-  // no input change announces: polls that fail or return 404 adopt no frame.
-  const freshnessWakeup = new DeadlineWakeup(
-    (now) => liveReplicaFreshnessDeadline(liveReplica, now),
-    () => {
+  const liveReplicaPoll = new LiveReplicaPoll({
+    // Called from effects too, which must not come to depend on the counter.
+    onDrawChange: () => (liveReplicaRevision = untrack(() => liveReplicaRevision) + 1),
+    // A drawn replica pose, goal or path disappears when it goes stale, which
+    // no input change announces: polls that fail or return 404 adopt no frame.
+    onExpire: () => {
       renderLoop.invalidateFreshness();
       requestRender();
-    }
-  );
+    },
+    stillWanted: () => liveTactical && Boolean(replicaTactical.selection)
+  });
 
-  function setLiveReplica(next: LiveReplicaSelection | null) {
-    const redraw = liveReplicaDrawChanged(liveReplica, next, performance.now());
-    liveReplica = next;
-    freshnessWakeup.arm();
-    // Called from effects too, which must not come to depend on the counter.
-    if (redraw) liveReplicaRevision = untrack(() => liveReplicaRevision) + 1;
+  function refreshLiveReplica() {
+    const selection = tacticalReplica;
+    if (!active || !liveTactical || !selection) return;
+    void liveReplicaPoll.refresh(selection);
   }
 
   function robotsOnMap(): MapRobot[] {
     if (tacticalReplica) {
+      const liveReplica = liveReplicaPoll.current;
       if (!liveTactical || !liveReplica) return [];
       if (replicaCloud?.view.solution_order_known !== true) return [];
       const age = (performance.now() - liveReplica.receivedAt) / 1000;
@@ -301,7 +296,7 @@
       replicaRevision.clear();
       replicaNeedsRebuild = true;
       gaussianEtag = '';
-      setLiveReplica(null);
+      liveReplicaPoll.set(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
@@ -321,31 +316,6 @@
       return 'blocked:global-waiting-for-component';
     }
     return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : 'replica:none';
-  }
-
-  async function refreshLiveReplica() {
-    const selection = tacticalReplica;
-    if (!active || !liveTactical || !selection || liveReplicaPending) return;
-    const key = replicaSelectionKey(selection);
-    const controller = new AbortController();
-    const startedAt = performance.now();
-    const timeout = window.setTimeout(() => controller.abort(), 1500);
-    liveReplicaPending = controller;
-    try {
-      const frame = await fetchLiveReplicaFrame(selection, controller.signal);
-      if (key !== liveReplicaKey || !liveTactical || !replicaTactical.selection) return;
-      if (frame) setLiveReplica({ frame, receivedAt: startedAt });
-      // A 404/409 retains the last verified overlay until its three-second
-      // freshness budget expires; this avoids blinking during a frame swap.
-    } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
-        // Keep the last coherent live telemetry through a transient response
-        // failure; the freshness budget hides it once it is no longer current.
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (liveReplicaPending === controller) liveReplicaPending = null;
-    }
   }
 
   const waitingForGlobalComponent = $derived(
@@ -544,13 +514,8 @@
     const key = liveTactical && selection ? replicaSelectionKey(selection) : '';
     mounted;
     active;
-    if (key !== liveReplicaKey) {
-      liveReplicaKey = key;
-      liveReplicaPending?.abort();
-      liveReplicaPending = null;
-      setLiveReplica(null);
-    }
-    if (key && mounted && active) void refreshLiveReplica();
+    liveReplicaPoll.select(key);
+    if (key && mounted && active) refreshLiveReplica();
   });
 
   $effect(() => {
@@ -919,7 +884,7 @@
       if (replicaNeedsRebuild || performance.now() - lastCloudBuildAt >= REPLICA_REVISION_POLL_MS) {
         void fetchCloud();
       }
-      void refreshLiveReplica();
+      refreshLiveReplica();
     }, 1000);
 
     const ro = new ResizeObserver(() => {
@@ -936,13 +901,12 @@
       mounted = false;
       generation++;
       pending?.abort();
-      liveReplicaPending?.abort();
+      liveReplicaPoll.dispose();
       gaussianPending?.abort();
       worker?.terminate();
       worker = null;
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
-      freshnessWakeup.cancel();
       renderLoop.stop();
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
