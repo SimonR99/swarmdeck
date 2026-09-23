@@ -361,3 +361,44 @@ def test_route_probe_is_not_superseded_by_exploration_goals(monkeypatch):
     outcome, _reason, plan = planner._call_once("navigate", {"x": 2.0, "y": 0.0}, None)
     assert outcome == "ready" and plan is not None
     bridge.follow_path.assert_not_called()
+
+
+def test_a_momentarily_unavailable_map_is_waited_out(monkeypatch):
+    answers = []
+
+    def respond(request):
+        answers.append(request)
+        if len(answers) < 3:
+            return response_for(
+                request, status=Response.BLOCKED, reason="map unavailable"
+            )
+        return response_for(request)
+
+    bridge, planner, _client = rig(monkeypatch, respond)
+    planner.blocked_retry_s = 0.01
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    assert len(answers) == 3
+    assert bridge.nav_status == "active"
+
+
+def test_a_planner_that_stays_unavailable_fails_with_its_reason(monkeypatch):
+    bridge, planner, _client = rig(
+        monkeypatch,
+        lambda request: response_for(
+            request, status=Response.BLOCKED, reason="map unavailable"
+        ),
+    )
+    planner.blocked_retry_s = 0.01
+    assert not planner.navigate({"x": 2.0, "y": 1.0})
+    assert bridge.nav_status == "failed"
+    assert planner._nav_failure_reason == "map unavailable"
+
+
+def test_the_waypoint_explored_toward_is_shown_as_the_goal(monkeypatch):
+    bridge, planner, _client = rig(monkeypatch, response_for)
+    bridge.goal_exploration = NS(display_goal={"x": 40.0, "y": 3.0})
+    state = planner.decorate_state({"nav_status": "active", "goal": {"x": 1.0}})
+    assert state["goal"] == {"x": 40.0, "y": 3.0}
+    bridge.goal_exploration = NS(display_goal=None)
+    state = planner.decorate_state({"nav_status": "active", "goal": {"x": 1.0}})
+    assert state["goal"] == {"x": 1.0}

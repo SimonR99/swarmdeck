@@ -65,6 +65,12 @@ class MggObjectivePlanning:
         self.controller_replan_max_attempts = self._bounded_int(
             config.get("controller_replan_max_attempts", 2), 0, 20, 2
         )
+        # MGG answers BLOCKED while its map or odometry is momentarily
+        # unavailable (a map snapshot outlives its TTL between refreshes).
+        # That is retried until the objective's deadline, not taken as final.
+        self.blocked_retry_s = self._bounded_float(
+            config.get("blocked_retry_s", 0.5), 0.05, 10.0, 0.5
+        )
         self.controller_replan_deadline_s = self._bounded_float(
             config.get("controller_replan_deadline_s", 15.0), 0.1, 300.0, 15.0
         )
@@ -285,6 +291,13 @@ class MggObjectivePlanning:
         except Exception as exc:
             return "failed", f"MGG objective request failed: {exc}", None
         stale = getattr(self.service_type.Response, "STALE_REVISION", object())
+        blocked = getattr(self.service_type.Response, "BLOCKED", object())
+        if response.status == blocked:
+            return (
+                "blocked",
+                str(getattr(response, "reason", "") or "MGG is not ready"),
+                None,
+            )
         if response.status == stale or not self._identity_matches(request, response):
             return "stale", "MGG returned a stale map identity", None
         if response.status != self.service_type.Response.SUCCEEDED:
@@ -311,6 +324,19 @@ class MggObjectivePlanning:
         if distance > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
             return "failed", "MGG whole route endpoint differs from objective", None
         return "ready", "", plan
+
+    def _call_until_ready(self, objective, goal, generation, deadline):
+        """_call_once, waiting out BLOCKED answers until `deadline`; a
+        planner still not ready then fails with its own reason."""
+        while True:
+            outcome, reason, plan = self._call_once(
+                objective, goal, generation, deadline
+            )
+            if outcome != "blocked":
+                return outcome, reason, plan
+            if not self._owns(generation) or self._remaining(deadline) <= 0.0:
+                return "failed", reason, None
+            time.sleep(min(self.blocked_retry_s, self._remaining(deadline)))
 
     def _owns(self, generation):
         # None: a route probe, which drives nothing and is owned by no goal.
@@ -360,7 +386,7 @@ class MggObjectivePlanning:
         for attempt in range(self.authority_replan_max_attempts + 1):
             if not self._owns(claim.generation):
                 return False
-            outcome, reason, plan = self._call_once(
+            outcome, reason, plan = self._call_until_ready(
                 claim.objective, goal, claim.generation, deadline
             )
             if outcome == "stale":
@@ -466,7 +492,7 @@ class MggObjectivePlanning:
                 except ValueError as exc:
                     self._fail_if_current(str(exc), generation)
                     return
-                outcome, reason, plan = self._call_once(
+                outcome, reason, plan = self._call_until_ready(
                     objective, goal, generation, deadline
                 )
                 if outcome == "stale":
@@ -546,6 +572,13 @@ class MggObjectivePlanning:
             decorated["nav_status"] = "active"
             if goal is not None:
                 decorated["goal"] = goal
+        # While exploring toward a waypoint with no known route yet, keep
+        # showing that waypoint as the robot's goal.
+        exploring_to = getattr(
+            getattr(self.bridge, "goal_exploration", None), "display_goal", None
+        )
+        if isinstance(exploring_to, dict):
+            decorated["goal"] = exploring_to
         if decorated.get("nav_status") == "failed":
             reason = failure or decorated.get("nav_failure_reason")
             if reason:
