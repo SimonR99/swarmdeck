@@ -19,6 +19,7 @@ from adapters.mapping_authority import (
     authority_for_frame,
     get_mapping_authority,
     planning_frame,
+    shared_subscription,
     transform_change_squared,
 )
 
@@ -88,8 +89,8 @@ class PeerCoordinator:
         self.report_publisher = bridge.node.create_publisher(
             String, "/swarmdeck/exploration_reports", 20
         )
-        self.report_subscription = bridge.node.create_subscription(
-            String, "/swarmdeck/exploration_reports", self.receive_report, 20
+        self.report_subscription = shared_subscription(
+            bridge.node, String, "/swarmdeck/exploration_reports", self.receive_report, 20
         )
         self.exclusions_publisher = bridge.node.create_publisher(
             PoseArray, f"/{bridge.id}/mgg/coordination_exclusions", 5
@@ -98,11 +99,11 @@ class PeerCoordinator:
         self.publisher = bridge.node.create_publisher(
             String, "/swarmdeck/intentions", 20
         )
-        self.subscription = bridge.node.create_subscription(
-            String, "/swarmdeck/intentions", self.receive, 20
+        self.subscription = shared_subscription(
+            bridge.node, String, "/swarmdeck/intentions", self.receive, 20
         )
-        self.authority_subscription = bridge.node.create_subscription(
-            String, f"/{bridge.id}/map_authority", self.on_authority, 5
+        self.authority_subscription = shared_subscription(
+            bridge.node, String, f"/{bridge.id}/map_authority", self.on_authority, 5
         )
         # Where the other robots stand. They are masked out of every map, so
         # the planner learns about them here: each robot reports its position
@@ -116,8 +117,8 @@ class PeerCoordinator:
             self.peer_pose_publisher = bridge.node.create_publisher(
                 String, "/swarmdeck/peer_poses", 20
             )
-            self.peer_pose_subscription = bridge.node.create_subscription(
-                String, "/swarmdeck/peer_poses", self.receive_peer_pose, 20
+            self.peer_pose_subscription = shared_subscription(
+                bridge.node, String, "/swarmdeck/peer_poses", self.receive_peer_pose, 20
             )
             self.peer_bodies_publisher = bridge.node.create_publisher(
                 PoseArray, f"/{bridge.id}/mgg/peer_bodies", 5

@@ -27,6 +27,31 @@ _INDEXED_FIELDS = frozenset(
 PLANNING_FRAME_TEMPLATE_ENV = "SWARMDECK_PLANNING_FRAME_TEMPLATE"
 
 
+def shared_subscription(node, message_type, topic, callback, depth):
+    """Share fleet-wide subscriptions on a ROS node, preserving callback order.
+
+    Registry lifetime is the node lifetime; per-robot authority topics remain
+    distinct because ROS 2 subscriptions cannot wildcard topic names.
+    """
+    registry = getattr(node, "_swarmdeck_shared_subscriptions", None)
+    if registry is None:
+        registry = node._swarmdeck_shared_subscriptions = {}
+    entry = registry.get(topic)
+    if entry is None:
+        callbacks = [callback]
+
+        def fan_out(message):
+            for receiver in callbacks:
+                receiver(message)
+
+        subscription = node.create_subscription(message_type, topic, fan_out, depth)
+        registry[topic] = (subscription, callbacks)
+        return subscription
+    subscription, callbacks = entry
+    callbacks.append(callback)
+    return subscription
+
+
 def planning_frame(bridge):
     """Return the explicitly configured MGG frame, defaulting to the UI frame."""
     template = os.environ.get(PLANNING_FRAME_TEMPLATE_ENV)
@@ -242,8 +267,8 @@ class MappingAuthority:
                 logger.warning(
                     "Indexed mapping relay unavailable: rebuild the adapter image with current mgg_msgs"
                 )
-        self.subscription = bridge.node.create_subscription(
-            String, f"/{bridge.id}/map_authority", self.receive, 5
+        self.subscription = shared_subscription(
+            bridge.node, String, f"/{bridge.id}/map_authority", self.receive, 5
         )
 
     def current(self):
