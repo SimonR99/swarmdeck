@@ -360,14 +360,40 @@ def perf_mgg(seconds: int) -> str:
     return (result.stdout + result.stderr).strip()
 
 
+# ------------------------------------------------------------------ git
+
+
+def git_commit(override: str = "") -> str:
+    """Return the short HEAD commit of this script's repo, or the override string.
+
+    Allows each dated report to name the code it measured. Pass ``--commit``
+    when running from a directory that is not the stack's own checkout.
+    """
+    if override:
+        return override
+    result = sh(
+        [
+            "git",
+            "-C",
+            str(Path(__file__).resolve().parent),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ]
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
 # ---------------------------------------------------------------- report
 
 
 def report(args) -> str:
     started = time.monotonic()
+    commit = git_commit(getattr(args, "commit", ""))
     lines = [
         f"## {dt.datetime.now().isoformat(timespec='minutes')}"
-        + (f" - {args.label}" if args.label else ""),
+        + (f" - {args.label}" if args.label else "")
+        + f" (commit {commit})",
         "",
     ]
     containers = running_containers()
@@ -452,6 +478,12 @@ def main() -> int:
     )
     parser.add_argument("--label", default="")
     parser.add_argument("--append", type=Path, help="append the report to this file")
+    parser.add_argument(
+        "--commit",
+        default="",
+        metavar="SHA",
+        help="git commit recorded in the header (default: auto-detected from this repo)",
+    )
     args = parser.parse_args()
     text = report(args)
     print(text)

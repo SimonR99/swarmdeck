@@ -25,6 +25,10 @@ from a sidecar container in the MGG container's PID namespace. Because
 the sidecar gets `SYS_ADMIN` and `SYS_PTRACE` with no seccomp filter. No sudo
 is needed.
 
+Each report header now includes the short git commit (`--commit SHA` to
+override; default is auto-detected from the script's own repo). Use this to
+correlate each dated entry with the code it measured.
+
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
 Baseline for the plan, from manual runs before the harness existed and the
