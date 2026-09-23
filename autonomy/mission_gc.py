@@ -69,12 +69,20 @@ def plan_mission_gc(
     if keep_recent < 0:
         raise ValueError("keep_recent must not be negative")
     root = Path(store_root)
-    missions = [p for p in root.iterdir() if _is_mission_dir(p)] if root.is_dir() else []
-    by_recency = sorted(
-        ((p.name, _mission_recency(p)) for p in missions),
-        key=lambda item: item[1],
-        reverse=True,
+    missions = (
+        [p for p in root.iterdir() if _is_mission_dir(p)] if root.is_dir() else []
     )
+    # Peers sharing a store (the simulation's four peers share /maps) run
+    # this at the same moment, so a sibling's rmtree can remove a mission
+    # while it is being read. A mission that cannot be read is left out of
+    # this plan: neither kept nor removed here.
+    recencies = []
+    for path in missions:
+        try:
+            recencies.append((path.name, _mission_recency(path)))
+        except OSError:
+            continue
+    by_recency = sorted(recencies, key=lambda item: item[1], reverse=True)
     decisions: list[MissionGcDecision] = []
     kept_others = 0
     seen_current = False
@@ -101,7 +109,10 @@ def plan_mission_gc(
     if not seen_current:
         decisions.append(
             MissionGcDecision(
-                current_mission_id, time.time(), True, "current mission (not yet on disk)"
+                current_mission_id,
+                time.time(),
+                True,
+                "current mission (not yet on disk)",
             )
         )
     return tuple(decisions)
