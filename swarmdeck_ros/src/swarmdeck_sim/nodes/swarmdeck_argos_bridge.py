@@ -855,6 +855,15 @@ class ArgosBridge(Node):
                     ),
                     default=-1,
                 )
+                nav_pose = robot.odom_pose_history.get(scan_tick)
+                if nav_pose is None:
+                    nav_pose = robot.odom_pose_history.get(nav_pose_tick)
+                # The projection uses position and quaternion, not velocities.
+                # Compare the seven pose components bit-for-bit: a tolerance
+                # could hide a change at a scan bin/range boundary.
+                nav_pose_key = (
+                    struct.pack("<7d", *nav_pose[:7]) if nav_pose is not None else None
+                )
                 points_needed = robot.pub_points.get_subscription_count() > 0
                 capture_needed = robot.pub_capture.get_subscription_count() > 0
                 scan_needed = robot.pub_scan.get_subscription_count() > 0
@@ -869,15 +878,15 @@ class ArgosBridge(Node):
                 if same_raw:
                     (
                         _, hits, cloud_data, points_sha256, scan_ranges,
-                        prox_ranges, nav_scan_ranges, nav_prox_ranges, old_pose_tick,
+                        prox_ranges, nav_scan_ranges, nav_prox_ranges, old_pose_key,
                     ) = robot.last_scan_products
                 else:
                     hits = cloud_data = points_sha256 = None
                     scan_ranges = prox_ranges = nav_scan_ranges = nav_prox_ranges = None
-                    old_pose_tick = -1
+                    old_pose_key = None
                 # The raw rays determine the packed cloud and physical scans;
                 # only the flattened projections depend on capture-time pose.
-                if old_pose_tick != nav_pose_tick:
+                if old_pose_key != nav_pose_key:
                     nav_scan_ranges = nav_prox_ranges = None
                 need_hits = points_needed or capture_needed
                 need_rays = (need_hits and (cloud_data is None or hits is None)) or (
@@ -921,9 +930,6 @@ class ArgosBridge(Node):
                     if (nav_scan_needed and nav_scan_ranges is None) or (
                         nav_prox_needed and nav_prox_ranges is None
                     ):
-                        nav_pose = robot.odom_pose_history.get(scan_tick)
-                        if nav_pose is None:
-                            nav_pose = robot.odom_pose_history.get(nav_pose_tick)
                         if nav_pose is not None:
                             if nav_scan_needed and nav_scan_ranges is None:
                                 nav_scan_ranges = project_laserscan_navigation(
@@ -942,7 +948,7 @@ class ArgosBridge(Node):
                 robot.last_scan_raw = raw
                 robot.last_scan_products = (
                     _max_range, hits, cloud_data, points_sha256, scan_ranges,
-                    prox_ranges, nav_scan_ranges, nav_prox_ranges, nav_pose_tick,
+                    prox_ranges, nav_scan_ranges, nav_prox_ranges, nav_pose_key,
                 )
 
                 # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
