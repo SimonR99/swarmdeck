@@ -14,7 +14,7 @@ Hosts:
   (`swarmdeck/` plus the SubT assets under `argos3/`), logs in
   `~/swarmdeck-ws/logs/`. Used for GPU and repeatable measurements. Synced
   from the workstation with `git push tuf planning-refactor`.
-- **botman** (`ssh botman@192.168.1.49`, lab Wi-Fi): Jetson AGX Orin, 12
+- **botman** (`ssh -J benchbot botman@192.168.1.49`, only through benchbot): Jetson AGX Orin, 12
   Cortex-A78AE cores at 2.2 GHz, `MODE_50W`. It runs the `main` deployment and
   its experiments, so never change it. For benchmarks, pause it with
   `docker stop` and resume with `docker start` on the same containers.

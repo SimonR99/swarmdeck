@@ -37,8 +37,9 @@ Its diagnosis still stands, but several details are out of date (see Phase 4).
   load varies, so use it only for dashboard and browser measurements and for
   quick checks.
 - **botman**: the reference onboard computer, used to judge onboard targets.
-  - Access: `ssh botman@192.168.1.49` from the lab Wi-Fi. It has no
-    `~/.ssh/config` alias and is not reachable from tuf.
+  - Access: only by jumping through benchbot, `ssh -J benchbot botman@192.168.1.49`
+    (benchbot's DNS also names it `botman.lan`; its DHCP address can change). It has
+    no `~/.ssh/config` alias and is not reachable from tuf.
   - Hardware: Jetson AGX Orin (12 Cortex-A78AE cores at 2.2 GHz, 61 GiB RAM,
     16-SM Ampere GPU), `MODE_50W`, Jetson Linux R36.4.4.
   - `gcc` 11.4, CUDA 12.6 and `tegrastats` are installed. `botman` is in the
