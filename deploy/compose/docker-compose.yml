@@ -243,8 +243,11 @@ services:
         condition: service_healthy
       mediamtx:
         condition: service_started
+      # Optional: `sim-up --detector` starts it and sets
+      # SWARMDECK_DETECTOR_URL. When it runs, the sim waits for it as before.
       duck_detector:
         condition: service_healthy
+        required: false
     environment:
       # Which sensor channels ARGoS streams to the external estimator.
       # Ultra-Fusion (lwio) never read the camera; FAST-LIVO2 needs it, and
@@ -283,7 +286,8 @@ services:
       SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
       SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+      # Empty (the default) runs the adapters without a detector.
+      SWARMDECK_DETECTOR_URL: "${SWARMDECK_DETECTOR_URL:-}"
       SWARMDECK_DETECTION_PERIOD_S: "${SWARMDECK_DETECTION_PERIOD_S:-1.0}"
       VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-500}"
       VIDEO_FPS: "${VIDEO_FPS:-5}"
@@ -329,8 +333,10 @@ services:
   # Shared AI perception for every simulated robot. The adapter still owns
   # camera transport and protocol publication; this sidecar only maps pixels
   # to YOLOE boxes. Hardware compose files use the matching JetPack image.
+  # Off unless asked for (`sim-up --detector`, `make up-sim DETECTOR=1`): its
+  # own profile keeps `--profile argos` from starting it.
   duck_detector:
-    profiles: ["argos"]
+    profiles: ["detector"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector

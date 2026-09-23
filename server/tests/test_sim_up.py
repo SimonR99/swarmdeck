@@ -101,3 +101,18 @@ def test_fast_livo2_is_explicitly_selectable():
     spec = launch.build_spec(arguments("--fast-livo2"), "test")
     assert spec["services"][-1] == "fast_livo2"
     assert "fast_livo2" in spec["reset_services"]
+
+
+def test_detector_is_off_by_default_and_opt_in(monkeypatch):
+    monkeypatch.delenv("DETECTOR", raising=False)
+    spec = launch.build_spec(arguments("--drift"), "test")
+    assert "duck_detector" not in spec["services"]
+    assert launch.process_environment(spec)["SWARMDECK_DETECTOR_URL"] == ""
+
+    spec = launch.build_spec(arguments("--drift", "--detector"), "test")
+    assert "duck_detector" in spec["services"]
+    assert "duck_detector" not in spec["reset_services"]
+    assert (
+        launch.process_environment(spec)["SWARMDECK_DETECTOR_URL"]
+        == "http://duck_detector:8091"
+    )

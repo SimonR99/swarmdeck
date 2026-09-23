@@ -48,6 +48,7 @@ PROJECT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 MAX_SIMULATION_PEERS = 4
 OPTIONAL_SIMULATION_SERVICES = frozenset(
     {
+        "duck_detector",
         "fast_livo2",
         "mapping",
         *(f"peer{index}" for index in range(MAX_SIMULATION_PEERS)),
@@ -121,6 +122,12 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "-e", "--explore", type=int, default=int(os.getenv("EXPLORE_SECONDS", "0"))
+    )
+    result.add_argument(
+        "--detector",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("DETECTOR", "0").lower() in {"1", "true", "yes", "on"},
+        help="run the YOLOE object detector sidecar (off by default)",
     )
     result.add_argument("--no-build", action="store_false", dest="build", default=True)
     result.add_argument("--build", action="store_true", dest="build")
@@ -309,6 +316,10 @@ def process_environment(
         SWARMDECK_CAPTURE_PROVIDER="simulation",
         SWARMDECK_SLAM_BACKEND="cslam",
         SWARMDECK_MOLA_PLANNER_MAPS="true",
+        # The detector is optional; an empty URL runs the adapters without it.
+        SWARMDECK_DETECTOR_URL=(
+            "http://duck_detector:8091" if "duck_detector" in spec["services"] else ""
+        ),
     )
     if epoch:
         environment.update(
@@ -590,7 +601,7 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
     services = [
         "server",
         "ui",
-        "duck_detector",
+        *(["duck_detector"] if args.detector else []),
         "mediamtx",
         "sim",
         "argos",
@@ -631,6 +642,8 @@ def print_dry_run(spec: dict, build: bool, detach: bool) -> None:
     print(f"  Scenario:  {spec['scenario']} ({spec['robot_count']} robots)")
     print(f"  Render:    {spec['render']}")
     print(f"  Odometry:  {spec['odometry']}")
+    detector = "on" if "duck_detector" in spec["services"] else "off"
+    print(f"  Detector:  {detector}")
     invocation = command(spec) + [
         "--profile",
         "argos",

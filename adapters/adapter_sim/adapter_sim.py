@@ -314,7 +314,11 @@ class RobotBridge(
         self._camera_depth: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._last_depth_warning_at = 0.0
-        self._detector = ObjectDetector()
+        # The simulation runs without a detector unless `sim-up --detector`
+        # started one and set its URL; nothing then posts frames anywhere.
+        self._detector = (
+            ObjectDetector() if os.environ.get("SWARMDECK_DETECTOR_URL") else None
+        )
         self._detection_enabled = True
         default_period = float(os.environ.get("SWARMDECK_DETECTION_PERIOD_S", "1.0"))
         self._detection_period_s = max(

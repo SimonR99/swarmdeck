@@ -36,6 +36,7 @@ RENDER          ?= software       # software | gpu (nvidia) | dri (intel/amd)
 ODOMETRY        ?= fast_livo2     # fast_livo2 | drift
 TARGETS         ?= 10             # Perception targets to scatter
 EXPLORE         ?= 0              # Initial autonomous exploration seconds
+DETECTOR        ?= 0              # 1 runs the YOLOE object detector in up-sim
 ROBOT           ?= all            # Target robot profile for deploy (botman, aslan, scout, spot, asimov, all)
 DEPLOY_ARGS     ?=                # Additional flags for scripts/deploy (--dry-run, --no-build, etc.)
 N               ?= 4              # Number of robots for mock adapter
@@ -70,7 +71,7 @@ help:
 	@echo "  make demo                Launch server + mock + ui simultaneously on host"
 	@echo ""
 	@echo "Simulation (Docker Compose + ARGoS 3):"
-	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|subt_finals|3robot] RENDER=[software|gpu|dri]"
+	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|subt_finals|3robot] RENDER=[software|gpu|dri] DETECTOR=[0|1]"
 	@echo "  make up-argos            4-robot indoor scene with software Vulkan (portable)"
 	@echo "  make up-argos-gpu        4-robot indoor scene with NVIDIA GPU hardware acceleration"
 	@echo "  make up-argos-dri        4-robot indoor scene with Intel/AMD DRI hardware acceleration"
@@ -164,7 +165,8 @@ build-argos:
 # Modular simulation target accepting SCENARIO, RENDER, and ODOMETRY overrides:
 up-sim:
 	./scripts/sim-up --scenario $(SCENARIO) --render $(RENDER) --odometry $(ODOMETRY) \
-	  --targets $(TARGETS) --explore $(EXPLORE)
+	  --targets $(TARGETS) --explore $(EXPLORE) \
+	  $(if $(filter 1 true yes on,$(strip $(DETECTOR))),--detector,--no-detector)
 
 up-argos:
 	./scripts/sim-up --scenario default --render software --odometry fast_livo2
@@ -258,13 +260,13 @@ docker-up-gpu: up-argos-gpu
 	@echo "Backend API:      http://localhost:8080/api/config"
 
 docker-down:
-	$(COMPOSE) --profile argos --profile mock --profile agent down
+	$(COMPOSE) --profile argos --profile detector --profile mock --profile agent down
 
 docker-logs:
-	$(COMPOSE) --profile argos --profile mock --profile agent logs -f
+	$(COMPOSE) --profile argos --profile detector --profile mock --profile agent logs -f
 
 docker-ps:
-	$(COMPOSE) --profile argos --profile mock --profile agent ps
+	$(COMPOSE) --profile argos --profile detector --profile mock --profile agent ps
 
 docker-test:
 	$(COMPOSE) build server
@@ -308,4 +310,4 @@ tunnel:
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log} argos/build
-	$(COMPOSE) --profile argos --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE) --profile argos --profile detector --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true
