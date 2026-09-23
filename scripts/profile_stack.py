@@ -691,11 +691,19 @@ def latency_trace(window: float) -> dict:
         events = robot_events.get(robot, [])
         if not events:
             continue
-        # robot position just before the plan (or first known position)
-        ref_pos = next(
-            ((x, y) for utc, x, y in events if utc <= plan_epoch),
-            (events[0][1], events[0][2]),
-        )
+        # Robot position at plan time: use the LAST sample at or before the
+        # plan timestamp, not the first. Using the first would mean a large
+        # pre-plan displacement (robot moved earlier in the window) could
+        # already exceed _MOTION_THRESHOLD_M, making the very next
+        # post-plan sample appear as immediate motion even if the robot
+        # has not moved since the path was dispatched.
+        ref_pos = None
+        for utc, x, y in reversed(events):
+            if utc <= plan_epoch:
+                ref_pos = (x, y)
+                break
+        if ref_pos is None:
+            ref_pos = (events[0][1], events[0][2])
         # find first event after plan_epoch where displacement > threshold
         for utc, x, y in events:
             if utc <= plan_epoch:

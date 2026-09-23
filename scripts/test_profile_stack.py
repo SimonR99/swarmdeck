@@ -241,6 +241,77 @@ def test_latency_window_filter_empty_when_all_outside():
 
 
 # ---------------------------------------------------------------------------
+# Reference-pose selection (fix 2): last pre-plan pose, not first
+# ---------------------------------------------------------------------------
+
+def _last_pre_plan_pos(events, plan_epoch):
+    """Reimplementation of the fixed reference-pose logic for unit testing.
+
+    events: sorted list of (utc_s, x, y)
+    Returns (x, y) of the latest sample at or before plan_epoch.
+    """
+    ref_pos = None
+    for utc, x, y in reversed(events):
+        if utc <= plan_epoch:
+            ref_pos = (x, y)
+            break
+    if ref_pos is None:
+        ref_pos = (events[0][1], events[0][2])
+    return ref_pos
+
+
+def test_ref_pos_uses_last_pre_plan_sample():
+    """The reference pose must be the latest sample at-or-before the plan."""
+    # Robot moved from (0,0) to (1,0) at t=100, then the plan arrives at t=200.
+    # Correct ref = (1,0) -- the pose just before the plan -- NOT (0,0).
+    events = [
+        (50.0,  0.0, 0.0),
+        (100.0, 1.0, 0.0),  # robot moved here before the plan
+        (150.0, 1.0, 0.0),
+        (250.0, 1.1, 0.0),  # tiny post-plan movement (0.1 m from 1.0)
+    ]
+    plan_epoch = 200.0
+    ref = _last_pre_plan_pos(events, plan_epoch)
+    assert ref == (1.0, 0.0), f"expected last pre-plan pos (1,0), got {ref}"
+
+
+def test_ref_pos_old_first_logic_gives_wrong_answer():
+    """Show that the old 'first pre-plan' logic produces the wrong reference."""
+    events = [
+        (50.0,  0.0, 0.0),
+        (100.0, 1.0, 0.0),
+        (150.0, 1.0, 0.0),
+        (250.0, 1.1, 0.0),
+    ]
+    plan_epoch = 200.0
+    # OLD behaviour: next((x,y) for utc,x,y in events if utc <= plan_epoch)
+    old_ref = next(
+        ((x, y) for utc, x, y in events if utc <= plan_epoch),
+        (events[0][1], events[0][2]),
+    )
+    # Old logic returns the FIRST pre-plan pose (0, 0), not the last (1, 0)
+    assert old_ref == (0.0, 0.0), f"old logic should give (0,0), got {old_ref}"
+
+    # With old ref (0,0): displacement at t=250 is ~1.1 m already exceeded,
+    # so the latency would be falsely short (250-200=50 s) even though the
+    # 1.0 m displacement happened BEFORE the plan.
+    # With new ref (1,0): displacement at t=250 is 0.1 m -- correct.
+    new_ref = _last_pre_plan_pos(events, plan_epoch)
+    assert new_ref == (1.0, 0.0)
+
+
+def test_ref_pos_fallback_when_no_pre_plan_events():
+    """When all events are after the plan, fall back to the first known pose."""
+    events = [
+        (300.0, 2.0, 3.0),
+        (400.0, 2.5, 3.0),
+    ]
+    plan_epoch = 100.0  # earlier than all events
+    ref = _last_pre_plan_pos(events, plan_epoch)
+    assert ref == (2.0, 3.0), "should fall back to events[0] when none precede the plan"
+
+
+# ---------------------------------------------------------------------------
 # short_command (existing helper; regression guard)
 # ---------------------------------------------------------------------------
 
