@@ -144,6 +144,7 @@ COPY deploy/patches/cslam-upright-prior.patch /tmp/cslam-upright-prior.patch
 # graph and loop-closure changes.
 COPY deploy/patches/cslam-map-epoch.patch /tmp/cslam-map-epoch.patch
 COPY deploy/patches/cslam-inter-robot-descriptors.patch /tmp/cslam-inter-robot-descriptors.patch
+COPY deploy/patches/cslam-closure-consistency.patch /tmp/cslam-closure-consistency.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
@@ -154,7 +155,8 @@ RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-inter-robot-pair-cap.patch \
     && git apply /tmp/cslam-upright-prior.patch \
     && git apply /tmp/cslam-map-epoch.patch \
-    && git apply /tmp/cslam-inter-robot-descriptors.patch
+    && git apply /tmp/cslam-inter-robot-descriptors.patch \
+    && git apply /tmp/cslam-closure-consistency.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \

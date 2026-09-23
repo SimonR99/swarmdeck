@@ -116,6 +116,17 @@
       # tightest true revisit, 2.1 m of parallax, came in at 0.402. Raise this
       # threshold only with intra-robot recall re-measured alongside.
       registration_min_overlap: 0.40
+      # Intra-robot registration must remain plausible against the keyframe
+      # odometry. The envelope grows with travelled odometry path and reported
+      # covariance, so a real accumulated-drift correction remains admissible;
+      # the absolute rotation cap rejects the 180 degree repetitive-tunnel
+      # branch while retaining full SE3 slope corrections below that bound.
+      registration_odom_consistency_max_sigma: 5.0
+      registration_odom_translation_floor_m: 0.25
+      registration_odom_translation_sigma_per_m: 0.10
+      registration_odom_rotation_floor_rad: 0.05
+      registration_odom_rotation_sigma_per_m: 0.005
+      registration_odom_max_rotation_error_rad: 2.35619449019
       # Descriptors exchanged between robots. The paper's argument is that this
       # is the scarce resource, so it is a budget, not a firehose.
       inter_robot_loop_closure_budget: 5

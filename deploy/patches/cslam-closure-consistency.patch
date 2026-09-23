@@ -1,0 +1,174 @@
+diff --git a/cslam/cslam/lidar_handler_node.py b/cslam/cslam/lidar_handler_node.py
+--- a/cslam/cslam/lidar_handler_node.py
++++ b/cslam/cslam/lidar_handler_node.py
+@@ -14,2 +14,105 @@ from diagnostic_msgs.msg import KeyValue
+ 
++def _quaternion_rotation(q):
++    norm = float(np.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w))
++    if not np.isfinite(norm) or norm <= 1e-12:
++        return None
++    x, y, z, w = (q.x / norm, q.y / norm, q.z / norm, q.w / norm)
++    return np.array([
++        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
++         2.0 * (x * z + y * w)],
++        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
++         2.0 * (y * z - x * w)],
++        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
++         1.0 - 2.0 * (x * x + y * y)],
++    ])
++
++
++def _pose_matrix(odom):
++    pose = odom.pose.pose
++    rotation = _quaternion_rotation(pose.orientation)
++    if rotation is None:
++        return None
++    matrix = np.eye(4)
++    matrix[:3, :3] = rotation
++    matrix[:3, 3] = (float(pose.position.x), float(pose.position.y),
++                     float(pose.position.z))
++    return matrix
++
++
++def _transform_matrix(transform):
++    rotation = _quaternion_rotation(transform.rotation)
++    if rotation is None:
++        return None
++    matrix = np.eye(4)
++    matrix[:3, :3] = rotation
++    matrix[:3, 3] = (float(transform.translation.x),
++                     float(transform.translation.y),
++                     float(transform.translation.z))
++    return matrix
++
++
++def _rotation_angle(rotation):
++    cosine = np.clip((float(np.trace(rotation)) - 1.0) / 2.0, -1.0, 1.0)
++    return float(np.arccos(cosine))
++
++
++def registration_odom_consistent(odom0, odom1, transform,
++                                 path_length_m=0.0,
++                                 max_sigma=5.0,
++                                 translation_floor_m=0.25,
++                                 translation_sigma_per_m=0.10,
++                                 rotation_floor_rad=0.05,
++                                 rotation_sigma_per_m=0.005,
++                                 max_rotation_error_rad=2.35619449019):
++    """Reject scan matches that contradict local odometry too strongly.
++
++    ``transform`` is the BetweenFactor measurement, namely pose 0 to pose 1.
++    Registration can correct accumulated drift, so the uncertainty envelope
++    grows with the odometry path between keyframes and with reported pose
++    covariance. Full SE3 is compared here: a valid ramp revisit may retain
++    roll/pitch, while a 180 degree tunnel ambiguity is not accumulated drift.
++    """
++    odom0_matrix = _pose_matrix(odom0)
++    odom1_matrix = _pose_matrix(odom1)
++    registration = _transform_matrix(transform)
++    if odom0_matrix is None or odom1_matrix is None or registration is None:
++        return False
++    odom_relative = np.linalg.inv(odom0_matrix) @ odom1_matrix
++    translation_error = float(np.linalg.norm(
++        registration[:3, 3] - odom_relative[:3, 3]))
++    rotation_error = _rotation_angle(
++        odom_relative[:3, :3].T @ registration[:3, :3])
++
++    path = abs(float(path_length_m))
++    path = max(path, float(np.linalg.norm(odom_relative[:3, 3])))
++    translation_sigma = max(float(translation_floor_m),
++                            float(translation_sigma_per_m) * path)
++    rotation_sigma = max(float(rotation_floor_rad),
++                         float(rotation_sigma_per_m) * path)
++
++    # Use supplied covariance when the sensor provides it, while retaining a
++    # path-length process-noise floor for captures that omit covariance.
++    for odom in (odom0, odom1):
++        covariance = getattr(getattr(odom, "pose", None), "covariance", None)
++        if covariance is None or len(covariance) < 36:
++            continue
++        try:
++            translation_sigma = max(
++                translation_sigma,
++                float(np.sqrt(max(0.0, float(covariance[0]),
++                                   float(covariance[7]),
++                                   float(covariance[14])))))
++            rotation_sigma = max(
++                rotation_sigma,
++                float(np.sqrt(max(0.0, float(covariance[21]),
++                                   float(covariance[28]),
++                                   float(covariance[35])))))
++        except (TypeError, ValueError):
++            continue
++
++    return (translation_error <= float(max_sigma) * translation_sigma and
++            rotation_error <= min(float(max_rotation_error_rad),
++                                  float(max_sigma) * rotation_sigma))
++
++
+ class LidarHandler: 
+@@ -62,5 +135,7 @@ class LidarHandler: 
+         self.previous_scene_signature = None
+         self.previous_keyframe_stamp = None
+         self.scene_keyframes_since_motion = 0
++        self.local_odom_map = {}
++        self.local_odom_path_length = {}
+ 
+         if self.params["evaluation.enable_logs"]:
+@@ -146,3 +221,20 @@ class LidarHandler: 
+         pc1 = self.local_descriptors_map[msg.keyframe1_id]
+         transform, success = icp_utils.compute_transform(pc0, pc1, self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"], self.params["frontend.registration_min_overlap"])
++        odom0 = self.local_odom_map.get(msg.keyframe0_id)
++        odom1 = self.local_odom_map.get(msg.keyframe1_id)
++        path0 = self.local_odom_path_length.get(msg.keyframe0_id, 0.0)
++        path1 = self.local_odom_path_length.get(msg.keyframe1_id, 0.0)
++        if success and (odom0 is None or odom1 is None or
++                        not registration_odom_consistent(
++                            odom0, odom1, transform, abs(path1 - path0),
++                            self.params["frontend.registration_odom_consistency_max_sigma"],
++                            self.params["frontend.registration_odom_translation_floor_m"],
++                            self.params["frontend.registration_odom_translation_sigma_per_m"],
++                            self.params["frontend.registration_odom_rotation_floor_rad"],
++                            self.params["frontend.registration_odom_rotation_sigma_per_m"],
++                            self.params["frontend.registration_odom_max_rotation_error_rad"])):
++            self.node.get_logger().warn(
++                "Rejecting intra-robot loop closure: registration contradicts "
++                "odometry beyond its uncertainty envelope")
++            success = False
+         out_msg = self.epochs.stamp(IntraRobotLoopClosure())
+@@ -219,3 +310,9 @@ class LidarHandler: 
+                         ('frontend.registration_min_inliers', 60),
+                         ('frontend.registration_min_overlap', 0.0),
++                        ('frontend.registration_odom_consistency_max_sigma', 5.0),
++                        ('frontend.registration_odom_translation_floor_m', 0.25),
++                        ('frontend.registration_odom_translation_sigma_per_m', 0.10),
++                        ('frontend.registration_odom_rotation_floor_rad', 0.05),
++                        ('frontend.registration_odom_rotation_sigma_per_m', 0.005),
++                        ('frontend.registration_odom_max_rotation_error_rad', 2.35619449019),
+                         ('frontend.keyframe_generation_ratio_distance', 0.5),
+@@ -246,2 +343,10 @@ class LidarHandler: 
+         'frontend.registration_min_overlap').value
++    for name in ('registration_odom_consistency_max_sigma',
++                 'registration_odom_translation_floor_m',
++                 'registration_odom_translation_sigma_per_m',
++                 'registration_odom_rotation_floor_rad',
++                 'registration_odom_rotation_sigma_per_m',
++                 'registration_odom_max_rotation_error_rad'):
++        params['frontend.' + name] = node.get_parameter(
++            'frontend.' + name).value
+     params['frontend.keyframe_generation_ratio_distance'] = node.get_parameter(
+@@ -294,5 +407,14 @@ class LidarHandler: 
+                 except Exception as e:
+                     self.local_descriptors_map[self.nb_local_keyframes] = []
+                     self.node.get_logger().info("Failure to downsample point cloud to voxel size {}. {}".format(self.params["frontend.voxel_size"], e))
+                     return
++                keyframe_id = self.nb_local_keyframes
++                self.local_odom_map[keyframe_id] = data[1]
++                if keyframe_id == 0:
++                    self.local_odom_path_length[keyframe_id] = 0.0
++                else:
++                    previous = self.local_odom_map[keyframe_id - 1]
++                    step = self.odom_distance_squared(previous, data[1]) ** 0.5
++                    self.local_odom_path_length[keyframe_id] = (
++                        self.local_odom_path_length[keyframe_id - 1] + step)
+                 # Publish pointcloud
