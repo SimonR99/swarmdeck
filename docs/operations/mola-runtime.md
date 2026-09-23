@@ -36,6 +36,14 @@ volume are not selected implicitly. Commands are in
 invocations in the archived
 [decentralized autonomy record](../archive/decentralized-autonomy.md).
 
+Each peer launch (`deploy/autonomy/peer.launch.py`) first reclaims old mission
+directories under the map store (`SWARMDECK_MAP_STORE`, default `/maps`). It
+keeps the active mission and the `SWARMDECK_MISSION_GC_KEEP_RECENT` most
+recently modified others (default 3) and deletes the rest. Set
+`SWARMDECK_MISSION_GC_DRY_RUN=true` to only log what it would delete. The
+launch then checkpoints the peer's geometry SQLite WAL
+(`PRAGMA wal_checkpoint(TRUNCATE)`) before any node opens it.
+
 The default worker maintains one `swarmdeck-mola-import --serve` subprocess
 per peer, started on the peer's first build and closed when the peer
 disappears or its runtime fails, and builds up to `--parallel-peers` peers at
