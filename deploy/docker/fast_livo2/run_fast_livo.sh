@@ -64,7 +64,6 @@ echo "=== Fast-LIVO2 Fleet: ${ROBOTS[*]} ==="
 GRAVITY=${GRAVITY:-9.81}
 ARGOS_IMU_NOISE=${ARGOS_IMU_NOISE:-"0.002 0.02 0.0002 0.002"}
 IMU_HZ=${IMU_HZ:-100}
-SCAN_LINE=${SCAN_LINE:-17}
 VOXEL=${VOXEL:-0.5}
 
 mkdir -p "$RESULTS" /tmp/fast_livo_profiles
@@ -76,6 +75,7 @@ for r in "${ROBOTS[@]}"; do
     LIDAR_IN_BODY="$(python3 "$MOUNTS" "$EXPERIMENT" --lidar "$r")"
     CAMERA_IN_BODY="$(python3 "$MOUNTS" "$EXPERIMENT" --camera "$r")"
     LIDAR_ELEV="$(python3 "$MOUNTS" "$EXPERIMENT" --lidar-elev "$r")"
+    SCAN_LINE="$(python3 "$MOUNTS" "$EXPERIMENT" --lidar-rings "$r")"
     CAMERA_RESOLUTION="$(python3 "$MOUNTS" "$EXPERIMENT" --camera-resolution "$r" | tr " " ",")"
     CAMERA_FOV="$(python3 "$MOUNTS" "$EXPERIMENT" --camera-fov "$r")"
     echo "  $r: lidar ($LIDAR_IN_BODY) camera ($CAMERA_IN_BODY) elev ($LIDAR_ELEV)"

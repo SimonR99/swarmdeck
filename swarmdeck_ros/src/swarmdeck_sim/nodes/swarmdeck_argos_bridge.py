@@ -152,6 +152,29 @@ def _stamp_of(tick: int, ticks_per_second: int):
     return stamp
 
 
+def _base_pose_from_origin(
+    origin_pose: tuple[float, ...], base_height: float
+) -> tuple[float, ...]:
+    pose = list(origin_pose)
+    qw, qx, qy, qz = (float(value) for value in pose[3:7])
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    if not math.isfinite(norm) or norm < 1e-12:
+        raise ValueError("odometry quaternion is not finite")
+    qw, qx, qy, qz = (value / norm for value in (qw, qx, qy, qz))
+    pose[3:7] = [qw, qx, qy, qz]
+    r02 = 2.0 * (qx * qz + qy * qw)
+    r12 = 2.0 * (qy * qz - qx * qw)
+    r22 = 1.0 - 2.0 * (qx * qx + qy * qy)
+    pose[0] += r02 * base_height
+    pose[1] += r12 * base_height
+    pose[2] += r22 * base_height
+    # CCI odometry's linear velocity is body-frame. Move it to the base
+    # origin as well, so odom.twist remains a coherent base_link measurement.
+    pose[7] += pose[11] * base_height
+    pose[8] -= pose[10] * base_height
+    return tuple(pose)
+
+
 SCAN_BEAMS = 360
 SCAN_ANGLE_MIN = -3.14159
 SCAN_ANGLE_MAX = 3.14159
@@ -270,6 +293,103 @@ def project_laserscan_proximity(
     return ranges
 
 
+def _flatten_to_navigation(
+    hit_pts: np.ndarray,
+    lidar_x: float,
+    lidar_z: float,
+    pose: tuple[float, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return hit points in a flattened, robot-centred odom frame.
+
+    Nav2's costmap is 2-D.  Its observation height filter runs after TF has
+    transformed a scan into odom, so feeding it the physical base/lidar frame
+    makes a ramp's absolute altitude look like a sensor-height failure.  The
+    dedicated navigation frames retain the capture-time XY geometry while
+    intentionally discarding Z after applying the full odometry rotation.
+    """
+    px = hit_pts["x"] + lidar_x
+    py = hit_pts["y"]
+    pz = hit_pts["z"] + lidar_z
+    qw, qx, qy, qz = (float(value) for value in pose[3:7])
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    if not math.isfinite(norm) or norm < 1e-12:
+        raise ValueError("odometry quaternion is not finite")
+    qw, qx, qy, qz = (value / norm for value in (qw, qx, qy, qz))
+    r00 = 1.0 - 2.0 * (qy * qy + qz * qz)
+    r01 = 2.0 * (qx * qy - qz * qw)
+    r02 = 2.0 * (qx * qz + qy * qw)
+    r10 = 2.0 * (qx * qy + qz * qw)
+    r11 = 1.0 - 2.0 * (qx * qx + qz * qz)
+    r12 = 2.0 * (qy * qz - qx * qw)
+    rel_x = r00 * px + r01 * py + r02 * pz
+    rel_y = r10 * px + r11 * py + r12 * pz
+    yaw = math.atan2(r10, r00)
+    c, s = math.cos(yaw), math.sin(yaw)
+    nav_x = c * rel_x + s * rel_y
+    nav_y = -s * rel_x + c * rel_y
+    return np.asarray(nav_x), np.asarray(nav_y)
+
+
+def _ranges_from_xy(x: np.ndarray, y: np.ndarray, range_max: float) -> np.ndarray:
+    ranges = np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    if x.size == 0:
+        return ranges
+    distance = np.hypot(x, y)
+    valid = (distance >= SCAN_RANGE_MIN) & (distance <= range_max)
+    if not np.any(valid):
+        return ranges
+    distance = distance[valid]
+    theta = np.arctan2(y[valid], x[valid])
+    bins = np.clip(
+        np.floor((theta - SCAN_ANGLE_MIN) * INV_ANGLE_INC).astype(np.int32),
+        0,
+        SCAN_BEAMS - 1,
+    )
+    np.minimum.at(ranges, bins, distance)
+    return ranges
+
+
+def project_laserscan_navigation(
+    hit_pts: np.ndarray,
+    lidar_x: float,
+    lidar_z: float,
+    pose: tuple[float, ...],
+    *,
+    range_max: float = 30.0,
+) -> np.ndarray:
+    """Flatten the horizontal mapping slice after the full capture-time pose."""
+    if hit_pts.size == 0:
+        return np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    slice_mask = (hit_pts["z"] >= -0.05) & (hit_pts["z"] <= 0.05)
+    if not np.any(slice_mask):
+        return np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    x, y = _flatten_to_navigation(hit_pts[slice_mask], lidar_x, lidar_z, pose)
+    return _ranges_from_xy(x, y, range_max)
+
+
+def project_laserscan_proximity_navigation(
+    hit_pts: np.ndarray,
+    lidar_x: float,
+    lidar_z: float,
+    base_height: float,
+    pose: tuple[float, ...],
+    *,
+    prox_min_height: float,
+    prox_range_max: float = 8.0,
+) -> np.ndarray:
+    """Flatten the safety projection while retaining its support-relative gate."""
+    if hit_pts.size == 0:
+        return np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    pz_floor = hit_pts["z"] + lidar_z + base_height
+    mask = (pz_floor >= prox_min_height) & (
+        pz_floor <= PROX_MAX_HEIGHT + PROX_HEIGHT_EPSILON
+    )
+    if not np.any(mask):
+        return np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    x, y = _flatten_to_navigation(hit_pts[mask], lidar_x, lidar_z, pose)
+    return _ranges_from_xy(x, y, prox_range_max)
+
+
 def recv_exact(sock: socket.socket, count: int) -> bytes:
     if count == 0:
         return b""
@@ -302,6 +422,8 @@ class RobotInterface:
         self.last_scan_tick = -1
         self.last_camera_tick = -1
         self.last_odom_tick = -1
+        self.last_odom_pose: Optional[tuple[float, ...]] = None
+        self.odom_pose_history: dict[int, tuple[float, ...]] = {}
         # A parked robot's raycast repeats byte for byte. The projections of
         # the previous readings are kept so an identical frame only costs a
         # comparison and the messages, which consumers still expect per tick.
@@ -351,9 +473,19 @@ class RobotInterface:
         self.pub_capture = node.create_publisher(
             String, f"/{ns}/scan/capture_provenance", reliable
         )
+        # `/scan` stays in the real lidar frame for SLAM and 3-D consumers.
+        # Nav2 gets a separate planar copy whose odom transform is flattened
+        # below; otherwise its global-frame height filter treats a valid return
+        # as out of range after a long climb or descent.
         self.pub_scan = node.create_publisher(LaserScan, f"/{ns}/scan", reliable)
+        self.pub_nav_scan = node.create_publisher(
+            LaserScan, f"/{ns}/nav_scan", reliable
+        )
         self.pub_prox = node.create_publisher(
             LaserScan, f"/{ns}/proximity_scan", reliable
+        )
+        self.pub_nav_prox = node.create_publisher(
+            LaserScan, f"/{ns}/nav_proximity_scan", reliable
         )
         self.pub_imu = node.create_publisher(Imu, f"/{ns}/imu", reliable)
         self.pub_odom = node.create_publisher(Odometry, f"/{ns}/odom", reliable)
@@ -381,6 +513,8 @@ class RobotInterface:
         self.frame_base = f"{ns}/base_link"
         self.frame_odom = f"{ns}/odom"
         self.frame_lidar = f"{ns}/base_link/lidar"
+        self.frame_nav_scan = f"{ns}/nav_scan"
+        self.frame_nav_prox = f"{ns}/nav_proximity_scan"
         self.frame_imu = f"{ns}/base_link/imu"
         self.frame_camera = f"{ns}/base_link/camera"
         self._warned_invalid = False
@@ -534,6 +668,8 @@ class ArgosBridge(Node):
                     robot.last_scan_tick = -1
                     robot.last_camera_tick = -1
                     robot.last_odom_tick = -1
+                    robot.last_odom_pose = None
+                    robot.odom_pose_history.clear()
             previous_tick = tick
             seconds = tick / float(ticks_per_second or 1)
             stamp = _stamp_of(tick, ticks_per_second)
@@ -568,14 +704,17 @@ class ArgosBridge(Node):
 
         # -- ground truth ---------------------------------------------------
         gt = struct.unpack("<13d", recv_exact(sock, 13 * 8))
+        gt_pose = _base_pose_from_origin(tuple(gt), robot.base_height)
         truth = Odometry()
         truth.header.stamp = stamp
         truth.header.frame_id = "world"
         truth.child_frame_id = robot.frame_base
-        truth.pose.pose.position = Point(x=gt[0], y=gt[1], z=gt[2])
-        truth.pose.pose.orientation = Quaternion(w=gt[3], x=gt[4], y=gt[5], z=gt[6])
-        truth.twist.twist.linear = Vector3(x=gt[7], y=gt[8], z=gt[9])
-        truth.twist.twist.angular = Vector3(x=gt[10], y=gt[11], z=gt[12])
+        truth.pose.pose.position = Point(x=gt_pose[0], y=gt_pose[1], z=gt_pose[2])
+        truth.pose.pose.orientation = Quaternion(
+            w=gt_pose[3], x=gt_pose[4], y=gt_pose[5], z=gt_pose[6]
+        )
+        truth.twist.twist.linear = Vector3(x=gt_pose[7], y=gt_pose[8], z=gt_pose[9])
+        truth.twist.twist.angular = Vector3(x=gt_pose[10], y=gt_pose[11], z=gt_pose[12])
         robot.pub_truth.publish(truth)
 
         # -- odometry -------------------------------------------------------
@@ -585,7 +724,13 @@ class ArgosBridge(Node):
             (odom_tick,) = struct.unpack("<I", recv_exact(sock, 4))
             # Repeating an old estimate at a new time fabricates motion history.
             if valid and robot.last_odom_tick < odom_tick <= tick:
+                odo = _base_pose_from_origin(odo, robot.base_height)
                 robot.last_odom_tick = odom_tick
+                robot.last_odom_pose = tuple(odo)
+                robot.odom_pose_history[odom_tick] = robot.last_odom_pose
+                for old_tick in tuple(robot.odom_pose_history):
+                    if old_tick < odom_tick - 200:
+                        del robot.odom_pose_history[old_tick]
                 odom_stamp = _stamp_of(odom_tick, ticks_per_second)
                 odom = Odometry()
                 odom.header.stamp = odom_stamp
@@ -605,7 +750,34 @@ class ArgosBridge(Node):
                 transform.child_frame_id = robot.frame_base
                 transform.transform.translation = Vector3(x=odo[0], y=odo[1], z=odo[2])
                 transform.transform.rotation = odom.pose.pose.orientation
-                robot.pub_tf.publish(TFMessage(transforms=[transform]))
+
+                # These frames are intentionally planar navigation products,
+                # not aliases for base_link.  Apply the complete SE(3) pose
+                # to each hit before flattening its endpoint; the TF below
+                # carries the matching XY pose and yaw only.
+                qw, qx, qy, qz = (float(value) for value in odo[3:7])
+                yaw = math.atan2(
+                    2.0 * (qx * qy + qz * qw),
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                )
+                planar_rotation = Quaternion(
+                    w=math.cos(yaw / 2.0), x=0.0, y=0.0, z=math.sin(yaw / 2.0)
+                )
+                nav_scan_tf = TransformStamped()
+                nav_scan_tf.header.stamp = odom_stamp
+                nav_scan_tf.header.frame_id = robot.frame_odom
+                nav_scan_tf.child_frame_id = robot.frame_nav_scan
+                nav_scan_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
+                nav_scan_tf.transform.rotation = planar_rotation
+                nav_prox_tf = TransformStamped()
+                nav_prox_tf.header.stamp = odom_stamp
+                nav_prox_tf.header.frame_id = robot.frame_odom
+                nav_prox_tf.child_frame_id = robot.frame_nav_prox
+                nav_prox_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
+                nav_prox_tf.transform.rotation = planar_rotation
+                robot.pub_tf.publish(
+                    TFMessage(transforms=[transform, nav_scan_tf, nav_prox_tf])
+                )
             elif not valid and not robot._warned_invalid:
                 robot._warned_invalid = True
                 # Not an error: an external estimator needs motion and a few
@@ -644,9 +816,8 @@ class ArgosBridge(Node):
                 "<IIIfI", recv_exact(sock, 20)
             )
             # Rendering and socket exchange run on separate schedules. Use
-            # capture time for every projection of this scan so TF lookup does
-            # not rotate old geometry using the robot's current heading.
-            # Keep the existing one-second compatibility window for LiDAR.
+            # capture time for every projection so TF lookup does not rotate
+            # old geometry using the robot's current heading.
             scan_age_ticks = tick - scan_tick
             scan_tick_valid = 0 <= scan_age_ticks <= ticks_per_second
             if scan_tick_valid:
@@ -676,14 +847,31 @@ class ArgosBridge(Node):
             # with identical stamps, which is the zero interval that defeats
             # the turn-rate gate downstream.
             if not duplicate and usable_scan:
+                nav_pose_tick = max(
+                    (
+                        old_tick
+                        for old_tick in robot.odom_pose_history
+                        if old_tick <= scan_tick
+                    ),
+                    default=-1,
+                )
                 if (
                     raw == robot.last_scan_raw
                     and robot.last_scan_products is not None
                     and robot.last_scan_products[0] == _max_range
+                    and robot.last_scan_products[8] == nav_pose_tick
                 ):
-                    _, hits, cloud_data, points_sha256, scan_ranges, prox_ranges = (
-                        robot.last_scan_products
-                    )
+                    (
+                        _,
+                        hits,
+                        cloud_data,
+                        points_sha256,
+                        scan_ranges,
+                        prox_ranges,
+                        nav_scan_ranges,
+                        nav_prox_ranges,
+                        _,
+                    ) = robot.last_scan_products
                 else:
                     arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
                     hit_mask = arr["hit"] != 0
@@ -711,6 +899,34 @@ class ArgosBridge(Node):
                         prox_min_height=robot.prox_min_height,
                         prox_range_max=robot.prox_range_max,
                     ).tolist()
+                    nav_pose = robot.odom_pose_history.get(scan_tick)
+                    if nav_pose is None:
+                        earlier = [
+                            old_tick
+                            for old_tick in robot.odom_pose_history
+                            if old_tick <= scan_tick
+                        ]
+                        if earlier:
+                            nav_pose = robot.odom_pose_history[max(earlier)]
+                    if nav_pose is None:
+                        nav_scan_ranges = nav_prox_ranges = None
+                    else:
+                        nav_scan_ranges = project_laserscan_navigation(
+                            hit_pts,
+                            robot.lidar_x,
+                            robot.lidar_z,
+                            nav_pose,
+                            range_max=float(_max_range),
+                        ).tolist()
+                        nav_prox_ranges = project_laserscan_proximity_navigation(
+                            hit_pts,
+                            robot.lidar_x,
+                            robot.lidar_z,
+                            robot.base_height,
+                            nav_pose,
+                            prox_min_height=robot.prox_min_height,
+                            prox_range_max=robot.prox_range_max,
+                        ).tolist()
                     robot.last_scan_raw = raw
                     robot.last_scan_products = (
                         _max_range,
@@ -719,6 +935,9 @@ class ArgosBridge(Node):
                         points_sha256,
                         scan_ranges,
                         prox_ranges,
+                        nav_scan_ranges,
+                        nav_prox_ranges,
+                        nav_pose_tick,
                     )
 
                 # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
@@ -783,7 +1002,25 @@ class ArgosBridge(Node):
                 scan_msg.ranges = scan_ranges
                 robot.pub_scan.publish(scan_msg)
 
-                # 3. Proximity 2.5D LaserScan (Nav2 obstacle band in base_link)
+                # 3. Nav2 mapping slice in the flattened capture-time frame.
+                # Do not relabel the lidar message: SLAM needs its physical
+                # sensor frame and full roll/pitch TF.
+                if nav_scan_ranges is not None:
+                    nav_scan_msg = LaserScan()
+                    nav_scan_msg.header.stamp = scan_stamp
+                    nav_scan_msg.header.frame_id = robot.frame_nav_scan
+                    nav_scan_msg.angle_min = float(SCAN_ANGLE_MIN)
+                    nav_scan_msg.angle_max = float(SCAN_ANGLE_MAX)
+                    nav_scan_msg.angle_increment = float(SCAN_ANGLE_INC)
+                    nav_scan_msg.time_increment = 0.0
+                    nav_scan_msg.scan_time = float(SCAN_TIME)
+                    nav_scan_msg.range_min = float(SCAN_RANGE_MIN)
+                    nav_scan_msg.range_max = float(_max_range)
+                    nav_scan_msg.ranges = nav_scan_ranges
+                    robot.pub_nav_scan.publish(nav_scan_msg)
+
+                # 4. Proximity 2.5D LaserScan (explorer's support-relative
+                # bumper band in base_link).
                 prox_msg = LaserScan()
                 prox_msg.header.stamp = scan_stamp
                 prox_msg.header.frame_id = robot.frame_base
@@ -797,6 +1034,22 @@ class ArgosBridge(Node):
                 prox_msg.ranges = prox_ranges
                 robot.pub_prox.publish(prox_msg)
 
+                # 5. Nav2 proximity band in the same flattened frame. The
+                # support-relative bridge gate remains intact, so ramps and
+                # cliffs are not made traversable by flattening.
+                if nav_prox_ranges is not None:
+                    nav_prox_msg = LaserScan()
+                    nav_prox_msg.header.stamp = scan_stamp
+                    nav_prox_msg.header.frame_id = robot.frame_nav_prox
+                    nav_prox_msg.angle_min = float(SCAN_ANGLE_MIN)
+                    nav_prox_msg.angle_max = float(SCAN_ANGLE_MAX)
+                    nav_prox_msg.angle_increment = float(SCAN_ANGLE_INC)
+                    nav_prox_msg.time_increment = 0.0
+                    nav_prox_msg.scan_time = float(SCAN_TIME)
+                    nav_prox_msg.range_min = float(SCAN_RANGE_MIN)
+                    nav_prox_msg.range_max = float(robot.prox_range_max)
+                    nav_prox_msg.ranges = nav_prox_ranges
+                    robot.pub_nav_prox.publish(nav_prox_msg)
         # -- camera ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
             cam_tick, width, height, fov_deg = struct.unpack(

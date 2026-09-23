@@ -53,8 +53,12 @@ def rig(monkeypatch):
     )
     robot = NS(
         last_scan_tick=-1,
+        last_scan_raw=None,
+        last_scan_products=None,
         last_camera_tick=-1,
         last_odom_tick=-1,
+        last_odom_pose=None,
+        odom_pose_history={},
         _warned_invalid=False,
         lidar_x=0.0,
         lidar_z=0.4,
@@ -62,7 +66,7 @@ def rig(monkeypatch):
         prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
         prox_range_max=8.0,
     )
-    for name in ("base", "odom", "lidar", "camera"):
+    for name in ("base", "odom", "lidar", "camera", "nav_scan", "nav_prox"):
         setattr(robot, "frame_" + name, name)
     for name in (
         "truth",
@@ -71,7 +75,9 @@ def rig(monkeypatch):
         "points",
         "capture",
         "scan",
+        "nav_scan",
         "prox",
+        "nav_prox",
         "image",
         "info",
         "depth",
@@ -93,7 +99,9 @@ def packet(sensor_tick=90, valid=True, hits=0, max_range=30.0):
     return (
         b"\x01r"
         + struct.pack("<13d", *pose)
-        + struct.pack("<BB13dI", 1, valid, *pose, sensor_tick)
+        + struct.pack(
+            "<BB13dI", 1, valid, *(pose if valid else (0.0,) * 13), sensor_tick
+        )
         + b"\x00\x00"  # No encoders or IMU.
         + struct.pack("<BIIIfI", 1, sensor_tick, 1, 1, max_range, hits)
         + points.tobytes()
@@ -113,8 +121,12 @@ def test_capture_timestamps_and_empty_scan(rig):
     for name in ("odom", "scan", "prox", "image", "info", "depth"):
         stamp = getattr(robot, "pub_" + name).publish.call_args.args[0].header.stamp
         assert (stamp.sec, stamp.nanosec) == (0, 900_000_000)
-    tf = robot.pub_tf.publish.call_args.args[0].transforms[0]
-    assert tf.header.stamp == robot.pub_odom.publish.call_args.args[0].header.stamp
+    odom_msg = robot.pub_odom.publish.call_args.args[0]
+    tf = robot.pub_tf.publish.call_args.args[0].transforms
+    assert tf[0].header.stamp == odom_msg.header.stamp
+    assert odom_msg.pose.pose.position.z == pytest.approx(robot.base_height)
+    assert tf[1].child_frame_id == robot.frame_nav_scan
+    assert tf[1].transform.translation.z == 0.0
     assert robot.pub_truth.publish.call_args.args[0].header.stamp.sec == 1
     assert all(
         x == float("inf") for x in robot.pub_prox.publish.call_args.args[0].ranges

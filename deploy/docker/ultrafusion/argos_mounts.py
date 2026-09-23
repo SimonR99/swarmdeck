@@ -65,6 +65,7 @@ def main() -> int:
         metavar="ROBOT",
         help="Print that robot's lidar vertical FOV as 'min max'",
     )
+    ap.add_argument("--lidar-rings", metavar="ROBOT")
     ap.add_argument("--camera-resolution", metavar="ROBOT")
     ap.add_argument("--camera-fov", metavar="ROBOT")
     args = ap.parse_args()
@@ -79,6 +80,7 @@ def main() -> int:
         (args.lidar, "photorealistic_lidar", "position"),
         (args.camera, "photorealistic_camera", "position"),
         (args.lidar_elev, "photorealistic_lidar", "vertical_fov"),
+        (args.lidar_rings, "photorealistic_lidar", "rings"),
         (args.camera_resolution, "photorealistic_camera", "resolution"),
         (args.camera_fov, "photorealistic_camera", "fov"),
     ):

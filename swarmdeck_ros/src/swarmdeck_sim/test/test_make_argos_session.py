@@ -111,6 +111,24 @@ def test_the_lidar_matches_the_configured_profile(tree, cfg):
     assert lo == pytest.approx(-hi, abs=1e-3)
 
 
+@pytest.mark.parametrize("profile", ["vlp16", "os1_32"])
+def test_lidar_extreme_rays_fit_rendered_face_corners(tmp_path, cfg, profile):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["fleet"]["lidar"] = {"profile": profile}
+    path = tmp_path / "lidar.yaml"
+    path.write_text(yaml.safe_dump(config))
+    root = ElementTree.fromstring(mas.generate_argos_xml(path))
+    lidar = root.find("./controllers/*/sensors/photorealistic_lidar")
+    width, height = map(int, lidar.get("face_resolution", "512,192").split(","))
+    half_span = math.pi / int(lidar.get("faces", "4"))
+    elevation = max(abs(float(v)) for v in lidar.get("vertical_fov").split(","))
+    # At a face boundary, the forward projection is smaller than at its
+    # centre. A centre-only FOV check still clips the upper/lower corner rays.
+    ray_up_over_forward = math.tan(math.radians(elevation)) / math.cos(half_span)
+    face_up_over_forward = math.tan(half_span) * height / width
+    assert ray_up_over_forward <= face_up_over_forward
+
+
 def test_each_robot_is_the_entity_its_profile_names(tree, cfg):
     fleet = cfg["fleet"]
     prefix = fleet.get("robot_prefix", "robot_")

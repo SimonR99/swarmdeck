@@ -24,9 +24,9 @@ fleet:
   # Forward-facing floodlight mounted at camera height for underground navigation
   floodlight: true
   odometry: fast_livo2
-  # 17-ring Velodyne VLP-16 profile required by the lidar-inertial estimator
+  # Wider vertical coverage observes downhill terrain from the level landing.
   lidar:
-    profile: vlp16
+    profile: os1_32
 
 map:
   # Two columns in the staging hangar (floor z = -0.01, walls at y = +-5.5,

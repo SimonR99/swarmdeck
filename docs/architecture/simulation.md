@@ -247,13 +247,28 @@ experiment by `deploy/docker/ultrafusion/argos_mounts.py`, per robot. The
 upstream tooling takes one fleet-wide `LIDAR_IN_BODY`, which is correct for a
 homogeneous fleet and a fixed, invisible bias on three quarters of this one.
 
-## The bumper scan
+The ROS bridge converts the ARGoS origin pose to the physical `base_link`:
+it rotates the per-platform base-height offset with the full normalized
+quaternion and includes the corresponding angular-velocity cross-offset
+term in body-frame linear velocity. Ground-truth poses labelled `base_link`
+use the same origin conversion. Sensor mounts remain relative to that base;
+map consumers must not compensate platform heights by shifting accumulated
+clouds or levelling each source to its lowest observed floor.
 
-`<ns>/proximity_scan`, which `nav2_params.yaml` documents as the only source
-that sees a rubber duck (0.33 m) or a neighbour's chassis (0.28 m). An ARGoS
-robot has one lidar, so the bumper scan is a second `pointcloud_to_laserscan`
-instance in `flatten` mode over the same cloud, range-limited. The costmap
-parameters are unchanged and still name both sources.
+## Navigation scans on slopes
+
+The physical `<ns>/scan` and `<ns>/proximity_scan` remain available to their
+existing consumers. Nav2 instead consumes `<ns>/nav_scan` and
+`<ns>/nav_proximity_scan`, produced by the bridge from the same observations.
+Their capture-time odometry frames retain XY and yaw but have zero Z, roll
+and pitch. Points are first transformed using the full capture attitude and
+calibrated sensor mount, then projected into that navigation plane.
+
+The proximity projection retains support-relative obstacle-height filtering.
+Nav2's narrow height band therefore operates around the virtual plane, not
+absolute odometry altitude: descending below the start elevation no longer
+discards valid obstacle returns. These projections do not invent ground in
+the lidar's blind region; the planner still requires measured terrain support.
 
 ## Developing against it
 

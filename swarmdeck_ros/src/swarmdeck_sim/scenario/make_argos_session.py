@@ -217,6 +217,13 @@ def controller_block(
     camera_z = spec.base_height + spec.camera_z
     vfov_deg = math.degrees(lidar.vfov)
     h_res = 360.0 / lidar.h_samples
+    # Four 90-degree faces must cover the extreme elevations at their
+    # corners too, where the forward projection is reduced by cos(45°).
+    # Keep one pixel of margin for the serialized angle and edge sampling.
+    face_width = 512
+    face_height = max(
+        192, math.ceil(face_width * math.sqrt(2.0) * math.tan(lidar.vfov)) + 1
+    )
     lines = [
         f'{indent}<swarmdeck_robot_controller id={_attr(rid + "_ctrl")}',
         f"{indent}    library={_attr(LIBRARY)}>",
@@ -232,6 +239,8 @@ def controller_block(
         f"{indent}                          rings={_attr(lidar.rings)}",
         f"{indent}                          vertical_fov={_attr(_vec(-vfov_deg, vfov_deg))}",
         f'{indent}                          horizontal_resolution={_attr(f"{h_res:.4f}")}',
+        f'{indent}                          faces="4"',
+        f"{indent}                          face_resolution={_attr(_vec(face_width, face_height))}",
         f"{indent}                          max_range={_attr(_fmt(lidar.range_max))}",
         # A real time-of-flight unit is specified around +/-3 cm. Zero noise
         # hands the scan matcher an accuracy it will never have on hardware.

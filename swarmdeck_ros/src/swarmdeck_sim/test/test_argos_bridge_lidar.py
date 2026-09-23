@@ -304,6 +304,82 @@ def test_spot_proximity_keeps_low_robots_and_uncertified_steps_visible():
         assert scan_at(height)[ahead] == pytest.approx(2.0, abs=0.01)
 
 
+def test_origin_pose_is_lifted_to_base_link_with_full_se3_lever_arm():
+    pitch = math.radians(16.0)
+    pose = (
+        1.0,
+        2.0,
+        -17.9,
+        1.005 * math.cos(pitch / 2.0),
+        0.0,
+        1.005 * math.sin(pitch / 2.0),
+        0.0,
+    ) + (0.0, 0.0, 0.0, 0.2, -0.3, 0.0)
+    corrected = bridge._base_pose_from_origin(pose, 0.5)
+    assert corrected[2] == pytest.approx(-17.9 + 0.5 * math.cos(pitch), abs=1e-6)
+    assert corrected[0] == pytest.approx(1.0 + 0.5 * math.sin(pitch), abs=1e-6)
+    assert corrected[7] == pytest.approx(-0.15, abs=1e-6)
+    assert corrected[8] == pytest.approx(-0.10, abs=1e-6)
+
+
+def test_navigation_projection_flattens_full_pose_without_altitude_alias():
+    """A pitched capture at z=-17.9 still retains the obstacle endpoint."""
+    pitch = math.radians(16.0)
+    pose = (
+        4.0,
+        -2.0,
+        -17.9,
+        math.cos(pitch / 2.0),
+        0.0,
+        math.sin(pitch / 2.0),
+        0.0,
+    ) + (0.0,) * 6
+    point = np.zeros(1, dtype=bridge.LIDAR_DTYPE)
+    point[0]["x"] = 2.0
+    point[0]["z"] = 0.0
+    point[0]["hit"] = 1
+    ranges = bridge.project_laserscan_navigation(
+        point, lidar_x=0.0, lidar_z=0.4, pose=pose
+    )
+    ahead = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
+    assert ranges[ahead] == pytest.approx(
+        2.0 * math.cos(pitch) + 0.4 * math.sin(pitch), abs=0.02
+    )
+
+
+def test_navigation_proximity_keeps_obstacle_and_rejects_support_return_downhill():
+    """Flattening never bypasses the support-relative ground/step gate."""
+    pitch = math.radians(16.0)
+    pose = (
+        0.0,
+        0.0,
+        -17.9,
+        math.cos(pitch / 2.0),
+        0.0,
+        math.sin(pitch / 2.0),
+        0.0,
+    ) + (0.0,) * 6
+    points = np.zeros(2, dtype=bridge.LIDAR_DTYPE)
+    points["x"] = 2.0
+    points["hit"] = 1
+    lidar_z, base_height = 0.4, 0.1
+    points[0]["z"] = 0.05 - lidar_z - base_height
+    points[1]["z"] = 0.20 - lidar_z - base_height
+    ranges = bridge.project_laserscan_proximity_navigation(
+        points,
+        lidar_x=0.0,
+        lidar_z=lidar_z,
+        base_height=base_height,
+        pose=pose,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
+    )
+    ahead = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
+    assert ranges[ahead] == pytest.approx(
+        2.0 * math.cos(pitch) + 0.1 * math.sin(pitch), abs=0.02
+    )
+
+
 def test_bridge_loads_each_fleet_platform_from_canonical_profiles(tmp_path):
     config = tmp_path / "fleet.yaml"
     config.write_text("""fleet:

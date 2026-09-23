@@ -64,23 +64,28 @@ local_costmap:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
         observation_sources: scan proximity_scan
+        # These topics are planar navigation products.  The bridge applies the
+        # full capture-time odom rotation to each endpoint, then publishes them
+        # in a dynamic z=0 frame.  The physical `/scan` and `/proximity_scan`
+        # topics remain available to SLAM and exploration respectively.
         scan:
-          topic: /<robot_namespace>/scan
-          max_obstacle_height: 2.0
+          topic: /<robot_namespace>/nav_scan
+          min_obstacle_height: -0.01
+          max_obstacle_height: 0.01
           clearing: true
           marking: true
           data_type: LaserScan
           raytrace_max_range: 16.0
           obstacle_max_range: 14.0
         proximity_scan:
-          topic: /<robot_namespace>/proximity_scan
+          topic: /<robot_namespace>/nav_proximity_scan
           clearing: true
           marking: true
           data_type: LaserScan
           raytrace_max_range: 4.0
           obstacle_max_range: 3.8
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0
+          min_obstacle_height: -0.01
+          max_obstacle_height: 0.01
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 3.0
