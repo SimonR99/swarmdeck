@@ -1,3 +1,5 @@
+import type { Pose } from '../types/protocol.ts';
+
 /** Where a robot has been, in the merged world frame its telemetry arrives in. */
 export interface TrailPoint {
   x: number;
@@ -24,10 +26,23 @@ export const TRAIL_RESET_JUMP_M = 3.0;
  */
 export class TrailRecorder {
   private trails = new Map<string, TrailPoint[]>();
+  private sourceTransforms = new Map<string, Pose | undefined>();
 
   /** Returns true when the recorded history changed. */
-  record(robotId: string, x: number, y: number): boolean {
+  record(robotId: string, x: number, y: number, source?: Pose): boolean {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const previous = this.sourceTransforms.get(robotId);
+    // World points from different registrations cannot share the latest
+    // world-to-raster projection. Keep only one registration's history.
+    const changed = previous && source
+      ? Math.hypot(source.x - previous.x, source.y - previous.y) > 0.001
+        || Math.abs(Math.atan2(Math.sin(source.yaw - previous.yaw), Math.cos(source.yaw - previous.yaw))) > 0.001
+      : previous !== source;
+    if (changed) this.clear(robotId);
+    if (!this.sourceTransforms.has(robotId)) {
+      // Anchor to the start of the trail so cumulative drift is detected too.
+      this.sourceTransforms.set(robotId, source ? { ...source } : undefined);
+    }
     let trail = this.trails.get(robotId);
     if (!trail) {
       trail = [];
@@ -59,7 +74,12 @@ export class TrailRecorder {
   }
 
   clear(robotId?: string) {
-    if (robotId === undefined) this.trails.clear();
-    else this.trails.delete(robotId);
+    if (robotId === undefined) {
+      this.trails.clear();
+      this.sourceTransforms.clear();
+    } else {
+      this.trails.delete(robotId);
+      this.sourceTransforms.delete(robotId);
+    }
   }
 }

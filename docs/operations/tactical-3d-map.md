@@ -49,6 +49,10 @@ to 2D retains the bounded 3D scene, camera, and display settings while stopping
 its animation loop and map requests. Returning to 3D immediately resumes the
 loaded tactical map, including when the server returns 304 or is unavailable.
 
+Robot trails are recorded from telemetry in both map views. A source registration
+change beyond 1 mm or 1 mrad clears that robot's trail rather than mixing world
+points from different registrations into a fictitious path.
+
 The server accumulates Robot SLAM clouds in each robot's own map frame on a
 10 cm voxel lattice. A new registered scan adds coverage instead of replacing
 the previous scan. Registration still consumes the latest scan independently.

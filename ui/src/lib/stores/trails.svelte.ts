@@ -1,4 +1,5 @@
 import { TrailRecorder, type TrailPoint } from './trailRecorder';
+import type { Pose } from '../types/protocol';
 
 /**
  * Movement history of the fleet.
@@ -18,8 +19,8 @@ export const trails = {
     return state.revision;
   },
 
-  record(robotId: string, x: number, y: number) {
-    if (recorder.record(robotId, x, y)) state.revision++;
+  record(robotId: string, x: number, y: number, source?: Pose) {
+    if (recorder.record(robotId, x, y, source)) state.revision++;
   },
 
   /**
