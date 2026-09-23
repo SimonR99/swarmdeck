@@ -231,15 +231,21 @@ class AuthorityHeartbeatPublisher:
     which is the fix for MGG's snapshot expiring from an executor stall.
 
     `log(reason)` is called on the heartbeat thread whenever the interval
-    since the last *successful* publication exceeds `period_s` -- that is
-    the only thing MGG actually observes as a gap. A `_snapshot` build
-    failure (stale sensor input, no product yet, ...) that still leaves a
-    valid cached message to re-send is never a gap by itself and is never
-    logged here (`_snapshot` tracks its own build-failure reason
-    separately, in `status.json`'s ``authority_gap_*``); only an
-    interruption to the *wire* heartbeat is. Callers rate-limit repeated
-    reasons themselves (e.g. ROS's ``throttle_duration_sec``), since a
-    stall generally outlasts one tick.
+    between two successful publications exceeds `period_s` -- that is the
+    only thing MGG actually observes as a gap. Each completion is stamped
+    with the clock only *after* `_publish` returns, never before it is
+    called: sampling it first would measure the interval between publish
+    *attempts*, so a `_publish` call that itself blocks for a long time
+    would both hide its own gap (the next tick's `now` would still be close
+    to the pre-call sample) and falsely blame an unrelated, later tick for
+    it (that tick would see a large gap between its own pre-call sample and
+    the earlier one). A `_snapshot` build failure (stale sensor input, no
+    product yet, ...) that still leaves a valid cached message to re-send
+    is never a gap by itself and is never logged here (`_snapshot` tracks
+    its own build-failure reason separately, in `status.json`'s
+    ``authority_gap_*``); only an interruption to the *wire* heartbeat is.
+    Callers rate-limit repeated reasons themselves (e.g. ROS's
+    ``throttle_duration_sec``), since a stall generally outlasts one tick.
 
     `epoch_identity()` is a cheap, zero-argument callable (a `stat()`, never
     a read) returning the durable map epoch's current on-disk identity, or
@@ -315,12 +321,23 @@ class AuthorityHeartbeatPublisher:
             message = self._message
             reason_if_no_message = self._no_message_reason
             last = self._last_published_at
-        now = self._clock()
         gap_from = self._started_at if last is None else last
         if message is not None:
             self._publish(message)
+            # Stamped only after `_publish` returns, never before it is
+            # called: sampling the clock first would measure the interval
+            # between publish *attempts*, not between successful
+            # completions, and would let a publish call that itself blocks
+            # for a long time hide its own gap from the very next tick
+            # (which would then see a falsely small `now - last`) while
+            # blaming an unrelated, later tick for it instead.
+            now = self._clock()
             with self._lock:
                 self._last_published_at = now
+            reason = "the thread was late"
+        else:
+            now = self._clock()
+            reason = reason_if_no_message
         if now - gap_from > self._period_s:
             # A message was ready and this tick still published late: the
             # heartbeat thread itself was delayed. No message at all is
@@ -328,7 +345,6 @@ class AuthorityHeartbeatPublisher:
             # by an epoch change; either way this is never conflated with a
             # `_snapshot` build failure that left a perfectly good cached
             # message being re-sent on time.
-            reason = "the thread was late" if message is not None else reason_if_no_message
             self._log(reason)
 
     def run(self, closed):

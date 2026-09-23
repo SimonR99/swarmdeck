@@ -434,6 +434,61 @@ def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
     assert logged == ["the thread was late"]
 
 
+def test_authority_heartbeat_publisher_stamps_completion_after_publish_returns(
+    bridge_module,
+):
+    """The reviewer's counterexample: a publish call that itself blocks for
+    a long time must not corrupt the *next* tick's gap measurement by being
+    sampled before the call (which would show a falsely small gap for the
+    tick that actually blocked, and a falsely large one for the unrelated
+    tick right after it); the completion timestamp is sampled only after
+    `_publish` returns.
+    """
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    calls = []
+
+    def fake_publish(message):
+        calls.append(message)
+        published.append(message)
+        if len(calls) == 2:
+            # The second tick's own publish call blocks for 10 s, as a slow
+            # write or a blocked DDS call might, advancing the clock while
+            # still inside `_publish`.
+            now[0] += 10.0
+
+    publisher = Publisher(
+        fake_publish,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: None,
+        clock=lambda: now[0],
+    )
+    publisher.update("authority-v1", "epoch-0")
+
+    now[0] += 1.0
+    publisher.tick()  # completes at t=1
+    assert published == ["authority-v1"]
+    assert logged == []
+
+    now[0] += 1.0
+    publisher.tick()  # starts at t=2; `_publish` blocks until t=12
+    assert published == ["authority-v1"] * 2
+    # The true 11 s gap since the first completion (t=1) is caught here,
+    # exactly because completion is stamped after `_publish` returns.
+    assert logged == ["the thread was late"]
+
+    now[0] += 1.0
+    publisher.tick()  # starts at t=13; `_publish` is instant, completes at t=13
+    assert published == ["authority-v1"] * 3
+    # No new log entry: the true interval since the second tick's own
+    # completion (t=12) is 1 s. A pre-publish timestamp would have compared
+    # this tick's start (t=13) against the second tick's *pre-call* sample
+    # (t=2) instead, falsely reporting an ~11 s gap that never happened.
+    assert logged == ["the thread was late"]
+
+
 def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     bridge_module,
 ):
