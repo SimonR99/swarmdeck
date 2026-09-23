@@ -58,6 +58,8 @@ log = logging.getLogger(__name__)
 REFRESH_INTERVAL_S = 3.0
 MAX_POINTS = 8_000_000
 CACHE_BYTES = 256 * 1024 * 1024
+POSE_REBUILD_TRANSLATION_M = 0.05
+POSE_REBUILD_YAW_RAD = 0.01
 
 
 class _ChunkCache:
@@ -207,12 +209,18 @@ class DeploymentRasterRefresher:
         # Aggregate cell histograms bound retained history independently of raw
         # point count; no per-submap point products remain resident.
         self.contributions: dict[str, _SubmapContribution] = {}
+        self._placement_cache: dict[str, dict[str, Mapping[str, Any]]] = {}
+        self._submap_key_cache: OrderedDict[tuple[Any, ...], dict[str, str]] = (
+            OrderedDict()
+        )
 
     def reset(self) -> None:
         self.built = None
         self.failed = None
         self.robot_built.clear()
         self.contributions.clear()
+        self._placement_cache.clear()
+        self._submap_key_cache.clear()
         self.chunks.clear()
 
     @staticmethod
@@ -235,6 +243,25 @@ class DeploymentRasterRefresher:
             separators=(",", ":"),
         )
 
+    def _submap_keys(self, view: Mapping[str, Any]) -> dict[str, str]:
+        submap_ids = tuple(
+            str(submap["submap_id"]) for submap in view["selected"]["submaps"]
+        )
+        cache_key = (view.get("component_id"), view.get("snapshot_id"), submap_ids)
+        cached = self._submap_key_cache.get(cache_key)
+        if cached is not None:
+            self._submap_key_cache.move_to_end(cache_key)
+            return cached
+        keys = {
+            str(submap["submap_id"]): self._submap_key(submap)
+            for submap in view["selected"]["submaps"]
+        }
+        self._submap_key_cache[cache_key] = keys
+        self._submap_key_cache.move_to_end(cache_key)
+        while len(self._submap_key_cache) > 16:
+            self._submap_key_cache.popitem(last=False)
+        return keys
+
     @staticmethod
     def _compress_histogram(hist: dict[int, int]) -> _HeightHistogram:
         result = _HeightHistogram({})
@@ -252,14 +279,15 @@ class DeploymentRasterRefresher:
             return None, gathered
         cols = np.floor(points[:, 0] / DEFAULT_CELL_M).astype(np.int64)
         rows = np.floor(points[:, 1] / DEFAULT_CELL_M).astype(np.int64)
-        histograms: dict[int, dict[int, int]] = {}
-        for col, row, z in zip(cols, rows, points[:, 2], strict=True):
-            cell = (int(row) << 32) ^ (int(col) & 0xFFFFFFFF)
-            bins = histograms.setdefault(cell, {})
-            zbin = int(round(float(z) / HIST_BIN_M))
-            bins[zbin] = bins.get(zbin, 0) + 1
+        cells = (rows << np.int64(32)) ^ (cols & np.int64(0xFFFFFFFF))
+        zbins = np.rint(points[:, 2] / HIST_BIN_M).astype(np.int64)
+        pairs = np.column_stack((cells, zbins))
+        unique, counts = np.unique(pairs, axis=0, return_counts=True)
+        by_cell: dict[int, dict[int, int]] = {}
+        for (cell, zbin), count in zip(unique, counts, strict=True):
+            by_cell.setdefault(int(cell), {})[int(zbin)] = int(count)
         histograms = {
-            cell: self._compress_histogram(bins) for cell, bins in histograms.items()
+            cell: self._compress_histogram(bins) for cell, bins in by_cell.items()
         }
         low_x = float(points[:, 0].min() - DEFAULT_MARGIN_M)
         low_y = float(points[:, 1].min() - DEFAULT_MARGIN_M)
@@ -284,11 +312,10 @@ class DeploymentRasterRefresher:
         ray_rows, ray_cols = np.nonzero(swept.reshape(height, width))
         row0 = int(math.floor(origin_y / DEFAULT_CELL_M))
         col0 = int(math.floor(origin_x / DEFAULT_CELL_M))
-        rays = {
-            ((int(ray_rows[index]) + row0) << 32)
-            ^ ((int(ray_cols[index]) + col0) & 0xFFFFFFFF)
-            for index in range(len(ray_rows))
-        }
+        ray_cells = ((ray_rows.astype(np.int64) + row0) << np.int64(32)) ^ (
+            (ray_cols.astype(np.int64) + col0) & np.int64(0xFFFFFFFF)
+        )
+        rays = {int(cell) for cell in ray_cells.tolist()}
         return (
             _SubmapContribution(
                 key=key,
@@ -421,10 +448,7 @@ class DeploymentRasterRefresher:
         self, scope: str, view: Mapping[str, Any]
     ) -> tuple[KeyframeRaster, dict[str, Any]]:
         previous = self.contributions.pop(scope, None)
-        current_keys = {
-            str(submap["submap_id"]): self._submap_key(submap)
-            for submap in view["selected"]["submaps"]
-        }
+        current_keys = self._submap_keys(view)
         append_only = (
             previous is not None
             and all(
@@ -486,6 +510,46 @@ class DeploymentRasterRefresher:
             "rebuilt_submaps": rebuilt,
         }
 
+    @staticmethod
+    def _pose_delta_exceeds(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+        a_nav = se2_of(a["T_world_navigation"])
+        b_nav = se2_of(b["T_world_navigation"])
+        a_component = se2_of(a["T_world_component"])
+        b_component = se2_of(b["T_world_component"])
+        for first, second in ((a_nav, b_nav), (a_component, b_component)):
+            if (
+                math.hypot(first["x"] - second["x"], first["y"] - second["y"])
+                >= POSE_REBUILD_TRANSLATION_M
+            ):
+                return True
+            yaw_delta = math.atan2(
+                math.sin(first["yaw"] - second["yaw"]),
+                math.cos(first["yaw"] - second["yaw"]),
+            )
+            if abs(yaw_delta) >= POSE_REBUILD_YAW_RAD:
+                return True
+        return False
+
+    def _placements_for_raster(
+        self, session_id: str, placements: Mapping[str, Mapping[str, Any]]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        previous = self._placement_cache.get(session_id)
+        if previous is None or set(previous) != set(placements):
+            current = dict(placements)
+            self._placement_cache = {session_id: current}
+            return current
+        for robot_id, placement in placements.items():
+            old = previous[robot_id]
+            if (
+                old.get("component_id") != placement.get("component_id")
+                or old.get("solution_order") != placement.get("solution_order")
+                or self._pose_delta_exceeds(old, placement)
+            ):
+                current = dict(placements)
+                self._placement_cache = {session_id: current}
+                return current
+        return previous
+
     # ------------------------------------------------------------ event loop
 
     async def tick(self) -> dict[str, Any]:
@@ -532,6 +596,7 @@ class DeploymentRasterRefresher:
                 self.chunks.clear()
                 self.contributions.clear()
             self.built = None
+            self._placement_cache.clear()
             return {"status": "no mission", "retired": retired}
 
         # A verified merge (a component two or more robots publish) is the
@@ -568,6 +633,7 @@ class DeploymentRasterRefresher:
                 for key, value in self.contributions.items()
                 if key not in retired
             }
+        raster_placements = self._placements_for_raster(session_id, placements)
         robot_reports = self.refresh_robots(
             session_id, catalogue, frames, robot_scopes, generation
         )
@@ -584,14 +650,16 @@ class DeploymentRasterRefresher:
                 )
                 transforms = {robot: se2_of(frames[robot][1]) for robot in robots}
             else:
-                if len(placements) < 2:
+                if len(raster_placements) < 2:
                     return {
                         "status": "no composite",
                         "scope": scope,
                         "retired": retired,
                         "robot_rasters": robot_reports,
                     }
-                view = replica_views.deployment_view(catalogue, session_id, placements)
+                view = replica_views.deployment_view(
+                    catalogue, session_id, raster_placements
+                )
                 if view is None:
                     return {
                         "status": "no composite",
@@ -715,7 +783,14 @@ class DeploymentRasterRefresher:
             ]
             view = {**view, "selected": {**view["selected"], "submaps": owned}}
             snapshot = replica_views.digest(
-                [component, transform, [self._submap_key(submap) for submap in owned]]
+                [
+                    component,
+                    transform,
+                    [
+                        self._submap_keys(view)[str(submap["submap_id"])]
+                        for submap in owned
+                    ],
+                ]
             )
             if self.robot_built.get(scope) == snapshot and map_routes.has_optimized_map(
                 scope

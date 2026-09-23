@@ -92,6 +92,14 @@ class Robot:
         return time.monotonic() - self.last_attended
 
     def to_state(self) -> dict[str, Any]:
+        live_mapping = self.live_mapping if self.online else None
+        if live_mapping is not None:
+            live_mapping = {
+                key: value
+                for key, value in live_mapping.items()
+                if key
+                not in {"planned_path", "global_planned_path", "local_planned_path"}
+            }
         return {
             "type": "robot_state",
             "robot_id": self.robot_id,
@@ -110,7 +118,7 @@ class Robot:
             "exploration_reason": self.exploration_reason,
             "exploration_goal": self.exploration_goal,
             "peer_slam": self.peer_slam if self.online else None,
-            "live_mapping": self.live_mapping if self.online else None,
+            "live_mapping": live_mapping,
             "fleet_exploration_status": (
                 self.fleet_exploration_status if self.online else "unknown"
             ),
@@ -405,10 +413,18 @@ class Registry:
         return [r.to_state() for r in self.robots.values()]
 
 
-def _epoch_store():
-    from ..api.autonomy_routes import store
+class _CachedEpochStore:
+    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
+        from ..api.map_routes import cached_map_epoch
 
-    return store()
+        return cached_map_epoch(robot_id, session_id)
+
+
+_cached_epoch_store = _CachedEpochStore()
+
+
+def _epoch_store():
+    return _cached_epoch_store
 
 
 def _command_guard(robot_id):

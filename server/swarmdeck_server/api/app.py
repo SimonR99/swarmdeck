@@ -126,6 +126,10 @@ RESET_TIMEOUT_S = 25.0
 # Robots that have been sent `reset` and have not yet answered. Mutated from the
 # adapter socket, awaited by reset_fleet(); _reset_done fires when it empties.
 _reset_pending: set[str] = set()
+
+STATE_LOOP_INTERVAL_S = 0.2
+STATE_KEEPALIVE_S = 1.0
+_state_loop_cache: dict[str, tuple[str, float]] = {}
 # robot_id → the `steps` map from a reset_done that reported ok: false. Held
 # until reset_fleet() has finished clearing, so the alert survives that clear.
 _reset_failures: dict[str, dict[str, Any]] = {}
@@ -448,43 +452,76 @@ def suppress_alert(alert_id: str) -> None:
 
 
 async def state_loop() -> None:
-    """5 Hz robot_state fan-out (FR-R3)."""
+    """Change-only robot_state fan-out with a 1 Hz per-robot keep-alive."""
     while True:
-        await asyncio.sleep(0.2)
-        threshold = float(settings_store.value["unattended_threshold_s"])
-        for r in list(registry.robots.values()):
-            await broadcast(robot_state(r))
+        await asyncio.sleep(STATE_LOOP_INTERVAL_S)
+        await state_loop_tick()
 
-            aid = f"unattended_{r.robot_id}"
-            if r.online and r.unattended_s > threshold:
-                await raise_alert(
-                    aid,
-                    "warn",
-                    "unattended",
-                    f"{r.robot_id} unattended for {int(r.unattended_s)} s",
-                    r.robot_id,
-                )
-            elif r.unattended_s <= threshold:
-                await clear_alert(aid)
 
-            did = f"disconnect_{r.robot_id}"
-            if not r.online:
-                await raise_alert(
-                    did,
-                    "critical",
-                    "adapter_disconnect",
-                    f"{r.robot_id} adapter disconnected",
-                    r.robot_id,
-                )
-            else:
-                await clear_alert(did)
+def _robot_state_signature(message: dict[str, Any]) -> str:
+    stable = {
+        key: value
+        for key, value in message.items()
+        if key not in {"t_mono", "t_wall", "t_sess", "unattended_s"}
+    }
+    return json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
-            sid = f"stream_{r.robot_id}"
-            frozen = frozen_camera_message(r)
-            if frozen is not None:
-                await raise_alert(sid, "warn", "stream_loss", frozen, r.robot_id)
-            else:
-                await clear_alert(sid)
+
+async def state_loop_tick(now: float | None = None) -> None:
+    """Run one state-loop iteration; exposed for focused scheduling tests."""
+    now = time.monotonic() if now is None else now
+    threshold = float(settings_store.value["unattended_threshold_s"])
+    has_gui_clients = bool(_gui_clients)
+    if not has_gui_clients:
+        _state_loop_cache.clear()
+    seen: set[str] = set()
+    for r in list(registry.robots.values()):
+        if has_gui_clients:
+            state = robot_state(r)
+            signature = _robot_state_signature(state)
+            previous = _state_loop_cache.get(r.robot_id)
+            if (
+                previous is None
+                or previous[0] != signature
+                or now - previous[1] >= STATE_KEEPALIVE_S
+            ):
+                await broadcast(state)
+                _state_loop_cache[r.robot_id] = (signature, now)
+            seen.add(r.robot_id)
+
+        aid = f"unattended_{r.robot_id}"
+        if r.online and r.unattended_s > threshold:
+            await raise_alert(
+                aid,
+                "warn",
+                "unattended",
+                f"{r.robot_id} unattended for {int(r.unattended_s)} s",
+                r.robot_id,
+            )
+        elif r.unattended_s <= threshold:
+            await clear_alert(aid)
+
+        did = f"disconnect_{r.robot_id}"
+        if not r.online:
+            await raise_alert(
+                did,
+                "critical",
+                "adapter_disconnect",
+                f"{r.robot_id} adapter disconnected",
+                r.robot_id,
+            )
+        else:
+            await clear_alert(did)
+
+        sid = f"stream_{r.robot_id}"
+        frozen = frozen_camera_message(r)
+        if frozen is not None:
+            await raise_alert(sid, "warn", "stream_loss", frozen, r.robot_id)
+        else:
+            await clear_alert(sid)
+
+    for robot_id in set(_state_loop_cache) - seen:
+        _state_loop_cache.pop(robot_id, None)
 
 
 async def network_loop() -> None:
@@ -942,10 +979,10 @@ async def get_optimized_index() -> dict[str, Any]:
 
 
 @app.get("/api/map/optimized/{scope}")
-async def get_optimized_map(scope: str) -> Response:
+async def get_optimized_map(scope: str, request: Request) -> Response:
     from .map_routes import get_optimized_map as handler
 
-    return await handler(scope)
+    return await handler(scope, request.headers.get("if-none-match"))
 
 
 @app.get("/api/map/gaussians")
@@ -1417,6 +1454,12 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
     elif kind == "robot_state":
         if registry._sinks.get(msg.get("robot_id")) is not ws:
             return False
+        mission = os.environ.get("SWARMDECK_MISSION_ID")
+        robot_id = msg.get("robot_id")
+        if mission and isinstance(robot_id, str):
+            from .map_routes import cached_map_epoch_async
+
+            await cached_map_epoch_async(robot_id, mission)
         robot = registry.update_state(msg)
         if robot is not None:
             await sync_navigation_alert(robot)
