@@ -437,10 +437,11 @@ def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None
 def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
     tmp_path, monkeypatch
 ) -> None:
-    """A component or planner map the persistent native runtime just wrote is
-    published by trusting its reported hash, not by re-hashing the file: the
-    process that wrote the bytes already hashed them, in the same request.
-    `stat` still catches a size disagreement (a truncated or wrong write).
+    """A component the persistent native runtime just wrote is published by
+    trusting its reported hash, not by re-hashing the file: the process that
+    wrote the bytes already hashed them, in the same request. `stat` still
+    catches a size disagreement (a truncated or wrong write). The planner
+    map branch (`planner_maps=True`) is covered separately below.
     """
     peer = tmp_path / "mission" / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
@@ -488,6 +489,69 @@ def test_persistent_mode_still_rejects_a_size_mismatch_without_rehashing(
         second = manifest("component:a", 1)
         write_snapshot(peer, "b" * 64, [second])
         with pytest.raises(WorkerError, match="does not match its response"):
+            worker.process_peer(peer)
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_trusts_a_fresh_planner_output_hash_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """The planner map branch of the same trust: with `planner_maps=True`,
+    neither the component nor its `.sdpg` planner map is re-hashed locally;
+    both trust the native runtime's own reported hash, `stat`-checked only
+    for size.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path, importer=fake_runtime(tmp_path), planner_maps=True, timeout_s=1
+    )
+    try:
+        result = worker.process_peer(peer)
+        assert result.published
+        index = json.loads((peer / "mola/index.json").read_text())
+        artifact = index["artifacts"][0]
+        component_path = peer / "mola" / artifact["path"]
+        planner = artifact["planner"]
+        planner_path = peer / "mola" / planner["path"]
+        # Both published hashes are exactly what the fake runtime reported
+        # (`forbidden` never raised above, for either artifact).
+        assert artifact["sha256"] == hashlib.sha256(component_path.read_bytes()).hexdigest()
+        assert planner["sha256"] == hashlib.sha256(planner_path.read_bytes()).hexdigest()
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_still_rejects_a_planner_size_mismatch_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """The planner map branch of the size-mismatch rejection: `stat` alone,
+    never a hash, still catches a wrong claimed planner output size.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
+        planner_maps=True,
+        timeout_s=1,
+    )
+    try:
+        assert worker.process_peer(peer).published
+        second = manifest("component:a", 1)
+        write_snapshot(peer, "b" * 64, [second])
+        with pytest.raises(WorkerError, match="planner artifact"):
             worker.process_peer(peer)
     finally:
         worker.close()
