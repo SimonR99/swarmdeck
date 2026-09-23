@@ -82,7 +82,9 @@ def rig(monkeypatch):
         "info",
         "depth",
     ):
-        setattr(robot, "pub_" + name, Mock())
+        publisher = Mock()
+        publisher.get_subscription_count.return_value = 1
+        setattr(robot, "pub_" + name, publisher)
     node = bridge.ArgosBridge.__new__(bridge.ArgosBridge)
     node._robot = lambda _: robot
     node.get_logger = Mock()
@@ -91,8 +93,9 @@ def rig(monkeypatch):
     return node, robot
 
 
-def packet(sensor_tick=90, valid=True, hits=0, max_range=30.0):
+def packet(sensor_tick=90, valid=True, hits=0, max_range=30.0, odom_pose=None):
     pose = (1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0) + (0.0,) * 6
+    odom_pose = pose if odom_pose is None else odom_pose
     points = np.zeros(hits, dtype=bridge.LIDAR_DTYPE)
     points["x"] = 2.0
     points["hit"] = 1
@@ -100,7 +103,7 @@ def packet(sensor_tick=90, valid=True, hits=0, max_range=30.0):
         b"\x01r"
         + struct.pack("<13d", *pose)
         + struct.pack(
-            "<BB13dI", 1, valid, *(pose if valid else (0.0,) * 13), sensor_tick
+            "<BB13dI", 1, valid, *(odom_pose if valid else (0.0,) * 13), sensor_tick
         )
         + b"\x00\x00"  # No encoders or IMU.
         + struct.pack("<BIIIfI", 1, sensor_tick, 1, 1, max_range, hits)
@@ -155,6 +158,13 @@ def test_nonempty_cloud_and_scans_share_capture_time(rig):
     assert stamps[0].nanosec == 900_000_000
     metadata = json.loads(robot.pub_capture.publish.call_args.args[0].data)
     expected_points = np.asarray([[2.0, 0.0, 0.0]], dtype="<f4")
+    assert robot.pub_points.publish.call_args.args[0].data == np.asarray(
+        [[2.0, 0.0, 0.0, 0.0]], dtype="<f4"
+    ).tobytes()
+    assert robot.pub_scan.publish.call_args.args[0].ranges == [
+        2.0 if i == int(np.floor(-bridge.SCAN_ANGLE_MIN * bridge.INV_ANGLE_INC)) else float("inf")
+        for i in range(bridge.SCAN_BEAMS)
+    ]
     assert metadata == {
         "clock": "ros_sim_time",
         "first_return": True,
@@ -171,6 +181,87 @@ def test_nonempty_cloud_and_scans_share_capture_time(rig):
         "source_contract": "argos.photorealistic_lidar.hit_endpoints.single_tick.v1",
         "stamp_ns": 900_000_000,
     }
+
+
+def test_unchanged_scan_and_pose_reuses_all_projections_across_odom_ticks(rig, monkeypatch):
+    node, robot = rig
+    calls = {"cloud": 0, "slice": 0, "prox": 0, "nav": 0, "nav_prox": 0}
+    for key, name in (("slice", "project_laserscan_slice"),
+                      ("prox", "project_laserscan_proximity"),
+                      ("nav", "project_laserscan_navigation"),
+                      ("nav_prox", "project_laserscan_proximity_navigation")):
+        original = getattr(bridge, name)
+        def counted(*args, _key=key, _original=original, **kwargs):
+            calls[_key] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(bridge, name, counted)
+    original_sha = bridge.hashlib.sha256
+    def counted_sha(*args, **kwargs):
+        calls["cloud"] += 1
+        return original_sha(*args, **kwargs)
+    monkeypatch.setattr(bridge.hashlib, "sha256", counted_sha)
+    read(node, Socket(packet(sensor_tick=90, hits=1)))
+    first = robot.pub_points.publish.call_args.args[0].data
+    first_ranges = robot.pub_scan.publish.call_args.args[0].ranges
+    nav_ranges = robot.pub_nav_scan.publish.call_args.args[0].ranges
+    nav_prox_ranges = robot.pub_nav_prox.publish.call_args.args[0].ranges
+    read(node, Socket(packet(sensor_tick=91, hits=1)))
+    # A new velocity sample is not a new pose for the scan projection.
+    moving_velocity = (1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0) + (0.5,) + (0.0,) * 5
+    read(node, Socket(packet(sensor_tick=92, hits=1, odom_pose=moving_velocity)))
+    assert robot.pub_points.publish.call_args.args[0].data == first
+    assert robot.pub_scan.publish.call_args.args[0].ranges == first_ranges
+    assert robot.pub_nav_scan.publish.call_args.args[0].ranges == nav_ranges
+    assert robot.pub_nav_prox.publish.call_args.args[0].ranges == nav_prox_ranges
+    assert calls == {"cloud": 1, "slice": 1, "prox": 1, "nav": 1, "nav_prox": 1}
+
+
+def test_changed_pose_recomputes_nav_projection_with_unchanged_raw_scan(rig, monkeypatch):
+    node, robot = rig
+    project = bridge.project_laserscan_navigation
+    nav_calls = Mock(wraps=project)
+    monkeypatch.setattr(bridge, "project_laserscan_navigation", nav_calls)
+    read(node, Socket(packet(sensor_tick=90, hits=1)))
+    first = robot.pub_nav_scan.publish.call_args.args[0].ranges
+    pitch = np.deg2rad(16.0)
+    changed = (1.0, 2.0, 0.0, np.cos(pitch / 2), 0.0,
+               np.sin(pitch / 2), 0.0) + (0.0,) * 6
+    read(node, Socket(packet(sensor_tick=91, hits=1, odom_pose=changed)))
+    second = robot.pub_nav_scan.publish.call_args.args[0].ranges
+    assert nav_calls.call_count == 2
+    assert second != first
+    assert second == project(*nav_calls.call_args.args,
+                             **nav_calls.call_args.kwargs).tolist()
+
+
+def test_unsubscribed_scan_products_are_not_built_and_late_subscriber_receives_next(rig, monkeypatch):
+    node, robot = rig
+    for name in ("points", "capture", "scan", "nav_scan", "prox", "nav_prox",
+                 "image", "info", "depth"):
+        getattr(robot, "pub_" + name).get_subscription_count.return_value = 0
+    project = Mock(side_effect=AssertionError("unsubscribed projection"))
+    monkeypatch.setattr(bridge, "project_laserscan_slice", project)
+    read(node, Socket(packet(sensor_tick=90, hits=1)))
+    project.assert_not_called()
+    robot.pub_scan.get_subscription_count.return_value = 1
+    # Later readers see the next observation even when the raycast is unchanged.
+    monkeypatch.setattr(bridge, "project_laserscan_slice", lambda *a, **kw: np.full(bridge.SCAN_BEAMS, np.inf))
+    read(node, Socket(packet(sensor_tick=91, hits=1)))
+    robot.pub_scan.publish.assert_called_once()
+    robot.pub_image.publish.assert_not_called()
+
+
+def test_late_capture_subscriber_gets_digest_after_point_cloud_cache_warmed(rig):
+    node, robot = rig
+    robot.pub_capture.get_subscription_count.return_value = 0
+    robot.pub_nav_scan.get_subscription_count.return_value = 0
+    robot.pub_nav_prox.get_subscription_count.return_value = 0
+    read(node, Socket(packet(sensor_tick=90, hits=1)))
+    robot.pub_capture.publish.assert_not_called()
+    robot.pub_capture.get_subscription_count.return_value = 1
+    read(node, Socket(packet(sensor_tick=91, hits=1)))
+    digest = json.loads(robot.pub_capture.publish.call_args.args[0].data)["points_sha256"]
+    assert digest == hashlib.sha256(np.asarray([[2.0, 0.0, 0.0]], dtype="<f4").tobytes()).hexdigest()
 
 
 def test_tick_zero_sensors_are_drained_but_withheld_until_capture_time_exists(rig):

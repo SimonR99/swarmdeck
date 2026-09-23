@@ -369,29 +369,21 @@ class RobotBridge(
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
-        # Three streams off one `rgbd_camera`, bridged by session.launch.py. The
-        # colour frame is what the operator sees and what the detector runs on;
-        # the depth image and the intrinsics are what turn a detection box into a
-        # point on the map. A robot whose depth is missing still detects and
-        # still streams video — it just reports no `map_position`.
-        node.create_subscription(
-            Image,
-            f"/{robot_id}/camera/image",
-            self._on_camera,
-            qos_profile_sensor_data,
-        )
-        node.create_subscription(
-            Image,
-            f"/{robot_id}/camera/depth_image",
-            self._on_camera_depth,
-            qos_profile_sensor_data,
-        )
-        node.create_subscription(
-            CameraInfo,
-            f"/{robot_id}/camera/camera_info",
-            self._on_camera_info,
-            qos_profile_sensor_data,
-        )
+        # The independent media process subscribes to RGB for dashboard video.
+        # Only perception needs these three streams in the adapter itself.
+        if self._detector is not None:
+            node.create_subscription(
+                Image, f"/{robot_id}/camera/image", self._on_camera,
+                qos_profile_sensor_data,
+            )
+            node.create_subscription(
+                Image, f"/{robot_id}/camera/depth_image", self._on_camera_depth,
+                qos_profile_sensor_data,
+            )
+            node.create_subscription(
+                CameraInfo, f"/{robot_id}/camera/camera_info", self._on_camera_info,
+                qos_profile_sensor_data,
+            )
 
         self.path_client = ActionClient(node, FollowPath, f"/{robot_id}/follow_path")
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)

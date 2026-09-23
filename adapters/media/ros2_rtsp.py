@@ -2,8 +2,8 @@
 """Push a ROS 2 camera topic to an H.264 RTSP server with low latency.
 
 `--topic` is a JPEG CompressedImage (OAK / RealSense). `--raw-topic` is a
-sensor_msgs/Image fallback for drivers such as usb_cam that may never publish
-compressed JPEG. Prefer the compressed topic when both are present.
+sensor_msgs/Image fallback that enters the H.264 encoder as raw pixels, without
+a JPEG round trip. Prefer the compressed topic when both are present.
 """
 
 from __future__ import annotations
@@ -25,7 +25,11 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jpeg_frame import image_to_jpeg  # noqa: E402
+from jpeg_frame import raw_frame_bytes  # noqa: E402
+
+# Keep JPEG preferred through brief delivery gaps (20 frames at the default
+# 10 fps), but resume raw video if that camera's compressed stream disappears.
+COMPRESSED_PREFERENCE_TIMEOUT_S = 2.0
 
 
 class Ros2JpegRtspPublisher(Node):
@@ -48,10 +52,7 @@ class Ros2JpegRtspPublisher(Node):
         self._frame_period_s = 1.0 / fps
         self._last_frame_at = 0.0
         pipeline = (
-            "appsrc name=source is-live=true block=false format=time do-timestamp=true "
-            f'max-bytes=100000 caps="image/jpeg,framerate={fps}/1" '
-            "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
-            "! jpegparse ! jpegdec "
+            "input-selector name=selector sync-streams=false cache-buffers=false "
             "! videoconvert ! videoscale method=bilinear "
             f"! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 "
             f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate_kbps} "
@@ -66,10 +67,22 @@ class Ros2JpegRtspPublisher(Node):
             # but no publishing session.  TCP also makes a broken session
             # observable to the bus monitor so the outer loop can rebuild it.
             f'! rtspclientsink location="{rtsp_url}" protocols=tcp '
-            "latency=0 tcp-timeout=5000000"
+            "latency=0 tcp-timeout=5000000 "
+            "appsrc name=source is-live=true block=false format=time do-timestamp=true "
+            f'max-bytes=100000 caps="image/jpeg,framerate={fps}/1" '
+            "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
+            "! jpegparse ! jpegdec ! selector.sink_0 "
+            "appsrc name=raw_source is-live=true block=false format=time do-timestamp=true "
+            "max-bytes=1000000 "
+            "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
+            "! selector.sink_1"
         )
         self.pipeline = Gst.parse_launch(pipeline)
         self.source = self.pipeline.get_by_name("source")
+        self.raw_source = self.pipeline.get_by_name("raw_source")
+        self.selector = self.pipeline.get_by_name("selector")
+        self._raw_caps = None
+        self._last_compressed_at = 0.0
         self.bus = self.pipeline.get_bus()
         self._failed = threading.Event()
         self._monitor = threading.Thread(target=self._monitor_bus, daemon=True)
@@ -86,32 +99,49 @@ class Ros2JpegRtspPublisher(Node):
                 Image, raw_topic, self._on_raw_frame, qos_profile_sensor_data
             )
 
-    def _push_jpeg(self, payload: bytes) -> None:
-        now = time.monotonic()
-        if now - self._last_frame_at < self._frame_period_s:
-            return
-        # appsrc owns a queue before the explicitly leaky GStreamer queue.
-        # Never allow an old teleoperation frame to wait in either one.
-        if self.source.get_property("current-level-bytes") > 0:
-            return
-        self._last_frame_at = now
+    def _can_push(self, source) -> bool:
+        return (
+            time.monotonic() - self._last_frame_at >= self._frame_period_s
+            and source.get_property("current-level-bytes") == 0
+        )
+
+    def _push_frame(self, source, payload: bytes, pad_name: str) -> None:
+        self.selector.set_property("active-pad", self.selector.get_static_pad(pad_name))
+        self._last_frame_at = time.monotonic()
         buffer = Gst.Buffer.new_allocate(None, len(payload), None)
         buffer.fill(0, payload)
-        flow = self.source.emit("push-buffer", buffer)
+        flow = source.emit("push-buffer", buffer)
         if flow not in (Gst.FlowReturn.OK, Gst.FlowReturn.FLUSHING):
             self.get_logger().warning(f"camera encoder rejected a frame: {flow}")
 
     def _on_frame(self, msg: CompressedImage) -> None:
         if self._failed.is_set() or (msg.format and "jpeg" not in msg.format.lower()):
             return
-        self._push_jpeg(bytes(msg.data))
+        self._last_compressed_at = time.monotonic()
+        if self._can_push(self.source):
+            self._push_frame(self.source, bytes(msg.data), "sink_0")
 
     def _on_raw_frame(self, msg: Image) -> None:
-        if self._failed.is_set():
+        if (
+            self._failed.is_set()
+            or time.monotonic() - self._last_compressed_at < COMPRESSED_PREFERENCE_TIMEOUT_S
+            or not self._can_push(self.raw_source)
+        ):
             return
-        payload = image_to_jpeg(msg)
-        if payload:
-            self._push_jpeg(payload)
+        frame = raw_frame_bytes(msg)
+        if frame is None:
+            return
+        format_name, payload = frame
+        caps = (format_name, msg.width, msg.height)
+        if caps != self._raw_caps:
+            self.raw_source.set_property(
+                "caps", Gst.Caps.from_string(
+                    f"video/x-raw,format={format_name},width={msg.width},"
+                    f"height={msg.height},framerate={round(1 / self._frame_period_s)}/1"
+                ),
+            )
+            self._raw_caps = caps
+        self._push_frame(self.raw_source, payload, "sink_1")
 
     def _monitor_bus(self) -> None:
         while rclpy.ok() and not self._failed.is_set():
@@ -132,6 +162,7 @@ class Ros2JpegRtspPublisher(Node):
     def close(self) -> None:
         try:
             self.source.emit("end-of-stream")
+            self.raw_source.emit("end-of-stream")
         except Exception:
             pass
         try:

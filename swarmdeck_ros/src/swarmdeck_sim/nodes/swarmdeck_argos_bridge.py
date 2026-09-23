@@ -855,30 +855,53 @@ class ArgosBridge(Node):
                     ),
                     default=-1,
                 )
-                if (
+                nav_pose = robot.odom_pose_history.get(scan_tick)
+                if nav_pose is None:
+                    nav_pose = robot.odom_pose_history.get(nav_pose_tick)
+                # The projection uses position and quaternion, not velocities.
+                # Compare the seven pose components bit-for-bit: a tolerance
+                # could hide a change at a scan bin/range boundary.
+                nav_pose_key = (
+                    struct.pack("<7d", *nav_pose[:7]) if nav_pose is not None else None
+                )
+                points_needed = robot.pub_points.get_subscription_count() > 0
+                capture_needed = robot.pub_capture.get_subscription_count() > 0
+                scan_needed = robot.pub_scan.get_subscription_count() > 0
+                prox_needed = robot.pub_prox.get_subscription_count() > 0
+                nav_scan_needed = robot.pub_nav_scan.get_subscription_count() > 0
+                nav_prox_needed = robot.pub_nav_prox.get_subscription_count() > 0
+                same_raw = (
                     raw == robot.last_scan_raw
                     and robot.last_scan_products is not None
                     and robot.last_scan_products[0] == _max_range
-                    and robot.last_scan_products[8] == nav_pose_tick
-                ):
+                )
+                if same_raw:
                     (
-                        _,
-                        hits,
-                        cloud_data,
-                        points_sha256,
-                        scan_ranges,
-                        prox_ranges,
-                        nav_scan_ranges,
-                        nav_prox_ranges,
-                        _,
+                        _, hits, cloud_data, points_sha256, scan_ranges,
+                        prox_ranges, nav_scan_ranges, nav_prox_ranges, old_pose_key,
                     ) = robot.last_scan_products
                 else:
+                    hits = cloud_data = points_sha256 = None
+                    scan_ranges = prox_ranges = nav_scan_ranges = nav_prox_ranges = None
+                    old_pose_key = None
+                # The raw rays determine the packed cloud and physical scans;
+                # only the flattened projections depend on capture-time pose.
+                if old_pose_key != nav_pose_key:
+                    nav_scan_ranges = nav_prox_ranges = None
+                need_hits = points_needed or capture_needed
+                need_rays = (need_hits and (cloud_data is None or hits is None)) or (
+                    capture_needed and hits and points_sha256 is None
+                ) or (
+                    scan_needed and scan_ranges is None
+                ) or (prox_needed and prox_ranges is None) or (
+                    nav_scan_needed and nav_scan_ranges is None
+                ) or (nav_prox_needed and nav_prox_ranges is None)
+                if need_rays:
                     arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
                     hit_mask = arr["hit"] != 0
                     hits = int(np.count_nonzero(hit_mask))
                     hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
-                    cloud_data = points_sha256 = None
-                    if hits:
+                    if need_hits and cloud_data is None and hits:
                         out = np.empty((hits, 4), dtype="<f4")
                         out[:, 0] = hit_pts["x"]
                         out[:, 1] = hit_pts["y"]
@@ -887,61 +910,49 @@ class ArgosBridge(Node):
                         cloud_data = out.tobytes()
                         points_sha256 = hashlib.sha256(
                             np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
-                        ).hexdigest()
-                    scan_ranges = project_laserscan_slice(
-                        hit_pts, range_max=float(_max_range)
-                    ).tolist()
-                    prox_ranges = project_laserscan_proximity(
-                        hit_pts,
-                        robot.lidar_x,
-                        robot.lidar_z,
-                        robot.base_height,
-                        prox_min_height=robot.prox_min_height,
-                        prox_range_max=robot.prox_range_max,
-                    ).tolist()
-                    nav_pose = robot.odom_pose_history.get(scan_tick)
-                    if nav_pose is None:
-                        earlier = [
-                            old_tick
-                            for old_tick in robot.odom_pose_history
-                            if old_tick <= scan_tick
-                        ]
-                        if earlier:
-                            nav_pose = robot.odom_pose_history[max(earlier)]
-                    if nav_pose is None:
-                        nav_scan_ranges = nav_prox_ranges = None
-                    else:
-                        nav_scan_ranges = project_laserscan_navigation(
-                            hit_pts,
-                            robot.lidar_x,
-                            robot.lidar_z,
-                            nav_pose,
-                            range_max=float(_max_range),
+                        ).hexdigest() if capture_needed else None
+                    elif capture_needed and hits and points_sha256 is None:
+                        xyz = np.empty((hits, 3), dtype="<f4")
+                        xyz[:, 0], xyz[:, 1], xyz[:, 2] = (
+                            hit_pts["x"], hit_pts["y"], hit_pts["z"]
+                        )
+                        points_sha256 = hashlib.sha256(xyz.tobytes()).hexdigest()
+                    if scan_needed and scan_ranges is None:
+                        scan_ranges = project_laserscan_slice(
+                            hit_pts, range_max=float(_max_range)
                         ).tolist()
-                        nav_prox_ranges = project_laserscan_proximity_navigation(
-                            hit_pts,
-                            robot.lidar_x,
-                            robot.lidar_z,
-                            robot.base_height,
-                            nav_pose,
+                    if prox_needed and prox_ranges is None:
+                        prox_ranges = project_laserscan_proximity(
+                            hit_pts, robot.lidar_x, robot.lidar_z, robot.base_height,
                             prox_min_height=robot.prox_min_height,
                             prox_range_max=robot.prox_range_max,
                         ).tolist()
-                    robot.last_scan_raw = raw
-                    robot.last_scan_products = (
-                        _max_range,
-                        hits,
-                        cloud_data,
-                        points_sha256,
-                        scan_ranges,
-                        prox_ranges,
-                        nav_scan_ranges,
-                        nav_prox_ranges,
-                        nav_pose_tick,
-                    )
+                    if (nav_scan_needed and nav_scan_ranges is None) or (
+                        nav_prox_needed and nav_prox_ranges is None
+                    ):
+                        if nav_pose is not None:
+                            if nav_scan_needed and nav_scan_ranges is None:
+                                nav_scan_ranges = project_laserscan_navigation(
+                                    hit_pts, robot.lidar_x, robot.lidar_z, nav_pose,
+                                    range_max=float(_max_range),
+                                ).tolist()
+                            if nav_prox_needed and nav_prox_ranges is None:
+                                nav_prox_ranges = project_laserscan_proximity_navigation(
+                                    hit_pts, robot.lidar_x, robot.lidar_z,
+                                    robot.base_height, nav_pose,
+                                    prox_min_height=robot.prox_min_height,
+                                    prox_range_max=robot.prox_range_max,
+                                ).tolist()
+                if need_hits and hits is None:
+                    hits = 0
+                robot.last_scan_raw = raw
+                robot.last_scan_products = (
+                    _max_range, hits, cloud_data, points_sha256, scan_ranges,
+                    prox_ranges, nav_scan_ranges, nav_prox_ranges, nav_pose_key,
+                )
 
                 # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
-                if hits:
+                if points_needed and hits:
                     cloud = PointCloud2()
                     cloud.header.stamp = scan_stamp
                     cloud.header.frame_id = robot.frame_lidar
@@ -958,8 +969,8 @@ class ArgosBridge(Node):
                     cloud.is_dense = True
                     cloud.data = cloud_data
                     robot.pub_points.publish(cloud)
-                    if scan_tick_valid:
-                        robot.pub_capture.publish(
+                if capture_needed and hits and scan_tick_valid:
+                    robot.pub_capture.publish(
                             String(
                                 data=json.dumps(
                                     {
@@ -989,23 +1000,24 @@ class ArgosBridge(Node):
                         )
 
                 # 2. Planar LaserScan (horizontal ring slice in sensor frame)
-                scan_msg = LaserScan()
-                scan_msg.header.stamp = scan_stamp
-                scan_msg.header.frame_id = robot.frame_lidar
-                scan_msg.angle_min = float(SCAN_ANGLE_MIN)
-                scan_msg.angle_max = float(SCAN_ANGLE_MAX)
-                scan_msg.angle_increment = float(SCAN_ANGLE_INC)
-                scan_msg.time_increment = 0.0
-                scan_msg.scan_time = float(SCAN_TIME)
-                scan_msg.range_min = float(SCAN_RANGE_MIN)
-                scan_msg.range_max = float(_max_range)
-                scan_msg.ranges = scan_ranges
-                robot.pub_scan.publish(scan_msg)
+                if scan_needed:
+                    scan_msg = LaserScan()
+                    scan_msg.header.stamp = scan_stamp
+                    scan_msg.header.frame_id = robot.frame_lidar
+                    scan_msg.angle_min = float(SCAN_ANGLE_MIN)
+                    scan_msg.angle_max = float(SCAN_ANGLE_MAX)
+                    scan_msg.angle_increment = float(SCAN_ANGLE_INC)
+                    scan_msg.time_increment = 0.0
+                    scan_msg.scan_time = float(SCAN_TIME)
+                    scan_msg.range_min = float(SCAN_RANGE_MIN)
+                    scan_msg.range_max = float(_max_range)
+                    scan_msg.ranges = scan_ranges
+                    robot.pub_scan.publish(scan_msg)
 
                 # 3. Nav2 mapping slice in the flattened capture-time frame.
                 # Do not relabel the lidar message: SLAM needs its physical
                 # sensor frame and full roll/pitch TF.
-                if nav_scan_ranges is not None:
+                if nav_scan_needed and nav_scan_ranges is not None:
                     nav_scan_msg = LaserScan()
                     nav_scan_msg.header.stamp = scan_stamp
                     nav_scan_msg.header.frame_id = robot.frame_nav_scan
@@ -1021,23 +1033,24 @@ class ArgosBridge(Node):
 
                 # 4. Proximity 2.5D LaserScan (explorer's support-relative
                 # bumper band in base_link).
-                prox_msg = LaserScan()
-                prox_msg.header.stamp = scan_stamp
-                prox_msg.header.frame_id = robot.frame_base
-                prox_msg.angle_min = float(SCAN_ANGLE_MIN)
-                prox_msg.angle_max = float(SCAN_ANGLE_MAX)
-                prox_msg.angle_increment = float(SCAN_ANGLE_INC)
-                prox_msg.time_increment = 0.0
-                prox_msg.scan_time = float(SCAN_TIME)
-                prox_msg.range_min = float(SCAN_RANGE_MIN)
-                prox_msg.range_max = float(robot.prox_range_max)
-                prox_msg.ranges = prox_ranges
-                robot.pub_prox.publish(prox_msg)
+                if prox_needed:
+                    prox_msg = LaserScan()
+                    prox_msg.header.stamp = scan_stamp
+                    prox_msg.header.frame_id = robot.frame_base
+                    prox_msg.angle_min = float(SCAN_ANGLE_MIN)
+                    prox_msg.angle_max = float(SCAN_ANGLE_MAX)
+                    prox_msg.angle_increment = float(SCAN_ANGLE_INC)
+                    prox_msg.time_increment = 0.0
+                    prox_msg.scan_time = float(SCAN_TIME)
+                    prox_msg.range_min = float(SCAN_RANGE_MIN)
+                    prox_msg.range_max = float(robot.prox_range_max)
+                    prox_msg.ranges = prox_ranges
+                    robot.pub_prox.publish(prox_msg)
 
                 # 5. Nav2 proximity band in the same flattened frame. The
                 # support-relative bridge gate remains intact, so ramps and
                 # cliffs are not made traversable by flattening.
-                if nav_prox_ranges is not None:
+                if nav_prox_needed and nav_prox_ranges is not None:
                     nav_prox_msg = LaserScan()
                     nav_prox_msg.header.stamp = scan_stamp
                     nav_prox_msg.header.frame_id = robot.frame_nav_prox
@@ -1074,36 +1087,38 @@ class ArgosBridge(Node):
             robot.last_camera_tick = cam_tick
             camera_stamp = _stamp_of(cam_tick, ticks_per_second)
 
-            image = Image()
-            image.header.stamp = camera_stamp
-            image.header.frame_id = robot.frame_camera
-            image.height, image.width = height, width
-            image.encoding = "rgb8"
-            image.is_bigendian = False
-            image.step = width * 3
-            image.data = rgb
-            robot.pub_image.publish(image)
+            if robot.pub_image.get_subscription_count() > 0:
+                image = Image()
+                image.header.stamp = camera_stamp
+                image.header.frame_id = robot.frame_camera
+                image.height, image.width = height, width
+                image.encoding = "rgb8"
+                image.is_bigendian = False
+                image.step = width * 3
+                image.data = rgb
+                robot.pub_image.publish(image)
 
             # The sensor reports a VERTICAL field of view, so the focal length
             # comes from the height. Deriving it from the width instead scales
             # every deprojected detection by the aspect ratio, which looks like
             # a calibration error nobody made.
-            fov = math.radians(fov_deg if fov_deg > 0 else 60.0)
-            fy = height / (2.0 * math.tan(fov / 2.0))
-            fx = fy
-            cx, cy = width / 2.0, height / 2.0
-            info = CameraInfo()
-            info.header.stamp = camera_stamp
-            info.header.frame_id = robot.frame_camera
-            info.height, info.width = height, width
-            info.distortion_model = "plumb_bob"
-            info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
-            info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
-            info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-            info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
-            robot.pub_info.publish(info)
+            if robot.pub_info.get_subscription_count() > 0:
+                fov = math.radians(fov_deg if fov_deg > 0 else 60.0)
+                fy = height / (2.0 * math.tan(fov / 2.0))
+                fx = fy
+                cx, cy = width / 2.0, height / 2.0
+                info = CameraInfo()
+                info.header.stamp = camera_stamp
+                info.header.frame_id = robot.frame_camera
+                info.height, info.width = height, width
+                info.distortion_model = "plumb_bob"
+                info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+                info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+                info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+                robot.pub_info.publish(info)
 
-            if has_depth:
+            if has_depth and robot.pub_depth.get_subscription_count() > 0:
                 depth = Image()
                 depth.header.stamp = camera_stamp
                 depth.header.frame_id = robot.frame_camera
