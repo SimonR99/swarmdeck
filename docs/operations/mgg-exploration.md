@@ -436,7 +436,8 @@ MGG applies the platform step limit and its own roughness limit to those metrics
 This remains a deadline, not a promised route. Exploration
 keeps its shorter graph-search budget, and hardware retains its configured MGG
 default unless a site profile overrides it. The traversal lifecycle and external
-path execution live in the pinned `swarmdeck` branch; advance `MGG_REV` and
+path execution live in MGG's `ros2` branch at the pinned commit (see
+[interface checked](#interface-checked)); advance `MGG_REV` and
 rebuild every MGG and message image together when the planner changes.
 External execution leaves movement failure and its
 bounded replacement budget to the robot controller boundary. Empty or
