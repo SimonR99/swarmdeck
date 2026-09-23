@@ -101,6 +101,11 @@ AUTHORITY_SENSOR_TTL_S = 3.0
 # on this period from its own thread, so a snapshot tick that never runs at
 # all (an executor starved by other callbacks) never silences the topic.
 AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
+# Bounds Bridge.close()'s wait for an in-flight tick (a publish call or the
+# epoch/lock decision immediately before it) to finish before any ROS object
+# the heartbeat thread touches is destroyed; well above one period so a
+# normal tick in flight always finishes inside it.
+AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S = AUTHORITY_HEARTBEAT_PERIOD_S + 5.0
 # A parked robot's scans are the same scan. Swarm-SLAM earns keyframes by
 # distance, and by scene change at most once per
 # keyframe_scene_change_min_period_s (cslam_lidar.yaml), so a scan that
@@ -828,6 +833,18 @@ class Bridge(Node):
 
     def close(self):
         self.closed.set()
+        # Stopped and joined before anything it touches (self.authority_pub,
+        # on self.sensor_node) is destroyed below, or by `main()` right
+        # after this returns: setting `closed` does not wait for a tick
+        # already past `Event.wait()` and into a publish call, and a
+        # publish on a destroyed node/context is never safe.
+        self.authority_heartbeat_thread.join(timeout=AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S)
+        if self.authority_heartbeat_thread.is_alive():
+            self.get_logger().error(
+                "authority heartbeat thread did not stop within "
+                f"{AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S:.1f}s of close(); "
+                "destroying its ROS objects out from under it anyway"
+            )
         if self.sensor_executor is not None:
             self.sensor_executor.shutdown(timeout_sec=2.0)
         if self.sensor_thread is not None:

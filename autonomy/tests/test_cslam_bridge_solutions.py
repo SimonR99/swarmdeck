@@ -573,3 +573,57 @@ def test_authority_heartbeat_stops_resending_after_the_durable_epoch_changes(
     publisher.tick()
     assert published == ["authority-epoch-0"]
     assert logged[-1] == "epoch retired"
+
+
+def test_authority_heartbeat_thread_join_waits_for_an_in_flight_tick(bridge_module):
+    """`Bridge.close()`'s own shutdown sequence: `self.closed.set()` then
+    `self.authority_heartbeat_thread.join(timeout=...)`, reproduced here with
+    a real thread. Setting `closed` must never let the join return while a
+    tick is mid-publish, and no publish may happen once the join has
+    returned: `close()` runs entirely before the sensor node (which owns
+    `authority_pub`) or the bridge node itself is destroyed.
+    """
+
+    import threading
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    entered = threading.Event()
+    release = threading.Event()
+    published = []
+
+    def slow_publish(message):
+        # Simulates a tick already past `Event.wait()` and inside
+        # `self._publish(message)` -- the DDS write itself, or anything else
+        # that briefly blocks -- at the exact moment shutdown begins.
+        entered.set()
+        release.wait(timeout=5)
+        published.append(message)
+
+    publisher = Publisher(
+        slow_publish, period_s=0.01, log=lambda reason: None, epoch_identity=lambda: None
+    )
+    publisher.update("authority-v1", None)
+
+    closed = threading.Event()
+    thread = threading.Thread(target=publisher.run, args=(closed,), daemon=True)
+    thread.start()
+    assert entered.wait(timeout=5)  # the first tick is now inside publish(), blocked
+
+    # Shutdown begins while that tick is in flight, exactly as Bridge.close()
+    # does: signal closed, then join with a bound.
+    closed.set()
+    thread.join(timeout=0.05)
+    # The short join must not have succeeded: close() has not "returned"
+    # while the in-flight tick is still inside publish().
+    assert thread.is_alive()
+    assert published == []
+
+    release.set()  # let the in-flight tick's publish() finish
+    thread.join(timeout=bridge_module.AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S)
+    assert not thread.is_alive()
+    assert published == ["authority-v1"]
+
+    # Nothing publishes again after the thread (and so close()'s join) has
+    # stopped: run()'s wait() saw `closed` already set and the loop exited
+    # without a second tick.
+    assert published == ["authority-v1"]
