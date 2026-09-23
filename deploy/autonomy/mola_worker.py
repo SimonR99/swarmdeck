@@ -296,29 +296,41 @@ def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _write_fsynced(path: Path, payload: bytes) -> None:
+    """Create ``path`` holding ``payload``, with its data fsynced."""
+
+    with path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _atomic_bytes(path: Path, payload: bytes) -> None:
     """Replace ``path`` with ``payload`` through a fsynced sibling temporary."""
 
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_fsynced(temporary, payload)
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
 def _atomic_json(path: Path, value: object) -> None:
-    _atomic_bytes(
-        path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-    )
+    _atomic_bytes(path, _json_bytes(value))
 
 
 @dataclass(frozen=True)
@@ -669,13 +681,18 @@ class MolaWorker:
 
         peer_root = Path(peer_root)
         source = peer_root / "snapshot.json"
+        # Read (up to MAX_SNAPSHOT_BYTES) and parsed before map_epoch_lock,
+        # which the bridge's authority heartbeat takes before every send.
+        # Reading it first is still safe: a snapshot read before a new epoch
+        # was claimed names the retired run_id and is rejected below, and the
+        # lifetime is re-checked under the lock again before publication.
+        raw, snapshot = _read_snapshot(source)
+        dependencies = snapshot_epoch_dependencies(snapshot)
         with map_epoch_lock(peer_root):
             lifetime = read_map_epoch(peer_root)
             chunks = (peer_root / "geometry" / "chunks").resolve()
             if not chunks.is_dir():
                 raise WorkerError("geometry/chunks directory is missing")
-            raw, snapshot = _read_snapshot(source)
-            dependencies = snapshot_epoch_dependencies(snapshot)
             assert_map_epoch_dependencies(peer_root, dependencies)
         run_id = None if lifetime is None else lifetime["run_id"]
         if self._peer_runs.get(peer_root) != run_id:
@@ -842,6 +859,18 @@ class MolaWorker:
                         "source_snapshot_id": snapshot_id,
                     }
 
+            # source.json and index.json are written and fsynced into the
+            # staging directory first; under map_epoch_lock only renames and
+            # one directory fsync remain.
+            _write_fsynced(staging / "source.json", raw)
+            index = {
+                "version": 1,
+                "source_snapshot_id": snapshot_id,
+                "source_sha256": source_sha,
+                "generated_at_ns": time.time_ns(),
+                "artifacts": artifacts,
+            }
+            _write_fsynced(staging / "index.json", _json_bytes(index))
             with map_epoch_lock(peer_root):
                 if read_map_epoch(peer_root) != lifetime:
                     self._invalidate_runtime(peer_root)
@@ -855,15 +884,11 @@ class MolaWorker:
                     os.replace(staged_path, final_path)
                 # A newer graph revision may supersede this build, but a new
                 # robot lifetime may never receive an old build's geometry.
-                _atomic_bytes(mola_root / "source.json", raw)
-                index = {
-                    "version": 1,
-                    "source_snapshot_id": snapshot_id,
-                    "source_sha256": source_sha,
-                    "generated_at_ns": time.time_ns(),
-                    "artifacts": artifacts,
-                }
-                _atomic_json(mola_root / "index.json", index)
+                os.replace(staging / "source.json", mola_root / "source.json")
+                # source.json is durable before index.json names it.
+                _fsync_directory(mola_root)
+                os.replace(staging / "index.json", mola_root / "index.json")
+            _fsync_directory(mola_root)
             self._prune(
                 components_root,
                 {mola_root / str(item["path"]) for item in artifacts},

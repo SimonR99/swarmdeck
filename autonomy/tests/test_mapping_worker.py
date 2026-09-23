@@ -271,26 +271,31 @@ def sha256(raw: bytes) -> str:
 
 @pytest.fixture
 def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
-    """Record every atomic publication write in order.
+    """Record every publication of source.json and index.json in order.
 
     Each entry is (file name, payload, source.json bytes already on disk when
     this write started), so a test can assert that source.json lands before
-    index.json and holds the built snapshot bytes at that moment.
+    index.json and holds the built snapshot bytes at that moment. The worker
+    stages both files and publishes each with one rename into ``mola/``.
     """
 
     writes: list[tuple[str, bytes, bytes | None]] = []
-    original = worker_module._atomic_bytes
+    original = worker_module.os.replace
 
-    def recording(path: Path, payload: bytes) -> None:
-        # worker.json is the worker's own status, not part of the product.
-        if path.name != "worker.json":
-            source = path.parent / "source.json"
+    def recording(staged, final) -> None:
+        final = Path(final)
+        if final.parent.name == "mola" and final.name in {"source.json", "index.json"}:
+            source = final.parent / "source.json"
             writes.append(
-                (path.name, payload, source.read_bytes() if source.exists() else None)
+                (
+                    final.name,
+                    Path(staged).read_bytes(),
+                    source.read_bytes() if source.exists() else None,
+                )
             )
-        original(path, payload)
+        original(staged, final)
 
-    monkeypatch.setattr(worker_module, "_atomic_bytes", recording)
+    monkeypatch.setattr(worker_module.os, "replace", recording)
     return writes
 
 
@@ -1370,3 +1375,57 @@ def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
     assert not (peer / "mola/index.json").exists()
     assert not (peer / "mola/source.json").exists()
     assert (other / "mola/index.json").read_text() == "peer-product"
+
+
+def _map_epoch_lock_is_free(peer: Path) -> bool:
+    """Probe `map_epoch_lock` from a separate open file, without waiting."""
+    import fcntl
+
+    with (peer / "map-epoch.lock").open("a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(stream, fcntl.LOCK_UN)
+        return True
+
+
+def test_process_peer_reads_and_fsyncs_outside_the_map_epoch_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """The bridge's authority heartbeat takes `map_epoch_lock` before every
+    send, so the worker must not hold it across slow I/O: the snapshot read
+    (up to 64 MiB) and the fsync of each published file's data happen
+    before the lock; only renames and a directory fsync happen under it.
+    """
+    import os
+    import stat
+
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    probes: list[tuple[str, bool]] = []
+
+    original_read = worker_module._read_snapshot
+
+    def probing_read(path):
+        probes.append(("read snapshot", _map_epoch_lock_is_free(peer)))
+        return original_read(path)
+
+    original_fsync = os.fsync
+
+    def probing_fsync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            probes.append(("fsync file", _map_epoch_lock_is_free(peer)))
+        return original_fsync(fd)
+
+    monkeypatch.setattr(worker_module, "_read_snapshot", probing_read)
+    monkeypatch.setattr(worker_module.os, "fsync", probing_fsync)
+
+    def successful(command, _timeout):
+        Path(command[3]).write_bytes(b"metric-map-v1")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    assert worker.process_peer(peer).published
+    assert ("read snapshot", True) in probes
+    assert ("fsync file", True) in probes
+    assert all(free for _, free in probes), probes
