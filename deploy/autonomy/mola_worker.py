@@ -240,6 +240,37 @@ def _read_snapshot(path: Path) -> tuple[bytes, dict[str, object]]:
     return raw, value
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Fields an atomic replacement changes, or None when the file is absent."""
+
+    try:
+        value = path.stat()
+    except OSError:
+        return None
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
+def _stat_matches(path: Path, expected_size: object, maximum: int) -> bool:
+    """True when ``path`` is a file of exactly ``expected_size`` bytes.
+
+    Used to decide whether a previously published artifact this worker wrote
+    once and never modifies (module docstring) may still be reused, trusting
+    its recorded sha256 rather than re-hashing a component that may be
+    several megabytes on every poll that finds nothing else to build. A
+    freshly produced artifact is still cross-checked byte-for-byte against
+    what the native runtime reports, the one point corrupted or mismatched
+    output would first be observable.
+    """
+
+    if not isinstance(expected_size, int) or not 0 < expected_size <= maximum:
+        return False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    return size == expected_size
+
+
 def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
     expected_size = path.stat().st_size
     if expected_size <= 0 or expected_size > maximum:
@@ -368,6 +399,11 @@ class MolaWorker:
         # Poll bookkeeping, touched only on the thread that calls run_once.
         self._completed: dict[Path, str] = {}
         self._retry_after: dict[Path, float] = {}
+        # snapshot.json's identity (`_file_identity`) the last time it was
+        # actually read and hashed for a completed build. Unchanged between
+        # polls, most of the time while a peer is parked, so the next poll
+        # can skip re-reading and re-hashing the whole file.
+        self._snapshot_identity: dict[Path, tuple[int, int, int, int]] = {}
         # The failure last logged per peer. A failing build is retried every
         # ``retry_s`` and the same message would otherwise repeat on every
         # retry (198 and 216 identical lines per robot on benchbot, mission
@@ -427,12 +463,18 @@ class MolaWorker:
 
     def _artifact_matches(self, mola_root: Path, item: dict[str, object]) -> bool:
         try:
-            size, digest = _sha256_file(
-                mola_root / str(item["path"]), self.max_output_bytes
-            )
-        except (KeyError, OSError, WorkerError):
+            path = mola_root / str(item["path"])
+        except KeyError:
             return False
-        return size == item.get("size_bytes") and digest == item.get("sha256")
+        digest = item.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return False
+        # The published sha256 was already trusted when this artifact was
+        # written (the native runtime's own response, or a prior `stat`
+        # check); it never changes underneath an unmodified file, so
+        # reconfirming reuse only needs to know the file is still there at
+        # its recorded size.
+        return _stat_matches(path, item.get("size_bytes"), self.max_output_bytes)
 
     def _planner_matches(self, mola_root: Path, item: dict[str, object]) -> bool:
         planner = item.get("planner")
@@ -911,9 +953,23 @@ class MolaWorker:
             self._retry_after.pop(missing_peer, None)
             self._logged_errors.pop(missing_peer, None)
             self._peer_runs.pop(missing_peer, None)
-        due: list[tuple[Path, str]] = []
+            self._snapshot_identity.pop(missing_peer, None)
+        due: list[tuple[Path, str, tuple[int, int, int, int] | None]] = []
         for peer in peers:
             source = peer / "snapshot.json"
+            identity = _file_identity(source)
+            if (
+                identity is not None
+                and identity == self._snapshot_identity.get(peer)
+                and peer in self._completed
+            ):
+                # snapshot.json's size, inode and mtime have not changed
+                # since the last completed build read it: a parked peer's
+                # common case. `os.replace` (the only way this file is
+                # written) always changes its identity, so this is exact,
+                # not a heuristic, and skips reading and hashing the whole
+                # file for nothing.
+                continue
             try:
                 raw = _bounded_file_bytes(source, MAX_SNAPSHOT_BYTES, "snapshot")
                 source_sha = hashlib.sha256(raw).hexdigest()
@@ -923,12 +979,22 @@ class MolaWorker:
                 self._log_outcome(peer, errors[peer])
                 continue
             if self._completed.get(peer) == source_sha:
+                # Confirmed by actually reading it, not merely by `stat`: safe
+                # to trust `stat` alone the next time this exact identity
+                # recurs.
+                if identity is not None:
+                    self._snapshot_identity[peer] = identity
                 continue
             if now < self._retry_after.get(peer, 0):
                 continue
-            due.append((peer, source_sha))
+            due.append((peer, source_sha, identity))
 
-        def record(peer: Path, source_sha: str, outcome: ProcessResult | str) -> None:
+        def record(
+            peer: Path,
+            source_sha: str,
+            identity: tuple[int, int, int, int] | None,
+            outcome: ProcessResult | str,
+        ) -> None:
             if isinstance(outcome, ProcessResult):
                 # Record the bytes the product was built from, which process_peer
                 # read itself. If snapshot.json moved on meanwhile, the next poll
@@ -937,26 +1003,36 @@ class MolaWorker:
                 self._retry_after.pop(peer, None)
                 self._write_worker_status(peer, outcome.source_sha256, "")
                 self._log_outcome(peer, None)
+                if identity is not None and outcome.source_sha256 == source_sha:
+                    # This poll's `stat` and content agreed with what was
+                    # just published: the next poll may trust that identity
+                    # alone. A snapshot that moved on between this read and
+                    # process_peer's own leaves no identity cached, so the
+                    # next poll reads and hashes for real.
+                    self._snapshot_identity[peer] = identity
+                else:
+                    self._snapshot_identity.pop(peer, None)
             else:
                 errors[peer] = outcome
                 self._retry_after[peer] = now + self.retry_s
                 self._write_worker_status(peer, source_sha, outcome)
                 self._log_outcome(peer, outcome)
+                self._snapshot_identity.pop(peer, None)
 
         if self.parallel_peers == 1 or len(due) < 2:
-            for peer, source_sha in due:
-                record(peer, source_sha, self._attempt(peer))
+            for peer, source_sha, identity in due:
+                record(peer, source_sha, identity, self._attempt(peer))
             return errors
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.parallel_peers, len(due)),
             thread_name_prefix="swarmdeck-mola-build",
         ) as pool:
             futures = [
-                (peer, source_sha, pool.submit(self._attempt, peer))
-                for peer, source_sha in due
+                (peer, source_sha, identity, pool.submit(self._attempt, peer))
+                for peer, source_sha, identity in due
             ]
-            for peer, source_sha, future in futures:
-                record(peer, source_sha, future.result())
+            for peer, source_sha, identity, future in futures:
+                record(peer, source_sha, identity, future.result())
         return errors
 
     def run_forever(self) -> None:

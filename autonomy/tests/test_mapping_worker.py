@@ -369,6 +369,67 @@ def test_enabling_planner_products_upgrades_a_cached_metric_map(tmp_path):
         upgraded.close()
 
 
+def test_run_once_skips_rehashing_an_unchanged_snapshot(tmp_path, monkeypatch) -> None:
+    """snapshot.json is stat'd, not re-read and re-hashed, once its build
+    has been published and its identity (size, inode, mtime) recurs.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        assert worker.run_once() == {}
+        reads = []
+
+        def counting_read(path, *a, **k):
+            if Path(path).name == "snapshot.json":
+                reads.append(path)
+            return bounded_file_bytes(path, *a, **k)
+
+        monkeypatch.setattr(worker_module, "_bounded_file_bytes", counting_read)
+        assert worker.run_once() == {}
+        assert reads == []
+        # A real change is still detected and read.
+        write_snapshot(peer, "a" * 64, [manifest("component:a", 2)])
+        assert worker.run_once() == {}
+        # run_once's own due-check plus process_peer's `_read_snapshot`.
+        assert len(reads) == 2
+    finally:
+        worker.close()
+
+
+def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None:
+    """An unchanged component is reused by `stat`, not by re-hashing its
+    published bytes: the worker wrote them once and never modifies them
+    (module docstring), so a later poll trusts the index's own sha256
+    instead of re-reading a component that may be several megabytes.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    first = manifest("component:a", 0)
+    second = manifest("component:b", 0)
+    write_snapshot(peer, "a" * 64, [first, second])
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        worker.process_peer(peer)
+        index = json.loads((peer / "mola/index.json").read_text())
+        held = index["artifacts"][0]
+        assert held["component_id"] == "component:a"
+        artifact_path = peer / "mola" / held["path"]
+        original = artifact_path.read_bytes()
+        # Corrupt the file's content without changing its size: a real
+        # re-hash would now disagree with the recorded sha256, but the
+        # worker trusts an on-disk file it wrote once and never modifies.
+        artifact_path.write_bytes((b"\x00" * len(original)))
+        write_snapshot(peer, "b" * 64, [first, manifest("component:b", 1)])
+        worker.process_peer(peer)
+        current = json.loads((peer / "mola/index.json").read_text())
+        assert current["artifacts"][0] == held
+        # Reused, not rebuilt: only component:b's manifest triggered a native
+        # request.
+        assert len(runtime_requests(tmp_path)) == 3
+    finally:
+        worker.close()
+
+
 def test_bounded_read_stops_a_file_that_grows_after_stat() -> None:
     class RecordingStream(io.BytesIO):
         def close(self):
