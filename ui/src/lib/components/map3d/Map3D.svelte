@@ -43,6 +43,7 @@
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
   import { LiveReplicaPoll } from './liveReplicaPoll';
+  import { GaussianFetch } from './gaussianFetch';
   import { RenderLoop } from './renderLoop';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
@@ -295,14 +296,13 @@
       robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
       replicaRevision.clear();
       replicaNeedsRebuild = true;
-      gaussianEtag = '';
+      gaussianFetch.forget();
       liveReplicaPoll.set(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
     }
   });
-  let gaussianEtag = '';
   let firstCloud = true;
 
   function gaussianScope() {
@@ -435,37 +435,36 @@
     }
   }
 
-  let gaussianPending: AbortController | null = null;
+  const gaussianFetch = new GaussianFetch({ scope: gaussianScope, hasScene: () => scene !== null });
+
+  function showGaussianFailure(message: string) {
+    const cached = gaussianCount > 0;
+    scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
+    requestRender();
+    gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${message}`;
+  }
+
   async function fetchGaussians() {
-    if (!scene || !active || document.hidden || gaussianPending) return;
-    const currentScope = gaussianScope(),
-      controller = new AbortController();
-    gaussianPending = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    if (!scene || !active || document.hidden || gaussianFetch.busy) return;
+    const result = await gaussianFetch.fetch();
+    if (!result || result.kind === 'unchanged') return;
+    if (result.kind === 'failed') {
+      showGaussianFailure(result.message);
+      return;
+    }
+    if (!scene) return;
+    if (result.kind === 'missing') {
+      scene.gaussians.clear();
+      gaussianCount = 0;
+      gaussianBuffer = null;
+      scene.terrain.setGaussianProxy(renderMode === 'gaussians');
+      gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
+      requestRender();
+      return;
+    }
     try {
-      const response = await fetch(`/api/map/gaussians${currentScope}`, {
-        signal: controller.signal,
-        headers: gaussianEtag ? { 'If-None-Match': gaussianEtag } : {}
-      });
-      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
-      if (response.status === 304) return;
-      if (response.status === 404) {
-        scene.gaussians.clear();
-        gaussianCount = 0;
-        gaussianBuffer = null;
-        gaussianEtag = '';
-        scene.terrain.setGaussianProxy(renderMode === 'gaussians');
-        gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
-        requestRender();
-        return;
-      }
-      if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
-      if (Number(response.headers.get('Content-Length')) > 112000016)
-        throw new Error('Reconstruction exceeds download limit');
-      const buffer = await response.arrayBuffer();
-      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
       const firstModel = scene.gaussians.count === 0;
-      scene.gaussians.load(buffer, QUALITY[quality].splats);
+      scene.gaussians.load(result.buffer, QUALITY[quality].splats);
       scene.terrain.setGaussianProxy(false);
       if (!points && firstModel && scene.gaussians.count) {
         ceilingMin = scene.gaussians.bounds.min.z;
@@ -474,21 +473,13 @@
         scene.setCeiling(ceilingCutoff);
         scene.fitMap();
       }
-      gaussianBuffer = buffer;
-      gaussianEtag = response.headers.get('ETag') ?? '';
+      gaussianBuffer = result.buffer;
+      gaussianFetch.accept(result.etag);
       gaussianCount = scene.gaussians.count;
       gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
       requestRender();
     } catch (e) {
-      if (!controller.signal.aborted && currentScope === gaussianScope()) {
-        const cached = gaussianCount > 0;
-        scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
-        requestRender();
-        gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${e instanceof Error ? e.message : String(e)}`;
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (gaussianPending === controller) gaussianPending = null;
+      showGaussianFailure(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -529,9 +520,8 @@
     replicaRevision.clear();
     replicaCloud = null;
     replicaNeedsRebuild = false;
-    gaussianPending?.abort();
-    gaussianPending = null;
-    gaussianEtag = '';
+    gaussianFetch.abort();
+    gaussianFetch.forget();
     gaussianBuffer = null;
     scene?.terrain.clear();
     scene?.gaussians.clear();
@@ -799,8 +789,7 @@
     generation++;
     pending?.abort();
     pending = null;
-    gaussianPending?.abort();
-    gaussianPending = null;
+    gaussianFetch.abort();
   }
 
   function resumeScene() {
@@ -902,7 +891,7 @@
       generation++;
       pending?.abort();
       liveReplicaPoll.dispose();
-      gaussianPending?.abort();
+      gaussianFetch.abort();
       worker?.terminate();
       worker = null;
       window.clearInterval(splatPoll);
