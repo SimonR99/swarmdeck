@@ -37,6 +37,13 @@ mouse-drag panning events. Requires `node` ≥ 18 and the Playwright package
 (pre-installed via `npx playwright` on the workstation and tuf). Prints a
 clear message and continues without crashing if no browser is available.
 
+`--latency` measures plan-to-motion latency and replan cadence. Collects
+`robot_state` WebSocket events from the server container and MGG
+`docker logs --timestamps` output over the measurement window, then reports
+median/p90/max latency (from MGG plan completion — used as a proxy for
+adapter path dispatch, lag < 10 ms — to robot pose displacement > 0.10 m)
+and replan cadence per robot. Clock: host UTC wall clock; typical error < 1 ms.
+
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
 Baseline for the plan, from manual runs before the harness existed and the

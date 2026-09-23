@@ -7,6 +7,7 @@ Run on the host that runs the stack, while it runs:
     scripts/profile_stack.py --profiles      # plus py-spy of the Python hot spots
     scripts/profile_stack.py --window 60 --label "after lattice cache"
     scripts/profile_stack.py --browser       # browser main-thread CPU (item 6)
+    scripts/profile_stack.py --latency       # plan-to-motion latency trace (item 2)
 
 It reports what the clean-up plan (docs/superpowers/plans/
 2026-09-23-cleanup-optimization.md) is measured by:
@@ -17,6 +18,7 @@ It reports what the clean-up plan (docs/superpowers/plans/
   the planner's own log lines within the window;
 - GUI WebSocket traffic: messages and bytes per second by type;
 - optionally, browser main-thread CPU at idle and while panning (--browser);
+- optionally, plan-to-motion latency and replan cadence per robot (--latency);
 - optionally, py-spy profiles of the Python processes, taken from a
   throwaway sidecar container that joins each container's PID namespace,
   so nothing in the stack is modified.
@@ -60,12 +62,20 @@ PLAN_LINE = re.compile(
     r"gain (\d+), select (\d+)\)"
 )
 
+# docker logs --timestamps prefix: 2006-01-02T15:04:05.999999999Z
+_DOCKER_TS = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)Z\s+(.*)"
+)
+
 # Path to Playwright's bundled Chromium (populated by `npx playwright install`)
 _PLAYWRIGHT_CHROMIUM = (
     Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
 )
 # Path to Playwright's Node modules (from npx cache)
 _PLAYWRIGHT_MODULES = Path.home() / ".npm/_npx/e41f203b7505f1fb/node_modules"
+
+# Motion threshold for plan-to-motion latency (metres)
+_MOTION_THRESHOLD_M = 0.10
 
 
 def sh(args, **kwargs) -> subprocess.CompletedProcess:
@@ -515,6 +525,184 @@ def browser_cpu(
     return {"error": (result.stderr or result.stdout).strip()[-300:]}
 
 
+# ------------------------------------------------------ plan-to-motion latency
+
+
+def parse_timestamped_plan_lines(log_text: str) -> list[tuple[float, dict]]:
+    """Parse ``docker logs --timestamps`` output of the mgg container.
+
+    Returns a list of ``(utc_epoch_s, cycle_dict)`` sorted by time.
+    This is a pure function so it can be unit-tested on captured log snippets.
+    """
+    results: list[tuple[float, dict]] = []
+    for line in log_text.splitlines():
+        ts_match = _DOCKER_TS.match(line)
+        if not ts_match:
+            continue
+        ts_base, ts_frac, content = ts_match.groups()
+        plan_match = PLAN_LINE.search(content)
+        if not plan_match:
+            continue
+        # Parse timestamp; truncate nanoseconds to microseconds for strptime
+        frac6 = (ts_frac + "000000")[:6]
+        try:
+            ts_dt = dt.datetime.strptime(
+                f"{ts_base}.{frac6}", "%Y-%m-%dT%H:%M:%S.%f"
+            ).replace(tzinfo=dt.timezone.utc)
+            epoch = ts_dt.timestamp()
+        except ValueError:
+            continue
+        robot, cells, vertices, edges, total, _glob, grid, gain, select = (
+            plan_match.groups()
+        )
+        results.append((
+            epoch,
+            {
+                "robot": robot,
+                "cells": int(cells),
+                "vertices": int(vertices),
+                "edges": int(edges),
+                "total": int(total),
+                "grid": int(grid),
+                "gain": int(gain),
+                "select": int(select),
+            },
+        ))
+    results.sort(key=lambda x: x[0])
+    return results
+
+
+def replan_cadence(plan_events: list[tuple[float, dict]]) -> dict[str, list[float]]:
+    """Compute inter-replan intervals (seconds) per robot from timestamped plan events.
+
+    Returns ``{robot_id: [interval_s, ...]}``. Pure function.
+    """
+    per_robot: dict[str, list[float]] = collections.defaultdict(list)
+    last_time: dict[str, float] = {}
+    for epoch, cycle in plan_events:
+        robot = cycle["robot"]
+        if robot in last_time:
+            per_robot[robot].append(epoch - last_time[robot])
+        last_time[robot] = epoch
+    return dict(per_robot)
+
+
+_WS_ROBOT_STATE_PROBE = r"""
+import asyncio, json, time, websockets
+
+async def main():
+    events = []
+    t_end = time.time() + WINDOW
+    try:
+        async with websockets.connect(
+            "ws://localhost:8080/ws", max_size=None, open_timeout=5
+        ) as ws:
+            while time.time() < t_end:
+                try:
+                    m = await asyncio.wait_for(ws.recv(), 0.2)
+                except asyncio.TimeoutError:
+                    continue
+                try:
+                    msg = json.loads(m)
+                    if msg.get("type") == "robot_state" and "pose" in msg:
+                        events.append([
+                            time.time(),
+                            str(msg.get("robot_id", "?")),
+                            float(msg["pose"].get("x", 0.0)),
+                            float(msg["pose"].get("y", 0.0)),
+                        ])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    print(json.dumps(events))
+
+asyncio.run(main())
+"""
+
+
+def latency_trace(window: float) -> dict:
+    """Measure plan-to-motion latency and replan cadence.
+
+    Approach:
+    1. Collect ``robot_state`` WebSocket events from the server container
+       for ``window`` seconds. Each event carries ``time.time()`` (container
+       wall clock) and the robot's pose ``(x, y)``.
+    2. Parse ``docker logs --timestamps`` of the mgg container to get UTC
+       timestamps for each MGG plan-cycle log line in the same window.
+    3. The MGG plan completion time is used as a proxy for "path dispatched":
+       the adapter subscribes to the MGG path topic and sends it to Nav2
+       within the same ROS spin cycle (< 10 ms typical on the same host).
+    4. For each plan event (per robot), find the earliest robot_state event
+       after that timestamp where pose displacement exceeds
+       _MOTION_THRESHOLD_M from the pose at plan time.
+    5. Latency = motion_start_time - plan_timestamp.
+
+    Clock: host UTC wall clock. Docker log timestamps are set by the Docker
+    daemon from the host clock. ``time.time()`` inside the server container
+    uses the same host clock on Linux (containers share the host kernel).
+    Typical error between the two: < 1 ms.
+
+    Returns a dict with per-robot ``latency_s`` and ``cadence_s`` lists,
+    ``plan_count``, and an ``error`` key if the stack is unreachable.
+    """
+    probe = _WS_ROBOT_STATE_PROBE.replace("WINDOW", str(window))
+    ws_result = sh(
+        ["docker", "exec", "-i", container("server"), "python", "-"],
+        input=probe,
+        timeout=window + 30,
+    )
+    try:
+        raw_events = json.loads(ws_result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"error": (ws_result.stderr or ws_result.stdout).strip()[-300:]}
+
+    # events: [[utc_s, robot_id, x, y], ...]
+    robot_events: dict[str, list[tuple[float, float, float]]] = collections.defaultdict(list)
+    for row in raw_events:
+        utc, rid, x, y = row
+        if rid != "__error__":
+            robot_events[rid].append((float(utc), float(x), float(y)))
+
+    # parse mgg log with timestamps from the last window + 60 s
+    logs = sh(
+        [
+            "docker", "logs", "--timestamps",
+            "--since", f"{int(window) + 60}s",
+            container("mgg"),
+        ],
+    )
+    plan_events = parse_timestamped_plan_lines(logs.stdout + logs.stderr)
+
+    cadences = replan_cadence(plan_events)
+    latencies: dict[str, list[float]] = collections.defaultdict(list)
+
+    for plan_epoch, cycle in plan_events:
+        robot = cycle["robot"]
+        events = robot_events.get(robot, [])
+        if not events:
+            continue
+        # robot position just before the plan (or first known position)
+        ref_pos = next(
+            ((x, y) for utc, x, y in events if utc <= plan_epoch),
+            (events[0][1], events[0][2]),
+        )
+        # find first event after plan_epoch where displacement > threshold
+        for utc, x, y in events:
+            if utc <= plan_epoch:
+                continue
+            dist = ((x - ref_pos[0]) ** 2 + (y - ref_pos[1]) ** 2) ** 0.5
+            if dist >= _MOTION_THRESHOLD_M:
+                latencies[robot].append(utc - plan_epoch)
+                break
+
+    return {
+        "plan_count": len(plan_events),
+        "latency_s": dict(latencies),
+        "cadence_s": cadences,
+    }
+
+
 # ------------------------------------------------------------------ git
 
 
@@ -632,6 +820,45 @@ def report(args) -> str:
             )
             lines.append(f"  URL: {burl}")
 
+    if getattr(args, "latency", False):
+        lines += [
+            "",
+            "### Plan-to-motion latency"
+            f" (MGG plan \u2192 robot displacement > {_MOTION_THRESHOLD_M:.2f} m)",
+        ]
+        lt = latency_trace(args.window)
+        if "error" in lt:
+            lines.append(f"- latency trace unavailable: {lt['error']}")
+        else:
+            lines.append(f"- MGG plan cycles in window: {lt['plan_count']}")
+            lines.append(
+                "  - Clock: host UTC wall clock (docker log timestamps vs "
+                "container time.time()); typical error < 1 ms"
+            )
+            lat = lt.get("latency_s", {})
+            cad = lt.get("cadence_s", {})
+            if not lat and not cad:
+                lines.append("  - No correlated events (fleet not exploring?)")
+            for robot in sorted(set(list(lat.keys()) + list(cad.keys()))):
+                parts = [f"**{robot}**"]
+                if robot in cad and cad[robot]:
+                    iv = sorted(cad[robot])
+                    p90 = iv[min(int(len(iv) * 0.9), len(iv) - 1)]
+                    parts.append(
+                        f"replan cadence: median {statistics.median(iv):.2f} s,"
+                        f" p90 {p90:.2f} s, max {max(iv):.2f} s"
+                        f" ({len(iv)} intervals)"
+                    )
+                if robot in lat and lat[robot]:
+                    lv = sorted(lat[robot])
+                    p90 = lv[min(int(len(lv) * 0.9), len(lv) - 1)]
+                    parts.append(
+                        f"latency: median {statistics.median(lv):.2f} s,"
+                        f" p90 {p90:.2f} s, max {max(lv):.2f} s"
+                        f" ({len(lv)} samples)"
+                    )
+                lines.append("  - " + "; ".join(parts))
+
     return "\n".join(lines) + "\n"
 
 
@@ -674,6 +901,11 @@ def main() -> int:
         type=float,
         default=5.0,
         help="idle measurement window for --browser in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--latency",
+        action="store_true",
+        help="measure plan-to-motion latency and replan cadence per robot",
     )
     args = parser.parse_args()
     text = report(args)
