@@ -1,8 +1,8 @@
 """Unit tests for pure parsing functions in profile_stack.py.
 
 These tests exercise only functions that operate on strings and dicts, with
-no docker, ROS, or browser dependency. They must pass with a plain ``pytest``
-invocation without any running stack.
+no docker, ROS, or browser dependency. Browser JavaScript helper tests use
+Node when available (otherwise skip). No running stack is needed.
 """
 
 from __future__ import annotations
@@ -324,3 +324,39 @@ def test_short_command_executable():
     cmd = "/usr/bin/argos3 -c scenario.argos"
     result = short_command(cmd)
     assert "argos3" in result
+
+
+def _browser_helpers_check(assertions):
+    import shutil
+    import subprocess
+    import pytest
+    import profile_stack
+
+    if not shutil.which('node'):
+        pytest.skip('browser helper tests require node')
+    helpers = getattr(profile_stack, '_BROWSER_HELPERS_JS', '')
+    result = subprocess.run(
+        ['node', '-e', helpers + '\n' + assertions], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_browser_proc_stat_ticks_with_spaces_and_parentheses():
+    _browser_helpers_check('''
+const assert = require('node:assert/strict');
+const fields = ['S', '42', ...Array(9).fill('0'), '120', '30', ...Array(6).fill('0'), '999'];
+assert.deepEqual(parseProcStat('123 (chrome (worker)) ' + fields.join(' ')),
+                 {ppid: 42, ticks: 150, start: 999});
+assert.throws(() => parseProcStat('malformed'));
+''')
+
+
+def test_browser_cpu_percent_multicore_and_clock_rate():
+    _browser_helpers_check('''
+const assert = require('node:assert/strict');
+assert.equal(cpuPercent(2500, 2, 100), 1250);
+assert.equal(cpuPercent(500, 2, 250), 100);
+assert.equal(cpuPercent(0, 2, 100), 0);
+assert.throws(() => cpuPercent(10, 0, 100));
+assert.throws(() => cpuPercent(10, 1, 0));
+''')

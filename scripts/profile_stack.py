@@ -6,7 +6,7 @@ Run on the host that runs the stack, while it runs:
     scripts/profile_stack.py                 # 30 s window, no profiles
     scripts/profile_stack.py --profiles      # plus py-spy of the Python hot spots
     scripts/profile_stack.py --window 60 --label "after lattice cache"
-    scripts/profile_stack.py --browser       # browser main-thread CPU (item 6)
+    scripts/profile_stack.py --browser       # browser process-tree CPU and WebGL frames/s (item 6)
     scripts/profile_stack.py --latency       # plan-to-motion latency trace (item 2)
 
 It reports what the clean-up plan (docs/superpowers/plans/
@@ -17,14 +17,14 @@ It reports what the clean-up plan (docs/superpowers/plans/
 - MGG plan cycles: wall time and its lattice ("grid") and gain parts, from
   the planner's own log lines within the window;
 - GUI WebSocket traffic: messages and bytes per second by type;
-- optionally, browser main-thread CPU at idle and while panning (--browser);
+- optionally, browser process-tree CPU and WebGL frames/s at idle and while panning (--browser);
 - optionally, plan-to-motion latency and replan cadence per robot (--latency);
 - optionally, py-spy profiles of the Python processes, taken from a
   throwaway sidecar container that joins each container's PID namespace,
   so nothing in the stack is modified.
 
 Only docker and python3 are needed on the host. The --browser flag also needs
-node (for Playwright) or a local Chromium binary; it degrades gracefully.
+Linux /proc, node, Playwright and its Chromium binary; it degrades gracefully.
 """
 
 from __future__ import annotations
@@ -383,82 +383,133 @@ def perf_mgg(seconds: int) -> str:
 # -------------------------------------------------------------- browser CPU
 
 
-_BROWSER_JS = r"""
+_BROWSER_HELPERS_JS = r"""
+function parseProcStat(text) {
+  // comm may contain spaces and parentheses; fields after its LAST ')' start at 3.
+  const end = text.lastIndexOf(')');
+  const f = text.slice(end + 1).trim().split(/\s+/);
+  if (end < 0 || f.length < 20) throw new Error('invalid /proc stat');
+  const result = {ppid: Number(f[1]), ticks: Number(f[11]) + Number(f[12]),
+                  start: Number(f[19])};
+  if (!Object.values(result).every(Number.isFinite)) throw new Error('invalid /proc ticks');
+  return result;
+}
+function cpuPercent(ticks, wall, hz) {
+  if (!(wall > 0 && hz > 0 && ticks >= 0)) throw new Error('invalid CPU interval');
+  return 100 * ticks / hz / wall;
+}
+"""
+
+_BROWSER_JS = _BROWSER_HELPERS_JS + r"""
+const fs = require('node:fs');
 const pwPath = process.env.PW_MODULES;
 let pw;
 try { pw = require(pwPath + '/playwright'); } catch(e) {
-  try { pw = require(pwPath + '/playwright-core'); } catch(e2) {
-    console.log(JSON.stringify({error: 'playwright not found: ' + e2.message}));
-    process.exit(0);
-  }
+  pw = require(pwPath + '/playwright-core');
 }
-const { chromium } = pw;
-const URL   = process.env.DASH_URL;
-const IDLE  = parseFloat(process.env.IDLE_S  || '5');
-const PANS  = parseInt(  process.env.PANS     || '3');
+const IDLE = Number(process.env.IDLE_S);
+const PANS = Number(process.env.PANS);
+const HZ = Number(process.env.CLK_TCK);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function metric(arr, name) {
-  const m = arr.find(x => x.name === name);
-  return m ? m.value : 0;
+// Keep the last observed ticks of exited processes, keyed by PID + start time.
+// Short-lived processes between snapshots can still be missed.
+function treeSampler(root) {
+  const known = new Map();
+  return () => {
+    const rows = new Map();
+    for (const pid of fs.readdirSync('/proc').filter(p => /^\d+$/.test(p))) {
+      try { rows.set(Number(pid), parseProcStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'))); }
+      catch(e) { if (!['ENOENT', 'ESRCH'].includes(e.code)) throw e; }
+    }
+    if (!rows.has(root)) throw new Error('browser process exited');
+    const selected = new Set([root]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [pid, row] of rows) {
+        if (!selected.has(pid) && selected.has(row.ppid)) {
+          selected.add(pid); changed = true;
+        }
+      }
+    }
+    for (const [pid, row] of rows) {
+      const key = `${pid}:${row.start}`;
+      if (selected.has(pid) || known.has(key)) known.set(key, row.ticks);
+    }
+    return [...known.values()].reduce((a, b) => a + b, 0);
+  };
 }
 
 (async () => {
-  let browser;
+  let server, browser;
   try {
-    browser = await chromium.launch({
+    server = await pw.chromium.launchServer({
       headless: true,
-      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+      args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
     });
-    const ctx  = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-    const page = await ctx.newPage();
-    const cdp  = await ctx.newCDPSession(page);
-    await cdp.send('Performance.enable');
-
-    // Navigate and settle; tolerate a stack that is not running
-    try { await page.goto(URL, { waitUntil: 'networkidle', timeout: 20000 }); }
-    catch(_) {}
-    await new Promise(r => setTimeout(r, 2000));
-
-    // -- idle phase --
-    const r0 = (await cdp.send('Performance.getMetrics')).metrics;
-    await new Promise(r => setTimeout(r, IDLE * 1000));
-    const r1 = (await cdp.send('Performance.getMetrics')).metrics;
-    const idle_wall   = metric(r1, 'Timestamp') - metric(r0, 'Timestamp');
-    const idle_task   = metric(r1, 'TaskDuration')   - metric(r0, 'TaskDuration');
-    const idle_script = metric(r1, 'ScriptDuration')  - metric(r0, 'ScriptDuration');
-
-    // -- panning phase: synthetic mouse drags across the viewport centre --
-    const vp  = page.viewportSize();
-    const cx  = vp ? vp.width  / 2 : 640;
-    const cy  = vp ? vp.height / 2 : 360;
-    const r2  = (await cdp.send('Performance.getMetrics')).metrics;
+    const ticks = treeSampler(server.process().pid);
+    browser = await pw.chromium.connect(server.wsEndpoint());
+    const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+    await page.addInitScript(() => {
+      window.__webgl = {clears: 0, draws: 0, frames: 0};
+      let frameTime;
+      // Count distinct animation-frame timestamps with GL work, not draw calls
+      // (a scene may issue many draws and clears per frame).
+      let rafTime = 0;
+      function clock(t) { rafTime = t; requestAnimationFrame(clock); }
+      requestAnimationFrame(clock);
+      for (const C of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+        if (!C) continue;
+        for (const name of ['clear', 'drawElements', 'drawArrays',
+                            'drawElementsInstanced', 'drawArraysInstanced']) {
+          const original = C.prototype[name];
+          if (!original) continue;
+          C.prototype[name] = function (...args) {
+            window.__webgl[name === 'clear' ? 'clears' : 'draws']++;
+            if (frameTime !== rafTime) { window.__webgl.frames++; frameTime = rafTime; }
+            return original.apply(this, args);
+          };
+        }
+      }
+    });
+    await page.goto(process.env.DASH_URL, { waitUntil: 'load', timeout: 30000 });
+    await sleep(8000);
+    async function snapshot() {
+      const gl = await page.evaluate(() => ({...window.__webgl}));
+      return {gl, ticks: ticks(), time: performance.now() / 1000};
+    }
+    function measurement(a, b, prefix) {
+      const wall = b.time - a.time;
+      return {
+        [`${prefix}_cpu_pct`]: cpuPercent(b.ticks - a.ticks, wall, HZ),
+        [`${prefix}_wall_s`]: wall,
+        [`${prefix}_webgl_frames_per_s`]: (b.gl.frames - a.gl.frames) / wall,
+        [`${prefix}_clears_per_s`]: (b.gl.clears - a.gl.clears) / wall,
+        [`${prefix}_draws_per_s`]: (b.gl.draws - a.gl.draws) / wall,
+      };
+    }
+    const a = await snapshot();
+    await sleep(IDLE * 1000);
+    const b = await snapshot();
+    const c = await snapshot();
     for (let i = 0; i < PANS; i++) {
-      await page.mouse.move(cx - 100, cy);
+      await page.mouse.move(700, 450);
       await page.mouse.down();
       for (let dx = 0; dx <= 200; dx += 20) {
-        await page.mouse.move(cx - 100 + dx, cy + Math.sin(dx * 0.05) * 30);
-        await new Promise(r => setTimeout(r, 40));
+        await page.mouse.move(700 + dx, 450 + Math.sin(dx * 0.05) * 30);
+        await sleep(40);
       }
       await page.mouse.up();
-      await new Promise(r => setTimeout(r, 600));
+      await sleep(600);
     }
-    const r3  = (await cdp.send('Performance.getMetrics')).metrics;
-    const pan_wall   = metric(r3, 'Timestamp') - metric(r2, 'Timestamp');
-    const pan_task   = metric(r3, 'TaskDuration')   - metric(r2, 'TaskDuration');
-    const pan_script = metric(r3, 'ScriptDuration')  - metric(r2, 'ScriptDuration');
-
-    console.log(JSON.stringify({
-      idle_cpu_pct:    idle_wall > 0 ? 100 * idle_task   / idle_wall : null,
-      idle_script_pct: idle_wall > 0 ? 100 * idle_script / idle_wall : null,
-      idle_wall_s: idle_wall,
-      pan_cpu_pct:    pan_wall > 0 ? 100 * pan_task   / pan_wall : null,
-      pan_script_pct: pan_wall > 0 ? 100 * pan_script / pan_wall : null,
-      pan_wall_s: pan_wall,
-    }));
+    const d = await snapshot();
+    console.log(JSON.stringify({...measurement(a, b, 'idle'), ...measurement(c, d, 'pan')}));
   } catch (e) {
-    console.log(JSON.stringify({ error: String(e) }));
+    console.log(JSON.stringify({error: String(e)}));
   } finally {
     if (browser) await browser.close();
+    if (server) await server.close();
   }
 })();
 """
@@ -487,16 +538,12 @@ def browser_cpu(
     idle_s: float = 5.0,
     pans: int = 3,
 ) -> dict:
-    """Measure browser renderer-thread CPU at idle and while panning via CDP.
+    """Measure Linux browser-tree CPU and WebGL activity using Playwright.
 
-    Uses Playwright (found in the npx cache) to drive a headless Chromium.
-    Falls back gracefully with an ``error`` key when no browser is available.
-
-    Metric: CDP ``Performance.getMetrics`` ``TaskDuration`` /
-    ``ScriptDuration`` deltas divided by the ``Timestamp`` delta (seconds).
-    CPU % = TaskDuration_delta / Timestamp_delta * 100.  The Timestamp clock
-    is monotonic within the renderer process (seconds since process start);
-    it is not correlated with wall time, but the ratio is accurate.
+    CPU uses /proc utime+stime (100% = one core), including GPU/compositor
+    descendants of the launched browser PID. SwiftShader inflates CPU/frame.
+    WebGL frames are animation-frame intervals containing clear/draw calls;
+    raw clear/draw rates are also returned. Canvas2D work is not WebGL work.
     """
     pw_modules = _find_playwright_modules()
     if pw_modules is None:
@@ -513,6 +560,7 @@ def browser_cpu(
         "DASH_URL": url,
         "IDLE_S": str(idle_s),
         "PANS": str(pans),
+        "CLK_TCK": str(os.sysconf("SC_CLK_TCK")),
     }
     timeout = idle_s + pans * 3 + 90
     result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
@@ -821,21 +869,19 @@ def report(args) -> str:
 
     if getattr(args, "browser", False):
         burl = getattr(args, "browser_url", "http://localhost:5173")
-        lines += ["", "### Browser main-thread CPU (CDP Performance.getMetrics)"]
+        lines += ["", "### Browser process-tree CPU and WebGL (SwiftShader inflates CPU cost per frame)"]
         bcpu = browser_cpu(burl, idle_s=getattr(args, "browser_idle_s", 5.0))
         if "error" in bcpu:
             lines.append(f"- browser measurement unavailable: {bcpu['error']}")
         else:
-            lines.append(
-                f"- **idle**: task {bcpu.get('idle_cpu_pct', '?'):.1f} % CPU, "
-                f"script {bcpu.get('idle_script_pct', '?'):.1f} % "
-                f"(over {bcpu.get('idle_wall_s', 0):.1f} s)"
-            )
-            lines.append(
-                f"- **panning**: task {bcpu.get('pan_cpu_pct', '?'):.1f} % CPU, "
-                f"script {bcpu.get('pan_script_pct', '?'):.1f} % "
-                f"(over {bcpu.get('pan_wall_s', 0):.1f} s)"
-            )
+            for phase, label in (("idle", "idle"), ("pan", "panning")):
+                lines.append(
+                    f"- **{label}**: {bcpu[f'{phase}_cpu_pct']:.1f} % CPU, "
+                    f"{bcpu[f'{phase}_webgl_frames_per_s']:.1f} WebGL frames/s, "
+                    f"{bcpu[f'{phase}_clears_per_s']:.1f} clears/s, "
+                    f"{bcpu[f'{phase}_draws_per_s']:.1f} draws/s "
+                    f"(over {bcpu[f'{phase}_wall_s']:.1f} s)"
+                )
             lines.append(f"  URL: {burl}")
 
     if getattr(args, "latency", False):
@@ -907,7 +953,7 @@ def main() -> int:
     parser.add_argument(
         "--browser",
         action="store_true",
-        help="measure browser main-thread CPU via headless Chromium + Playwright CDP",
+        help="measure browser process-tree CPU and WebGL frames/s via headless Chromium + Playwright (/proc, SwiftShader)",
     )
     parser.add_argument(
         "--browser-url",
