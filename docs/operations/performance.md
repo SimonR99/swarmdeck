@@ -12,11 +12,18 @@ Hosts:
   desktop, so its load varies.
 - **tuf** (`ssh tuf`): 20 cores, RTX 4070, workspace `~/swarmdeck-ws`
   (`swarmdeck/` plus the SubT assets under `argos3/`), logs in
-  `~/swarmdeck-ws/logs/`. Used for GPU and repeatable measurements.
+  `~/swarmdeck-ws/logs/`. Used for GPU and repeatable measurements. Synced
+  from the workstation with `git push tuf planning-refactor`.
+- **botman** (`ssh botman@192.168.1.49`, lab Wi-Fi): Jetson AGX Orin, 12
+  Cortex-A78AE cores at 2.2 GHz, `MODE_50W`. It runs the `main` deployment and
+  its experiments, so never change it. For benchmarks, pause it with
+  `docker stop` and resume with `docker start` on the same containers.
 
-MGG's C++ is profiled with `perf`, which needs the performance-monitoring
-capability (`perf_event_paranoid` is 4 on both hosts): run it from a sidecar
-container given `--cap-add PERFMON` in the MGG container's PID namespace.
+MGG's C++ is profiled with `perf` (`scripts/profile_stack.py --perf-mgg`)
+from a sidecar container in the MGG container's PID namespace. Because
+`perf_event_paranoid` is 4 on both hosts, Ubuntu refuses `PERFMON` alone, so
+the sidecar gets `SYS_ADMIN` and `SYS_PTRACE` with no seccomp filter. No sudo
+is needed.
 
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
@@ -166,3 +173,70 @@ Self time (the release build has no frame pointers, so no callers):
 - On tuf the simulation runs at real time (1.00, paced; it could go faster) and the idle stack uses 136 % CPU against 351 % on the workstation.
 - MGG plan cycles on tuf: median 0.69 s, max 1.04 s, for the same graph size that took 3.2-10.9 s on the workstation. Most of the workstation's slowness was host contention (desktop, browser, iGPU simulation), not the planner.
 - Within MGG, about two thirds of the planning CPU is voxel lookup by binary search. A hashed or blocked cell index would cut the lattice build several-fold without changing behaviour; that matters most on the robots' onboard CPUs.
+
+## 2026-09-23T12:40 - host comparison: botman (Jetson AGX Orin) vs tuf vs workstation
+
+`scripts/bench/host_bench.cpp` and `scripts/bench/gpu_bench.cu`, built on each
+host with `-O2` (g++ 11.4 on botman, 9.5 on tuf, 15.2 on the workstation;
+CUDA 12.6 and 12.4). `voxel_status` reproduces `NativeMolaGrid::status`: two
+`std::binary_search` over sorted 24-byte cells, with ray-like coherent queries.
+It also times a `std::unordered_set` as a reference for the planned index.
+
+- **botman loaded:** the `main` deployment running (about 50 % of each of the
+  12 cores, see below).
+- **botman idle:** all 14 `swarmdeck-botman-*` containers stopped with
+  `docker stop`, then restarted with `docker start`; nothing was recreated or
+  moved.
+- **tuf:** its stack was running idle; tuf is also a shared machine.
+- **workstation:** load average 22, so its numbers are erratic.
+
+| Single thread, ns per voxel query | botman loaded | botman idle | tuf | workstation |
+|---|---:|---:|---:|---:|
+| binary search, 250k cells | 330 | 278 | 115 | 1351 |
+| binary search, 1M cells | 702 | 572 | 197 | 1613 |
+| binary search, 4M cells | 1090 | 923 | 405 | 621 |
+| `unordered_set`, 250k cells | 477 | 402 | 52 | 632 |
+| `unordered_set`, 1M cells | 533 | 492 | 98 | 168 |
+| `unordered_set`, 4M cells | 573 | 515 | 129 | 158 |
+
+| Other | botman loaded | botman idle | tuf | workstation |
+|---|---:|---:|---:|---:|
+| binary search, 4M cells, all threads (ns per query) | 185 | 130 | 64 | 279 |
+| sort 10M doubles (ms) | 1016 | 1013 | 603 | 1289 |
+| float matmul 768, one thread (GFLOP/s) | 3.2 | 3.2 | 8.0 | 4.3 |
+| memcpy, one thread / all threads (GB/s) | 18.8 / 60.8 | 19.7 / 74.7 | 26.4 / 40.2 | 32.4 / 66.8 |
+
+| GPU | botman (Orin, 16 SMs) | tuf (RTX 4070) |
+|---|---:|---:|
+| device copy (GB/s) | 114 | 427 |
+| cuBLAS SGEMM 4096 (TFLOP/s) | 3.4 | 20.7 |
+| cuBLAS HGEMM 4096 (TFLOP/s) | 36.7 | 92.8 |
+
+botman's deployment load at idle (`docker stats`, % of one core):
+
+| Container | CPU % |
+|---|---:|
+| slam | 182 |
+| nav2 | 77 |
+| mgg | 63 (no plan cycles running) |
+| adapter | 47 |
+| duck-detector | 47 |
+| vectornav | 41 |
+| lidar | 41 |
+| oak | 30 |
+| media | 20 |
+| TF publishers (4) | 7-9 each |
+
+### Reading
+
+- **MGG's voxel lookups are 2.3-2.9x slower on botman than on tuf** with the
+  robot idle, and 2.7-3.6x slower under its own deployment load. Scaling tuf's
+  plan cycles (median 0.69 s, lattice 0.49 s) gives about 1.7-2.4 s onboard.
+  This is an estimate: botman runs `main`, with no MOLA grid, so MGG itself
+  could not be measured there.
+- **On the Orin, `std::unordered_set` barely beats the binary search.** It is
+  slower at 250k cells and only 1.8x faster at 4M. On tuf it is 2-3x faster
+  everywhere. The Orin's memory latency punishes node-based hashing, so the
+  replacement index must be cache-friendly and chosen by its botman numbers.
+- **The Orin's GPU is about 6x below the RTX 4070 in FP32 and 2.5x in FP16.**
+  That rules it out for running the simulation, not for onboard inference.
