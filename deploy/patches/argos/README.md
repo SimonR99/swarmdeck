@@ -7,7 +7,7 @@ instead of silently omitting traversal after an upstream update. Reapplying the
 step patch is idempotent.
 
 The contact traction lives in fork commit `45aabc8a`; the image pin
-(`ARGOS_REF`, currently `2fd71e40`) must include it, because the step patch
+(`ARGOS_REF`, currently `83ca4602`) must include it, because the step patch
 anchors on its `SetDriveVelocity` call and fails the build without it.
 
 `SwarmDeckStep` runs only for a commanded translation. A cheap forward shape

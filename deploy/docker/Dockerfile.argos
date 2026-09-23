@@ -45,7 +45,7 @@ RUN mkdir -p /opt/filament-sdk \
 # drifting odometry sensors, and the bunker / bunker-mini / scout-mini / spot
 # robot plugins. Pinned, because a moving simulator is not a baseline.
 ARG ARGOS_REPO=https://github.com/beltrame/argos3.git
-# Pinned to the viewer-flashlight commit, which sits on top of contact-driven
+# Pinned to the 64 MiB Filament handle-arena commit, on top of contact-driven
 # ground-robot traction (the anchor apply_steps.py patches) and robot-mounted
 # headlights (the `<spot entity=...>` floodlights make_argos_session.py
 # writes). Its ancestor c236a40f made drift odometry start-relative, matching
@@ -54,7 +54,7 @@ ARG ARGOS_REPO=https://github.com/beltrame/argos3.git
 # anything in this repository recording that it did. Keep this and the default
 # in deploy/compose/docker-compose.yml the same: they used to disagree, and the
 # compose value silently won every build made through Compose.
-ARG ARGOS_REF=2fd71e40
+ARG ARGOS_REF=83ca4602
 RUN git clone "${ARGOS_REPO}" /src/argos3 \
     && git -C /src/argos3 checkout "${ARGOS_REF}"
 
