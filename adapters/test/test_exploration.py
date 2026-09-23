@@ -1333,3 +1333,47 @@ def test_settled_or_unassigned_reservation_does_not_arm_a_wake():
     explorer.tick()
     assert timer.resets == 0 and explorer.wake_due is None
     bridge.follow_path.assert_not_called()
+
+
+def test_controller_success_replans_on_the_terminal_event(monkeypatch):
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    now = [50.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.start_client.call_async.return_value.set_result(NS(success=True))
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    explorer.replan_client.call_async.assert_not_called()
+
+    bridge.nav_status = "succeeded"
+    explorer.controller_finished()
+    assert timer.resets == 1 and timer.timer_period_ns == 1_000_000
+    now[0] = 50.001
+    explorer._on_wake()
+    explorer.replan_client.call_async.assert_called_once()
+    assert explorer.executing_plan is None and explorer.status == "waiting"
+
+
+def test_controller_failure_wakes_for_the_recovery_backoff(monkeypatch):
+    bridge, explorer = rig()
+    explorer.controller_replan_backoff_s = 0.25
+    explorer.wake_timer = timer = WakeTimer()
+    now = [50.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.start_client.call_async.return_value.set_result(NS(success=True))
+    explorer.on_path(path())
+
+    bridge.nav_status = "failed"
+    explorer.controller_finished()
+    now[0] = 50.001
+    explorer._on_wake()  # Records the failure and arms the backoff wake.
+    explorer.replan_client.call_async.assert_not_called()
+    assert explorer.wake_due == pytest.approx(50.251)
+    assert timer.timer_period_ns == 250_000_000
+
+    now[0] = 50.251
+    explorer._on_wake()
+    explorer.replan_client.call_async.assert_called_once()
+    assert explorer.controller_replan_attempts == 1

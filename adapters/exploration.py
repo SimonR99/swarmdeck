@@ -442,8 +442,13 @@ class MggExploration:
             self.timing.mark("accepted")
 
     def controller_finished(self):
-        """Bridge hook: the controller goal reached a terminal state."""
+        """Bridge hook: the controller goal reached a terminal state.
+
+        The next tick releases the reservation and asks MGG for the next path;
+        run it now rather than up to 0.2 s later while the robot stands.
+        """
         self.timing.controller_finished()
+        self.wake()
 
     @staticmethod
     def _bounded_float(value, lower, upper, default):
@@ -789,6 +794,7 @@ class MggExploration:
         self.status = "waiting"
         self.awaiting_replan_path = False
         self.controller_replan_due = now + self.controller_replan_backoff_s
+        self.wake(self.controller_replan_backoff_s)
 
     def _drive_controller_replan(self, now):
         if (
