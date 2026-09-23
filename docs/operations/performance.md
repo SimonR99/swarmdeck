@@ -294,3 +294,179 @@ average ~4.8, two minutes after boot). Two runs, ns per query:
 - Scaling tuf's new plan cycle (~0.21 s) by the botman/tuf CPU factor
   measured earlier (2.3-3.6x) puts the onboard cycle at about 0.5-0.8 s,
   inside the 1 s target. This is an estimate until MGG runs on botman.
+
+## 2026-09-23T17:21 - tuf, SubT, 4 robots, drift, RTX 4070, idle, after clean-up wave 1 (commit 5a40e7b)
+
+- **Real-time factor 1.00** (29.6 s simulated in 29.6 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| argos | 56 |
+| sim | 29 |
+| peer2 | 11 |
+| peer3 | 10 |
+| peer0 | 10 |
+| peer1 | 10 |
+| mgg | 6 |
+| server | 1 |
+| mediamtx | 0 |
+| mapping | 0 |
+| ui | 0 |
+| **total** | **133** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| argos3 | argos | 56 |
+| swarmdeck_argos_bridge.py | sim | 13 |
+| python3 /r2 | peer2 | 7 |
+| python3 /r3 | peer3 | 7 |
+| python3 /r0 | peer0 | 7 |
+| python3 /r1 | peer1 | 6 |
+| adapter_sim.py | sim | 3 |
+| lidar_handler_node.py /r0 | peer0 | 2 |
+| lidar_handler_node.py /r3 | peer3 | 2 |
+| lidar_handler_node.py /r2 | peer2 | 2 |
+| lidar_handler_node.py /r1 | peer1 | 2 |
+| loop_closure_detection_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r1 | peer1 | 2 |
+| loop_closure_detection_node.py /r0 | peer0 | 2 |
+| loop_closure_detection_node.py /r2 | peer2 | 2 |
+
+- MGG plan cycles: none in the window (fleet not exploring?)
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 19.3 | 46.4 |
+| fleet_change | 0.1 | 1.0 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+## 2026-09-23T17:23 - tuf, SubT, exploring (4 robots), RTX 4070, after clean-up wave 1 (commit 5a40e7b)
+
+- Explore started by the harness
+- **Real-time factor 1.00** (118.3 s simulated in 118.3 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| mapping | 175 |
+| peer0 | 78 |
+| mgg | 76 |
+| server | 74 |
+| peer2 | 73 |
+| argos | 70 |
+| peer1 | 67 |
+| sim | 60 |
+| peer3 | 12 |
+| mediamtx | 0 |
+| ui | 0 |
+| **total** | **686** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| swarmdeck-mola-import | mapping | 82 |
+| python | server | 74 |
+| argos3 | argos | 70 |
+| loop_closure_detection_node.py /r0 | peer0 | 50 |
+| loop_closure_detection_node.py /r2 | peer2 | 50 |
+| swarmdeck-mola-import | mapping | 46 |
+| loop_closure_detection_node.py /r1 | peer1 | 44 |
+| swarmdeck-mola-import | mapping | 44 |
+| mggplanner_node /robot_1/mgg | mgg | 26 |
+| swarmdeck_argos_bridge.py | sim | 25 |
+| mggplanner_node /robot_0/mgg | mgg | 24 |
+| mggplanner_node /robot_2/mgg | mgg | 23 |
+| python3 /r0 | peer0 | 21 |
+| python3 /r1 | peer1 | 17 |
+| python3 /r2 | peer2 | 16 |
+
+- **MGG plan cycles: 37**, wall ms median 188 (max 283); lattice median 96, gain median 56; median 1496 vertices, 26173 edges
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 18.9 | 106.1 |
+| fleet_change | 0.1 | 2.4 |
+| session_state | 1.1 | 0.1 |
+| alert | 0.5 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+### Plan-to-motion latency (MGG plan → robot displacement > 0.10 m)
+- MGG plan cycles in window: 35
+  - Clock: host UTC wall clock (docker log timestamps vs container time.time()); typical error < 1 ms
+  - **robot_0**; replan cadence: median 7.81 s, p90 13.07 s, max 31.28 s (11 intervals); latency: median 1.33 s, p90 3.55 s, max 6.64 s (11 samples)
+  - **robot_1**; replan cadence: median 8.90 s, p90 12.24 s, max 12.99 s (11 intervals); latency: median 1.32 s, p90 1.53 s, max 2.17 s (12 samples)
+  - **robot_2**; replan cadence: median 11.39 s, p90 15.80 s, max 15.80 s (10 intervals); latency: median 1.34 s, p90 3.02 s, max 3.14 s (11 samples)
+
+## 2026-09-23T17:31 - tuf, SubT, 4 robots, drift, RTX 4070, idle (after exploring), robot_state signature fix (commit 8f00773)
+
+- **Real-time factor 1.00** (28.5 s simulated in 28.5 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| argos | 56 |
+| peer0 | 51 |
+| sim | 29 |
+| peer3 | 11 |
+| peer2 | 10 |
+| peer1 | 10 |
+| mgg | 6 |
+| server | 2 |
+| mediamtx | 0 |
+| mapping | 0 |
+| ui | 0 |
+| **total** | **174** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| argos3 | argos | 56 |
+| pose_graph_manager /r0 | peer0 | 41 |
+| swarmdeck_argos_bridge.py | sim | 14 |
+| python3 /r3 | peer3 | 7 |
+| python3 /r0 | peer0 | 7 |
+| python3 /r2 | peer2 | 6 |
+| python3 /r1 | peer1 | 6 |
+| adapter_sim.py | sim | 3 |
+| lidar_handler_node.py /r3 | peer3 | 2 |
+| lidar_handler_node.py /r0 | peer0 | 2 |
+| lidar_handler_node.py /r2 | peer2 | 2 |
+| lidar_handler_node.py /r1 | peer1 | 2 |
+| loop_closure_detection_node.py /r0 | peer0 | 2 |
+| loop_closure_detection_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r2 | peer2 | 2 |
+
+- MGG plan cycles: none in the window (fleet not exploring?)
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 4.1 | 10.6 |
+| fleet_change | 0.1 | 1.0 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+### Reading: clean-up wave 1 (Phase 0, Phase 1, MGG index) on tuf
+
+Against the 12:04/12:05 baselines (`0bb7f5a`), same launch (SubT, 4 robots,
+drift, RTX 4070), real-time factor 1.00 throughout:
+
+- **Exploring, 120 s:** stack CPU 869 % -> 686 % (-21 %). sim 79 -> 60, mgg
+  94 -> 76, server 79 -> 74, peers 65-112 -> 12-78, mapping 195 -> 175.
+- **MGG:** plan-cycle median 692 -> 188 ms, lattice 492 -> 96 ms, gain
+  142 -> 56 ms, same graph size.
+- **Dashboard traffic:** `robot_state` 185 -> 106 KB/s while exploring (the
+  duplicate paths are gone). At idle, 19.3 -> 4.1 messages/s and 46 -> 11 KB/s
+  after `8f00773`, whose signature ignores the authority age and float noise; the
+  change-only broadcast did not fire before it.
+- **Idle stack:** 136 % -> 133 %; tuf's idle load was already small. The
+  17:31 idle sample was taken while the fleet was still settling after the
+  exploration run, so its total (174 %) is not comparable.
+- **New finding, plan-to-motion latency:** a median of ~1.3 s from an MGG plan to
+  0.1 m of robot motion (p90 1.5-3.6 s, max 6.6 s), and a replan every 8-11 s.
+  On tuf this now exceeds the planning time (0.19 s); it is the next
+  exploration-pace target. `robot_3` (Spot) produced no latency samples: its log
+  shows lost peer reservations and "controller patience exceeded".
+- **Not measured yet:** dashboard browser CPU (`--browser`), sim-container idle
+  target (29 % against < 60 %: met), server idle target (1-2 %: met).
