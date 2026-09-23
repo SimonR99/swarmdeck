@@ -568,13 +568,16 @@ def browser_cpu(
     timeout = idle_s + pans * 3 + 90
     try:
         result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return {"error": f"browser measurement timed out after {timeout:g} s"}
+        nproc = int(sh(["nproc"], timeout=5).stdout.strip())
+    except subprocess.TimeoutExpired as exc:
+        return {"error": f"browser measurement timed out after {exc.timeout:g} s"}
+    except (OSError, ValueError) as exc:
+        return {"error": f"browser measurement unavailable: {exc}"}
     for line in reversed((result.stdout + "\n" + result.stderr).splitlines()):
         line = line.strip()
         if line.startswith("{"):
             try:
-                return json.loads(line)
+                return {**json.loads(line), "nproc": nproc}
             except json.JSONDecodeError:
                 pass
     return {"error": (result.stderr or result.stdout).strip()[-300:]}
@@ -904,7 +907,7 @@ def report(args) -> str:
                     f"{bcpu[f'{phase}_draws_per_s']:.1f} draws/s "
                     f"(over {bcpu[f'{phase}_wall_s']:.1f} s)"
                 )
-            lines.append(f"  URL: {burl}")
+            lines.append(f"  URL: {burl}; nproc: {bcpu['nproc']} (CPU: 100 % = one core)")
 
     if getattr(args, "latency", False):
         lines += [

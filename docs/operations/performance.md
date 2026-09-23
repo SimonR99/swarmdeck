@@ -34,8 +34,9 @@ Chromium process tree's CPU from Linux `/proc` (100 % = one core), including
 GPU/compositor descendants, and WebGL frames per second. Opens the dashboard
 at URL (default `http://localhost:5173`) for an idle window and synthetic
 mouse-drag panning. A WebGL frame is an animation-frame interval containing
-clear/draw work; Canvas2D work is not counted as WebGL. Endpoint process
-sampling can miss short-lived processes. Linux only; requires `node` ≥ 18,
+clear/draw work; Canvas2D work is not counted as WebGL. The browser report
+records `nproc` alongside the one-core CPU units. Endpoint process sampling
+can miss short-lived processes. Linux only; requires `node` ≥ 18,
 Playwright and its Chromium binary. The probe forces SwiftShader software
 rendering, which inflates CPU per frame and cannot establish a real-GPU idle
 CPU target. Prints an unavailable result if the optional probe fails.

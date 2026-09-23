@@ -365,3 +365,48 @@ def test_browser_timeout_returns_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(profile_stack, 'sh', timeout)
     result = profile_stack.browser_cpu('http://localhost:5173', idle_s=1, pans=0)
     assert 'timed out' in result['error']
+
+
+def test_browser_result_records_nproc(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def command(args, **kwargs):
+        output = '20\n' if args == ['nproc'] else '{"idle_cpu_pct": 35}\n'
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr='')
+    monkeypatch.setattr(profile_stack, 'sh', command)
+    result = profile_stack.browser_cpu('http://localhost:5173')
+    assert result['nproc'] == 20
+    assert result['idle_cpu_pct'] == 35
+
+
+def test_browser_report_prints_nproc(monkeypatch):
+    import argparse
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, 'git_commit', lambda *a: 'test')
+    monkeypatch.setattr(profile_stack, 'running_containers', lambda: ['test'])
+    monkeypatch.setattr(profile_stack, 'real_time_factor', lambda *a: {'error': 'offline'})
+    monkeypatch.setattr(profile_stack, 'cpu_sample', lambda *a: ({}, []))
+    monkeypatch.setattr(profile_stack, 'mgg_cycles', lambda *a: [])
+    monkeypatch.setattr(profile_stack, 'websocket_traffic', lambda *a: {})
+    metrics = {f'{phase}_{metric}': 1 for phase in ('idle', 'pan') for metric in
+               ('cpu_pct', 'webgl_frames_per_s', 'clears_per_s', 'draws_per_s', 'wall_s')}
+    monkeypatch.setattr(profile_stack, 'browser_cpu', lambda *a, **kw: {**metrics, 'nproc': 20})
+    args = argparse.Namespace(label='', start_explore=False, window=1, top=1,
+                              perf_mgg=False, profiles=False, browser=True)
+    assert 'nproc: 20' in profile_stack.report(args)
+
+
+def test_browser_missing_nproc_is_unavailable_not_a_crash(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def command(args, **kwargs):
+        if args == ['nproc']:
+            raise FileNotFoundError('nproc unavailable')
+        return subprocess.CompletedProcess(args, 0, stdout='{}', stderr='')
+    monkeypatch.setattr(profile_stack, 'sh', command)
+    assert 'nproc unavailable' in profile_stack.browser_cpu('http://localhost:5173')['error']
