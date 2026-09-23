@@ -487,6 +487,7 @@
         gaussianEtag = '';
         scene.terrain.setGaussianProxy(renderMode === 'gaussians');
         gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
+        requestRender();
         return;
       }
       if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
@@ -513,6 +514,7 @@
       if (!controller.signal.aborted && currentScope === gaussianScope()) {
         const cached = gaussianCount > 0;
         scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
+        requestRender();
         gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${e instanceof Error ? e.message : String(e)}`;
       }
     } finally {
@@ -915,6 +917,7 @@
 
     worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
     scene.gaussians.group.visible = renderMode === 'gaussians';
+    scene.gaussians.onDirty = () => requestRender();
     mounted = true;
     const splatPoll = window.setInterval(
       () => renderMode === 'gaussians' && void fetchGaussians(),
