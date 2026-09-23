@@ -314,3 +314,33 @@ def test_invalid_planning_frame_fails_at_launch(launch_module, monkeypatch, temp
             "params",
             True,
         )
+
+
+def test_sim_global_bounds_cover_the_whole_mesh_world_in_odom(
+    launch_module, monkeypatch
+):
+    repo = Path(__file__).parents[2]
+    monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
+    monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
+    path = repo / "deploy/mgg/fleet.launch.py"
+    spec = importlib.util.spec_from_file_location("mgg_bounds_launch", path)
+    fleet_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet_module)
+
+    # The procedural building keeps the fixed box.
+    assert fleet_module.global_bounds({"fleet": {}}, "robot_0") == (
+        fleet_module.DEFAULT_GLOBAL_BOUNDS
+    )
+    # SubT: arena 453.5 x 213.5 x 36.5 m centred at (191.9, 10, -1.7), seen
+    # from robot_0's spawn at (-14.5, 1.0, 0.15): from the hangar's back wall
+    # to the network's far end at x = 411 m, and down to z = -15 m.
+    config = {
+        "world": "subt_finals",
+        "fleet": {},
+        "map": {"start_poses": {"robot_0": {"x": -14.5, "y": 1.0, "z": 0.15}}},
+    }
+    low, high = fleet_module.global_bounds(config, "robot_0")
+    # Arena x [-34.85, 418.65], y [-96.75, 116.75], z [-19.95, 16.55].
+    assert low == pytest.approx([-34.85 + 14.5, -96.75 - 1.0, -19.95 - 0.15])
+    assert high == pytest.approx([418.65 + 14.5, 116.75 - 1.0, 16.55 - 0.15])
+    assert high[0] > 411.0 + 14.5 and low[2] < -15.0 - 0.15

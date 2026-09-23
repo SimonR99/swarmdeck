@@ -16,6 +16,10 @@ MOLA_MAP_RESOLUTION_M = 0.2
 # GridGraphLocal resolution in mgg_argos/config/bistro.yaml.
 LATTICE_RESOLUTION_M = 0.5
 MAX_INITIAL_GROUND_REACH_M = 5.0
+# MGG's global space, in each robot's odom frame. It keeps exploration from
+# wandering off into open space; it does not cost planning time. The
+# procedural building is 26 m across; a mesh world is bounded by its arena.
+DEFAULT_GLOBAL_BOUNDS = ([-60.0, -60.0, -3.0], [60.0, 60.0, 3.0])
 
 
 def simulation_sensor_overrides(lidar):
@@ -54,6 +58,37 @@ def simulation_robot_prefix(fleet):
     return prefix
 
 
+def global_bounds(config, robot):
+    """MGG's global space for `robot`: its world's whole arena, in the robot's
+    odom frame (the planner's world frame), which starts at the robot's spawn
+    pose. The arena box is moved into that frame and re-boxed around its
+    rotated corners."""
+    from swarmdeck_sim.scenario.worlds import mesh_world
+
+    world = mesh_world(config)
+    if world is None:
+        return DEFAULT_GLOBAL_BOUNDS
+    size = [float(v) for v in world.arena_size.split(",")]
+    center = [float(v) for v in world.arena_center.split(",")]
+    starts = (config.get("map") or {}).get("start_poses") or {}
+    start = starts.get(robot) or world.default_start_poses.get(robot) or {}
+    sx, sy, sz = (float(start.get(k, 0.0)) for k in ("x", "y", "z"))
+    yaw = float(start.get("yaw", 0.0))
+    cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+    corners = []
+    for dx in (-0.5, 0.5):
+        for dy in (-0.5, 0.5):
+            x = center[0] + dx * size[0] - sx
+            y = center[1] + dy * size[1] - sy
+            corners.append((cos_y * x + sin_y * y, -sin_y * x + cos_y * y))
+    low_z = center[2] - size[2] / 2.0 - sz
+    high_z = center[2] + size[2] / 2.0 - sz
+    return (
+        [min(c[0] for c in corners), min(c[1] for c in corners), low_z],
+        [max(c[0] for c in corners), max(c[1] for c in corners), high_z],
+    )
+
+
 def generate_launch_description():
     here = Path(__file__).parent
     spec = importlib.util.spec_from_file_location(
@@ -66,7 +101,8 @@ def generate_launch_description():
     from swarmdeck_sim.scenario.spawn_fleet import lidar_spec, robot_types, robot_spec
 
     with open(os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")) as stream:
-        fleet = yaml.safe_load(stream)["fleet"]
+        config = yaml.safe_load(stream)
+    fleet = config["fleet"]
     count = int(os.environ.get("SWARMDECK_ROBOT_COUNT") or fleet.get("robot_count", 4))
     prefix = simulation_robot_prefix(fleet)
     platforms = robot_types(fleet, count, prefix)
@@ -81,6 +117,7 @@ def generate_launch_description():
             continue
         spec = robot_spec(platform)
         initial_ground_reach = mola_initial_ground_reach(spec, lidar)
+        bounds_min, bounds_max = global_bounds(config, robot)
         nodes += module.robot_nodes(
             robot,
             f"{robot}/odom",
@@ -102,8 +139,8 @@ def generate_launch_description():
                 # The lidar's ground blind radius: the root may hang that far
                 # from the first supported vertex at a standing start.
                 "hanging_root_edge_length_max": initial_ground_reach,
-                "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
-                "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
+                "BoundedSpaceParams.Global.min_val": bounds_min,
+                "BoundedSpaceParams.Global.max_val": bounds_max,
                 "PlanningParams.max_inclination": math.radians(30),
             },
         )
