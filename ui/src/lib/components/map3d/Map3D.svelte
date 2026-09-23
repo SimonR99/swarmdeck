@@ -46,8 +46,8 @@
     type LiveReplicaSelection
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { DeadlineWakeup, MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
-  import { LayerUpdateGate } from './layerUpdateGate';
+  import { DeadlineWakeup } from './renderScheduler';
+  import { RenderLoop } from './renderLoop';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map/mapRobot';
@@ -135,7 +135,7 @@
   const freshnessWakeup = new DeadlineWakeup(
     (now) => liveReplicaFreshnessDeadline(liveReplica, now),
     () => {
-      layerUpdates.invalidateFreshness();
+      renderLoop.invalidateFreshness();
       requestRender();
     }
   );
@@ -745,34 +745,29 @@
     e.preventDefault(); // Prevent browser right-click menu
   }
 
-  // Animation & Rendering Loop
-  let rafId = 0;
-  const layerUpdates = new LayerUpdateGate();
-  const scheduler = new RenderScheduler();
-  /** Wall clock until which telemetry counts as movement. */
-  let movingUntil = 0;
+  // Animation & Rendering Loop: render on demand, see renderLoop.ts.
+  const renderLoop = new RenderLoop({
+    canStart: () => mounted && active && !document.hidden,
+    frameInputs: () =>
+      scene && active
+        ? {
+            hidden: document.hidden,
+            // A robot held through a gap in its source frame needs frames to keep
+            // coming, or its grace period never expires and it is drawn for ever.
+            decorating: scene.robotManager.animating || scene.robotManager.retaining,
+            fps: QUALITY[quality].fps
+          }
+        : null,
+    draw: drawFrame
+  });
 
   /** Draw on the next animation frame, starting the loop if it had stopped. */
   function requestRender(moving = false) {
-    if (moving) movingUntil = performance.now() + MOTION_LINGER_MS;
-    scheduler.markDirty();
-    if (!rafId && mounted && active && !document.hidden) rafId = requestAnimationFrame(tick);
+    renderLoop.request(moving);
   }
 
-  function tick(timestamp: number) {
-    rafId = 0;
-    if (!scene || !active) return;
-    const decision = scheduler.frame({
-      now: timestamp,
-      hidden: document.hidden,
-      moving: timestamp < movingUntil,
-      // A robot held through a gap in its source frame needs frames to keep
-      // coming, or its grace period never expires and it is drawn for ever.
-      decorating: scene.robotManager.animating || scene.robotManager.retaining,
-      fps: QUALITY[quality].fps
-    });
-    if (decision.render || decision.again) rafId = requestAnimationFrame(tick);
-    if (!decision.render) return;
+  function drawFrame(timestamp: number, updateLayers: boolean) {
+    if (!scene) return;
     const time = timestamp * 0.001;
 
     // Center on the currently displayed robots. Live component telemetry is
@@ -801,7 +796,7 @@
       }
     });
 
-    if (layerUpdates.take(timestamp)) {
+    if (updateLayers) {
       scene.layers.update({
         robots,
         trails,
@@ -834,10 +829,8 @@
   }
 
   function pauseScene() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = 0;
     // Whatever changed while the map was away is drawn once on return.
-    scheduler.markDirty();
+    renderLoop.pause();
     generation++;
     pending?.abort();
     pending = null;
@@ -950,7 +943,7 @@
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
       freshnessWakeup.cancel();
-      if (rafId) cancelAnimationFrame(rafId);
+      renderLoop.stop();
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
       scene?.dispose();
