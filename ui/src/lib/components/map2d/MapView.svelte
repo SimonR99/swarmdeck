@@ -8,6 +8,7 @@
     RasterRobotProjectionCache,
     RasterTrailProjectionCache
   } from './mapFrames';
+  import { localRobotOf, membersOnMap } from '../map/mapMembership';
   import {
     Box,
     Compass,
@@ -145,28 +146,21 @@
   }
 
   function robotsOnMap() {
-    const project = (robot: (typeof fleet.robots)[number]) => {
-      return overlayCache.project(robot, mapStore.info?.transforms);
-    };
-    if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
-      if (!fleet.isEnabled(mapStore.viewRobot)) return [];
-      const robot = fleet.get(mapStore.viewRobot);
-      const shown = robot ? project(robot) : null;
-      return shown ? [shown] : [];
-    }
     // The displayed raster decides who is on it: the optimized scope's robots
     // (the composite or a merged component may be shown while the SLAM merged
-    // map reports no members at all), else the SLAM merged map's membership.
+    // map reports no members at all), else the robots its transforms placed.
     const members = globalMapMembers({
       showingOptimizedGrid: mapStore.showingOptimizedGrid,
       optimizedRobots: mapStore.globalOptimizedRobots,
       transforms: mapStore.info?.transforms,
       globalMembers: mapStore.status?.global_members
     });
-    if (members.length === 0) return [];
-    return fleet.robots
-      .filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id))
-      .map(project)
+    return membersOnMap(fleet.robots, {
+      localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
+      members,
+      isEnabled: (id) => fleet.isEnabled(id)
+    })
+      .map((robot) => overlayCache.project(robot, mapStore.info?.transforms))
       .filter((robot): robot is (typeof fleet.robots)[number] => robot !== null);
   }
 

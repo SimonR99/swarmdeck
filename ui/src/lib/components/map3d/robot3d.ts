@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
-import type { MapRobot } from '../map2d/mapLayers';
+import type { MapRobot } from '../map/mapRobot';
 import { RobotPresenceTracker } from './robotPresence';
 
 export interface Robot3DEntry {

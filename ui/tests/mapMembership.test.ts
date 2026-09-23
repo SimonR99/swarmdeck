@@ -5,6 +5,11 @@ import {
   projectRobotToRaster,
   type FrameTransforms
 } from '../src/lib/components/map2d/mapFrames.ts';
+import {
+  localRobotOf,
+  membersOnMap,
+  slamMergeMembers
+} from '../src/lib/components/map/mapMembership.ts';
 import type { RobotState } from '../src/lib/types/protocol.ts';
 
 /*
@@ -196,15 +201,56 @@ const tacticalCases: { name: string; input: TacticalInput; expected: string[] }[
   }
 ];
 
+/** MapView.svelte's robotsOnMap on the shared rule. */
+function shared2D(input: ViewInput): string[] {
+  const isEnabled = enabled(input);
+  const members = globalMapMembers({
+    showingOptimizedGrid: true,
+    optimizedRobots: input.optimizedRobots,
+    transforms: input.transforms,
+    globalMembers: input.globalMembers
+  });
+  return membersOnMap(input.robots.filter((r) => isEnabled(r.robot_id)), {
+    localRobot: localRobotOf(input.viewMode, input.viewRobot),
+    members,
+    isEnabled
+  })
+    .map((r) => projectRobotToRaster(r, input.transforms))
+    .filter((r): r is RobotState => r !== null)
+    .map((r) => r.robot_id);
+}
+
+/** Map3D.svelte's robotsOnMap on the shared rule, without a replica. */
+function shared3D(input: ViewInput): string[] {
+  const isEnabled = enabled(input);
+  return membersOnMap(input.robots.filter((r) => isEnabled(r.robot_id)), {
+    localRobot: localRobotOf(input.viewMode, input.viewRobot),
+    members: slamMergeMembers(input.globalMembers),
+    isEnabled
+  }).map((r) => r.robot_id);
+}
+
+/** Map3D.svelte's robotsOnMap on the shared rule, on a live replica frame. */
+function sharedTactical(input: TacticalInput): string[] {
+  return membersOnMap(input.frameRobots.filter((r) => r.fresh), {
+    localRobot: input.scope === 'robot' ? input.robotId : null,
+    members: null,
+    isEnabled: (id) => !(input.disabled ?? []).includes(id)
+  }).map((r) => r.robot_id);
+}
+
 for (const { name, input, view2D, view3D } of viewCases) {
   test(`2D and 3D membership: ${name}`, () => {
     assert.deepEqual(legacy2D(input), view2D, '2D');
     assert.deepEqual(legacy3D(input), view3D, '3D');
+    assert.deepEqual(shared2D(input), view2D, 'shared 2D');
+    assert.deepEqual(shared3D(input), view3D, 'shared 3D');
   });
 }
 
 for (const { name, input, expected } of tacticalCases) {
   test(`live replica membership: ${name}`, () => {
     assert.deepEqual(legacyTactical(input), expected);
+    assert.deepEqual(sharedTactical(input), expected, 'shared');
   });
 }

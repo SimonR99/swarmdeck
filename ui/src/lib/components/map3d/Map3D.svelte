@@ -50,7 +50,8 @@
   import { LayerUpdateGate } from './layerUpdateGate';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
-  import type { MapRobot } from '../map2d/mapLayers';
+  import type { MapRobot } from '../map/mapRobot';
+  import { localRobotOf, membersOnMap, slamMergeMembers } from '../map/mapMembership';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
 
   let {
@@ -158,24 +159,18 @@
         replicaCloud?.view.solution_order
       )) return [];
       if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
-      return liveReplica.frame.robots
-        .filter((robot) => liveRobotFreshness(robot, age).pose)
-        .filter((robot) => fleet.isEnabled(robot.robot_id))
-        .filter((robot) => tacticalReplica.scope !== 'robot' || robot.robot_id === tacticalReplica.robotId)
-        .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
+      const fresh = liveReplica.frame.robots.filter((robot) => liveRobotFreshness(robot, age).pose);
+      return membersOnMap(fresh, {
+        localRobot: tacticalReplica.scope === 'robot' ? tacticalReplica.robotId : null,
+        members: null,
+        isEnabled: (id) => fleet.isEnabled(id)
+      }).map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
     }
-    if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
-      if (!fleet.isEnabled(mapStore.viewRobot)) return [];
-      const robot = fleet.get(mapStore.viewRobot);
-      return robot ? [robot] : [];
-    }
-    const members = mapStore.status?.global_members;
-    if (members && members.length > 0) {
-      return fleet.robots.filter(
-        (robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id)
-      );
-    }
-    return fleet.robots.filter((robot) => fleet.isEnabled(robot.robot_id));
+    return membersOnMap(fleet.robots, {
+      localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
+      members: slamMergeMembers(mapStore.status?.global_members),
+      isEnabled: (id) => fleet.isEnabled(id)
+    });
   }
 
   // Public camera control methods for ViewControls toolbar

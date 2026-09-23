@@ -1,4 +1,4 @@
-import type { MapRobot } from '../map2d/mapLayers';
+import type { MapRobot } from '../map/mapRobot';
 
 export interface VoxelPoint {
   x: number;

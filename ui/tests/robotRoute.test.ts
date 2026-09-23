@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { MapRobot } from '../src/lib/components/map2d/mapLayers.ts';
+import { displayedRoute, type MapRobot } from '../src/lib/components/map/mapRobot.ts';
 
 /*
  * Which route and goal the 2D canvas and the 3D scene draw for a robot. The
@@ -104,5 +104,6 @@ for (const { name, robot, expected } of routeCases) {
   test(`2D and 3D routes: ${name}`, () => {
     assert.deepEqual(legacy2D(robot), expected, '2D');
     assert.deepEqual(legacy3D(robot), expected, '3D');
+    assert.deepEqual(displayedRoute(robot), expected, 'shared');
   });
 }
