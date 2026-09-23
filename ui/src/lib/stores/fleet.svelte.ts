@@ -17,7 +17,13 @@ const state = $state({
    * read once per robot per rendered frame, and a fresh array each time makes
    * change detection by identity impossible.
    */
-  revision: 0
+  revision: 0,
+  /**
+   * Bumped only when something the maps draw changed. The record timestamps
+   * and the unattended timer advance in every broadcast, so a map that watched
+   * `revision` would redraw at the broadcast rate for ever.
+   */
+  sceneRevision: 0
 });
 
 let robotsView: RobotState[] = [];
@@ -105,6 +111,10 @@ export const fleet = {
   get revision() {
     return state.revision;
   },
+  /** Advances when a robot's drawn state changed: pose, goal, route, status. */
+  get sceneRevision() {
+    return state.sceneRevision;
+  },
   get count() {
     return this.robots.length;
   },
@@ -185,15 +195,14 @@ export const fleet = {
     // A message that repeats what the store already holds is dropped here:
     // the server sends a keep-alive for robots that have not changed, and a
     // write would invalidate every reader of the fleet at that cadence.
-    const previous = state.robots[msg.robot_id];
-    const merged = mergeRobotState(previous, msg);
-    if (merged !== previous) {
-      state.robots[msg.robot_id] = merged;
-      state.revision++;
-      // Where the robot has been is recorded from its telemetry, so it is the
-      // same history whichever map view is on screen.
-      trails.record(msg.robot_id, msg.pose.x, msg.pose.y);
-    }
+    const update = mergeRobotState(state.robots[msg.robot_id], msg);
+    if (!update.changed) return;
+    state.robots[msg.robot_id] = update.value;
+    state.revision++;
+    if (update.drawable) state.sceneRevision++;
+    // Where the robot has been is recorded from its telemetry, so it is the
+    // same history whichever map view is on screen.
+    trails.record(msg.robot_id, msg.pose.x, msg.pose.y);
   },
 
   sync(robots: RobotState[]) {
@@ -210,6 +219,7 @@ export const fleet = {
     delete state.robots[id];
     trails.clear(id);
     state.revision++;
+    state.sceneRevision++;
     state.order = state.order.filter((r) => r !== id);
     state.selected = state.selected.filter((r) => r !== id);
     if (state.activeCamera === id) {
@@ -270,5 +280,6 @@ export const fleet = {
     state.activeCamera = null;
     trails.clear();
     state.revision++;
+    state.sceneRevision++;
   }
 };

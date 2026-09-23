@@ -18,6 +18,11 @@ export interface Robot3DEntry {
 
 export class Robot3DManager {
   public group = new THREE.Group();
+  /**
+   * A selected robot's reticle pulses with the clock, so the scene has to keep
+   * being drawn for it. It is the only marker here that animates on its own.
+   */
+  public animating = false;
   private entries = new Map<string, Robot3DEntry>();
   private presence = new RobotPresenceTracker(3);
 
@@ -46,6 +51,7 @@ export class Robot3DManager {
       this.entries.clear();
     }
 
+    this.animating = false;
     for (const robot of robots) {
       let entry = this.entries.get(robot.robot_id);
       if (!entry) {
@@ -55,6 +61,7 @@ export class Robot3DManager {
       }
 
       const isSelected = fleet.isSelected(robot.robot_id);
+      if (isSelected) this.animating = true;
 
       // Position in world coordinates: x, y, floor clearance
       // Snaps to real terrain or cave ground elevation if available
@@ -337,5 +344,6 @@ export class Robot3DManager {
     }
     this.entries.clear();
     this.presence.clear();
+    this.animating = false;
   }
 }
