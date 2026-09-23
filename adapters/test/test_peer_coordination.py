@@ -664,3 +664,56 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
     assert r1.reserve(elsewhere, 2) == "pending"
     now[0] = 2.0
     assert r1.reserve(elsewhere, 2) == "granted"
+
+
+def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=lambda **kw: NS(**kw)))
+    monkeypatch.setitem(
+        sys.modules,
+        "geometry_msgs.msg",
+        NS(
+            Pose=lambda: NS(position=NS(x=0, y=0, z=0), orientation=NS(w=1)),
+            PoseArray=lambda: NS(header=NS(frame_id=""), poses=[]),
+        ),
+    )
+    node = NS(
+        create_publisher=lambda *args: NS(publish=lambda msg: None),
+        create_subscription=lambda *args: None,
+    )
+    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="map"), {})
+    now = [0.0]
+    coordinator.clock = lambda: now[0]
+    assert coordinator.settle_remaining_s() is None
+    mission = str(uuid.uuid4())
+    identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    coordinator.on_authority(
+        NS(
+            data=json.dumps(
+                {
+                    "robot_id": "r0",
+                    "mission_id": mission,
+                    "robot_map_epoch": 0,
+                    "run_id": robot_run_id(mission, "r0", 0),
+                    "participants": ["r0"],
+                    "component_id": "component:test",
+                    "solution_order": [1, 0],
+                    "navigation_frame": "map",
+                    "T_component_navigation": identity,
+                }
+            )
+        )
+    )
+    plan = PlannerPath(
+        "map",
+        100,
+        (PlannerPose(0, 0, 0, 0, 0, 0, 1), PlannerPose(5, 0, 0, 0, 0, 0, 1)),
+    )
+    assert coordinator.reserve(plan, 1) == "pending"
+    assert coordinator.settle_remaining_s() == pytest.approx(0.5)
+    now[0] = 0.4
+    assert coordinator.reserve(plan, 1) == "pending"
+    assert coordinator.settle_remaining_s() == pytest.approx(0.1)
+    now[0] = 0.5
+    assert coordinator.settle_remaining_s() is None
+    assert coordinator.reserve(plan, 1) == "granted"

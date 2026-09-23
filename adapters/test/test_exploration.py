@@ -118,6 +118,9 @@ def rig():
     explorer.deadline = 0
     explorer.last_link = time.monotonic()
     explorer.timing = PlanTiming()
+    explorer.wake_lock = RLock()
+    explorer.wake_due = None
+    explorer.wake_timer = None
     explorer.frame = "map"
     explorer.planar_tolerance_m = 0.05
     explorer.max_inclination_rad = math.radians(30.0)
@@ -1268,3 +1271,65 @@ def test_exploration_logs_one_timing_line_when_the_robot_moves():
     assert len(lines) == 1
     assert "->sent" in lines[0] and "->accepted" in lines[0]
     assert "->moved" in lines[0] and lines[0].endswith("; moving")
+
+
+class WakeTimer:
+    def __init__(self):
+        self.timer_period_ns = None
+        self.resets = 0
+        self.cancels = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def cancel(self):
+        self.cancels += 1
+
+
+class SettlingCoordinator(Coordinator):
+    def __init__(self, *decisions, settle_remaining=0.3):
+        super().__init__(*decisions)
+        self.settle_remaining = settle_remaining
+
+    def settle_remaining_s(self):
+        return self.settle_remaining
+
+
+def test_pending_reservation_dispatches_at_its_settle_deadline(monkeypatch):
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    explorer.coordinator = SettlingCoordinator("pending", "granted")
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.on_path(path())
+    bridge.follow_path.assert_not_called()
+    assert explorer.wake_due == pytest.approx(100.3)
+    assert timer.timer_period_ns == 300_000_000 and timer.resets == 1
+
+    explorer.wake(0.5)  # A later wake keeps the earlier deadline.
+    assert explorer.wake_due == pytest.approx(100.3) and timer.resets == 1
+
+    now[0] = 100.1
+    explorer._on_wake()  # Early (a coarse fallback period): nothing yet.
+    bridge.follow_path.assert_not_called()
+    assert timer.cancels == 0
+
+    now[0] = 100.3
+    explorer._on_wake()
+    bridge.follow_path.assert_called_once()
+    assert explorer.status == "exploring"
+    assert explorer.wake_due is None and timer.cancels == 1
+
+
+def test_settled_or_unassigned_reservation_does_not_arm_a_wake():
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    explorer.coordinator = SettlingCoordinator(
+        "pending", "pending", settle_remaining=None
+    )
+    explorer.start()
+    explorer.on_path(path())
+    explorer.tick()
+    assert timer.resets == 0 and explorer.wake_due is None
+    bridge.follow_path.assert_not_called()

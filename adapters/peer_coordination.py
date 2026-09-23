@@ -268,6 +268,14 @@ class PeerCoordinator:
             }[decision]
         return result
 
+    def settle_remaining_s(self):
+        """Seconds until the local claim may be granted, or None if not settling."""
+        arbiter = self.arbiter
+        if arbiter is None or arbiter.local is None:
+            return None
+        remaining = arbiter.proposed_at + arbiter.settle_s - self.clock()
+        return remaining if remaining > 0.0 else None
+
     def publish_exclusions(self):
         message = self.exclusions_type()
         message.header.frame_id = self.frame

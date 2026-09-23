@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import json
 import math
 import re
+import threading
 import time
 
 
@@ -354,6 +355,11 @@ class MggExploration:
             String, f"{namespace}/status", self.on_status, qos
         )
         self.timer = bridge.node.create_timer(0.2, self.tick)
+        # Events that should not wait for the next 0.2 s tick (a reservation
+        # settling) arm this one-shot timer instead; see wake().
+        self.wake_lock = threading.Lock()
+        self.wake_due = None
+        self.wake_timer = self._steady_timer(bridge.node, self._on_wake)
 
     def warn(self, text):
         self.reason = str(text).strip()[:512] or None
@@ -370,6 +376,65 @@ class MggExploration:
             return read(plan.frame_id) if callable(read) else None
         except Exception:
             return None
+
+    WAKE_FALLBACK_PERIOD_S = 0.02
+
+    @classmethod
+    def _steady_timer(cls, node, callback):
+        """A cancelled timer on the monotonic clock, armed by wake().
+
+        The steady clock matches the coordinator's monotonic settle deadline
+        even when the node runs on simulation time.
+        """
+        try:
+            from rclpy.clock import Clock, ClockType
+
+            timer = node.create_timer(
+                cls.WAKE_FALLBACK_PERIOD_S,
+                callback,
+                clock=Clock(clock_type=ClockType.STEADY_TIME),
+            )
+        except (ImportError, TypeError):
+            timer = node.create_timer(cls.WAKE_FALLBACK_PERIOD_S, callback)
+        timer.cancel()
+        return timer
+
+    def wake(self, delay_s=0.0):
+        """Run tick() ``delay_s`` monotonic seconds from now, once.
+
+        An earlier pending wake is kept. tick() is idempotent, so an extra
+        run only moves work that the periodic tick would do anyway earlier.
+        """
+        timer = getattr(self, "wake_timer", None)
+        if timer is None:
+            return
+        delay = max(0.001, float(delay_s))
+        due = time.monotonic() + delay
+        with self.wake_lock:
+            if self.wake_due is not None and self.wake_due <= due:
+                return
+            self.wake_due = due
+            try:
+                timer.timer_period_ns = int(delay * 1e9)
+            except Exception:
+                pass  # An older rclpy fires at the fallback period instead.
+            timer.reset()
+
+    def _on_wake(self):
+        with self.wake_lock:
+            due = self.wake_due
+            if due is not None and time.monotonic() < due - 5e-4:
+                return
+            self.wake_due = None
+            self.wake_timer.cancel()
+        self.tick()
+
+    def _wake_at_reservation_settle(self):
+        """Dispatch as soon as the coordinator's settle interval ends."""
+        remaining = getattr(self.coordinator, "settle_remaining_s", None)
+        remaining = remaining() if callable(remaining) else None
+        if remaining is not None:
+            self.wake(remaining)
 
     def controller_accepted(self, goal_generation):
         """Bridge hook: the controller accepted the goal of this generation."""
@@ -543,6 +608,8 @@ class MggExploration:
             if self.active and candidate is not None:
                 plan, generation = candidate
                 decision = self.coordinator.reserve(plan, generation)
+                if decision == "pending" and self.pending_plan == candidate:
+                    self._wake_at_reservation_settle()
                 if decision == "granted" and self.pending_plan == candidate:
                     self.pending_plan = None
                     if self.pending_authority_replan is candidate:
@@ -889,6 +956,7 @@ class MggExploration:
             decision = self.coordinator.reserve(plan, generation)
             if decision == "pending":
                 self.pending_plan = (plan, generation)
+                self._wake_at_reservation_settle()
                 self.status = "waiting"
                 self.reason = getattr(
                     self.coordinator,
