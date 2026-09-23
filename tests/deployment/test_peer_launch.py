@@ -106,3 +106,40 @@ def test_each_peer_start_claims_fresh_persisted_run(monkeypatch, tmp_path):
     # Replaying an earlier reset request cannot make a crashed frontend reuse
     # its keyframe namespace.
     assert start()["map_epoch"] == 8
+
+
+def test_launch_checkpoints_the_previous_runs_geometry_wal(monkeypatch, tmp_path):
+    # claim_map_epoch points `geometry` at a new, empty run directory, so the
+    # checkpoint only reaches the previous run's WAL when it runs first.
+    import sqlite3
+
+    mission = "6f6afc5c-9a34-4eb4-8243-731629872d25"
+    maps = tmp_path / "maps"
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", mission)
+    monkeypatch.setenv("SWARMDECK_PEER_NAMES", '["alpha"]')
+    monkeypatch.setenv("SWARMDECK_PEER_INDEX", "0")
+    monkeypatch.setenv("ROS_DOMAIN_ID", "173")
+    monkeypatch.setenv("SWARMDECK_MAP_STORE", str(maps))
+    monkeypatch.delenv("SWARMDECK_SIM_RESET_DIR", raising=False)
+    module = _load(monkeypatch)
+
+    # A first launch has no geometry link yet; the checkpoint skips it.
+    module.generate_launch_description()
+    database = maps / mission / "alpha" / "geometry" / "mapping.sqlite3"
+    previous_wal = database.resolve().with_name("mapping.sqlite3-wal")
+    # The previous run's writer is still open, as a crashed peer leaves it:
+    # closing the last connection would checkpoint the WAL by itself.
+    writer = sqlite3.connect(database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE t (v INTEGER)")
+        writer.executemany("INSERT INTO t VALUES (?)", ((i,) for i in range(1000)))
+        writer.commit()
+        assert previous_wal.stat().st_size > 0
+
+        module.generate_launch_description()
+
+        assert previous_wal.stat().st_size == 0
+        assert database.resolve().parent != previous_wal.parent
+    finally:
+        writer.close()

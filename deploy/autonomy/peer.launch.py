@@ -99,7 +99,11 @@ def generate_launch_description():
     store_root = Path(os.environ.get("SWARMDECK_MAP_STORE", "/maps"))
     # Startup is the one point guaranteed to run before any node opens this
     # peer's stores: reclaim old missions under store_root and fold back the
-    # geometry store's WAL from the previous run.
+    # geometry store's WAL from the previous run. The checkpoint must run
+    # before claim_map_epoch, which points the `geometry` link at a new,
+    # empty run directory; until then the link still names the previous
+    # run's store. A first launch has no link, and checkpoint_wal skips a
+    # missing or dangling path.
     garbage_collect_missions(
         store_root,
         mission,
@@ -109,11 +113,11 @@ def generate_launch_description():
         dry_run=os.environ.get("SWARMDECK_MISSION_GC_DRY_RUN", "false").strip().lower()
         == "true",
     )
+    checkpoint_wal(store_root / mission / robot / "geometry" / "mapping.sqlite3")
     map_epoch = claim_map_epoch(
         store_root, mission, robot, minimum=reset_minimum(mission, robot)
     )
     run_id = robot_run_id(mission, robot, map_epoch)
-    checkpoint_wal(store_root / mission / robot / "geometry" / "mapping.sqlite3")
     common = [
         config,
         {
