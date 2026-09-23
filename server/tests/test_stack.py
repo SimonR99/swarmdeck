@@ -18,7 +18,8 @@ from swarmdeck_server.api.state import (
     settings_store,
     state_loop_tick,
 )
-from swarmdeck_server.api.app import app, handle_adapter_message, handle_gui_message
+from swarmdeck_server.api.app import app, handle_adapter_message
+from swarmdeck_server.api.gui_socket import handle_gui_message
 from swarmdeck_server.fleet.registry import Registry
 from swarmdeck_server.fleet.registry import registry as app_registry
 

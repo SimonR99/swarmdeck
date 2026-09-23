@@ -7,7 +7,8 @@ change this inventory deliberately. Behavioral protocol tests live in test_stack
 import ast
 import inspect
 
-from swarmdeck_server.api.app import app, handle_adapter_message, handle_gui_message
+from swarmdeck_server.api.app import app, handle_adapter_message
+from swarmdeck_server.api.gui_socket import handle_gui_message
 
 EXPECTED_ROUTES = set("""
 DELETE /api/fleet/{robot_id}

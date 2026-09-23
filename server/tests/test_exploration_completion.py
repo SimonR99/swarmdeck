@@ -21,7 +21,7 @@ def test_registry_preserves_local_exhaustion_and_expires_offline_completion():
 
 
 def test_fleet_start_shares_run_and_participants(monkeypatch):
-    from swarmdeck_server.api import app as module, state
+    from swarmdeck_server.api import gui_socket as module, state
 
     registry = Registry()
     for name in ("r0", "r1"):

@@ -4,7 +4,7 @@ from swarmdeck_server.fleet.registry import Registry
 
 
 def test_return_home_uses_onboard_objective_without_server_planner(monkeypatch):
-    from swarmdeck_server.api import app as module, state
+    from swarmdeck_server.api import gui_socket as module, state
 
     registry = Registry()
     robot = registry.hello(
