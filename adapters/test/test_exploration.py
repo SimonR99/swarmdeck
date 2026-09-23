@@ -14,6 +14,7 @@ import pytest
 
 from adapters.exploration import (
     MggExploration,
+    PlanTiming,
     is_physical_no_progress_failure,
     planner_path,
 )
@@ -116,6 +117,7 @@ def rig():
     explorer.stop_deadline = 0
     explorer.deadline = 0
     explorer.last_link = time.monotonic()
+    explorer.timing = PlanTiming()
     explorer.frame = "map"
     explorer.planar_tolerance_m = 0.05
     explorer.max_inclination_rad = math.radians(30.0)
@@ -1203,3 +1205,66 @@ def test_peer_rejection_after_arrival_preserves_waiting_goal_ownership():
     assert bridge._goal_generation == generation
     assert explorer.completed_goal_generation == generation
     bridge.cancel_goal.assert_not_called()
+
+
+def test_plan_timing_reports_each_stage_once_per_path():
+    now = [10.0]
+    timing = PlanTiming(clock=lambda: now[0])
+    timing.controller_finished()
+    now[0] = 10.1
+    timing.requested()
+    now[0] = 10.3
+    assert timing.received(7, 0.004) is None
+    now[0] = 10.8
+    timing.mark("granted")
+    now[0] = 10.81
+    timing.sent({"x": 1.0, "y": 1.0})
+    now[0] = 10.82
+    timing.mark("accepted")
+    now[0] = 11.2
+    assert timing.observe({"x": 1.05, "y": 1.05}) is None  # 0.07 m: parked
+    now[0] = 11.4
+    line = timing.observe({"x": 1.1, "y": 1.0})
+    assert line == (
+        "exploration timing: path 7 at t=10.300; age 0.004 s; "
+        "terminal->replan 0.100 s; replan->path 0.200 s; ->granted 0.500 s; "
+        "->sent 0.510 s; ->accepted 0.520 s; ->moved 1.100 s; moving"
+    )
+    assert timing.observe({"x": 5.0, "y": 5.0}) is None
+    assert timing.finish("controller succeeded") is None
+    assert timing.since_grant() == pytest.approx(0.6)
+
+
+def test_plan_timing_lines_are_rate_limited_and_count_suppressions():
+    now = [0.0]
+    timing = PlanTiming(clock=lambda: now[0])
+    timing.received(1, None)
+    assert timing.finish("stopped").endswith("; stopped")
+    now[0] = 0.5
+    timing.received(2, None)
+    assert timing.received(3, None) is None  # path 2 superseded within 1 s
+    now[0] = 1.5
+    line = timing.finish("reservation rejected")
+    assert line.startswith("exploration timing: path 3 ")
+    assert line.endswith("reservation rejected; 1 earlier line(s) suppressed")
+
+
+def test_exploration_logs_one_timing_line_when_the_robot_moves():
+    bridge, explorer = rig()
+    pose = {"x": 0.0, "y": 0.0}
+    bridge._route_progress_pose = Mock(side_effect=lambda frame: dict(pose))
+    info = bridge.node.get_logger.return_value.info
+    explorer.start()
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    bridge._route_progress_pose.assert_called_with("map")
+    explorer.controller_accepted(bridge._goal_generation)
+    explorer.tick()
+    assert not any("exploration timing" in str(c) for c in info.call_args_list)
+    pose["x"] = 0.2
+    explorer.tick()
+    explorer.tick()
+    lines = [c.args[0] for c in info.call_args_list if "timing" in c.args[0]]
+    assert len(lines) == 1
+    assert "->sent" in lines[0] and "->accepted" in lines[0]
+    assert "->moved" in lines[0] and lines[0].endswith("; moving")

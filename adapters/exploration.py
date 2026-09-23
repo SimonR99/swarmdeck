@@ -158,6 +158,118 @@ def follow_path_goal(plan: PlannerPath):
     return goal
 
 
+class PlanTiming:
+    """Monotonic stage times of one MGG path, summarised in one log line.
+
+    The stages are the replan request that asked for the path, its arrival,
+    the peer reservation grant, its submission to the controller, the
+    controller's acceptance (when the bridge reports it) and the first
+    ``MOTION_M`` of displacement from where the robot stood at submission.
+    Displacement is sampled on the exploration tick, so it is a bound, not an
+    exact time. At most one line per path, and at most one per
+    ``MIN_INTERVAL_S``; suppressed lines are counted in the next.
+    """
+
+    MOTION_M = 0.10
+    MIN_INTERVAL_S = 1.0
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.stages = None
+        self.revision_ns = None
+        self.age_s = None
+        self.origin = None
+        self.requested_at = None
+        self.terminal_at = None
+        self.request_after_terminal = None
+        self.granted_at = None
+        self.logged_at = -math.inf
+        self.suppressed = 0
+
+    def requested(self):
+        now = self.clock()
+        self.requested_at = now
+        self.request_after_terminal = (
+            now - self.terminal_at if self.terminal_at is not None else None
+        )
+        self.terminal_at = None
+
+    def controller_finished(self):
+        self.terminal_at = self.clock()
+
+    def received(self, revision_ns, age_s):
+        """Start a new path; return the unlogged summary of the previous one."""
+        previous = self.finish("superseded")
+        now = self.clock()
+        self.stages = {"received": now}
+        if self.requested_at is not None:
+            self.stages["requested"] = self.requested_at
+        self.revision_ns, self.age_s = revision_ns, age_s
+        self.origin = self.granted_at = None
+        return previous
+
+    def mark(self, stage):
+        if self.stages is not None and stage not in self.stages:
+            self.stages[stage] = self.clock()
+            if stage == "granted":
+                self.granted_at = self.stages[stage]
+
+    def sent(self, pose):
+        self.mark("sent")
+        self.origin = _planar_xy(pose)
+
+    def observe(self, pose):
+        """Record first motion; return the summary line once it is seen."""
+        if self.stages is None or self.origin is None or "moved" in self.stages:
+            return None
+        here = _planar_xy(pose)
+        if here is None or math.dist(here, self.origin) < self.MOTION_M:
+            return None
+        self.mark("moved")
+        return self.finish("moving")
+
+    def finish(self, outcome):
+        """Return the path's summary line (rate-limited) and forget it."""
+        stages, self.stages = self.stages, None
+        if stages is None:
+            return None
+        now = self.clock()
+        if now - self.logged_at < self.MIN_INTERVAL_S:
+            self.suppressed += 1
+            return None
+        self.logged_at = now
+        received = stages["received"]
+        parts = [f"path {self.revision_ns} at t={received:.3f}"]
+        if self.age_s is not None:
+            parts.append(f"age {self.age_s:.3f} s")
+        if self.request_after_terminal is not None:
+            parts.append(f"terminal->replan {self.request_after_terminal:.3f} s")
+        if "requested" in stages:
+            parts.append(f"replan->path {received - stages['requested']:.3f} s")
+        for stage in ("granted", "sent", "accepted", "moved"):
+            if stage in stages:
+                parts.append(f"->{stage} {stages[stage] - received:.3f} s")
+        parts.append(outcome)
+        if self.suppressed:
+            parts.append(f"{self.suppressed} earlier line(s) suppressed")
+            self.suppressed = 0
+        return "exploration timing: " + "; ".join(parts)
+
+    def since_grant(self):
+        return None if self.granted_at is None else self.clock() - self.granted_at
+
+
+def _planar_xy(pose):
+    try:
+        if isinstance(pose, dict):
+            x, y = float(pose["x"]), float(pose["y"])
+        else:
+            x, y = float(pose.x), float(pose.y)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+
 class MggExploration:
     def __init__(self, bridge, config):
         from std_srvs.srv import Trigger
@@ -194,6 +306,7 @@ class MggExploration:
         self.deadline = 0.0
         self.stop_deadline = 0.0
         self.last_link = time.monotonic()
+        self.timing = PlanTiming()
         self.request_type = Trigger.Request
         self.frame = planning_frame(bridge)
         configured_frame = str(config.get("frame") or "").lstrip("/")
@@ -245,6 +358,27 @@ class MggExploration:
     def warn(self, text):
         self.reason = str(text).strip()[:512] or None
         self.bridge.node.get_logger().warning(f"[{self.bridge.id}] exploration: {text}")
+
+    def _log_timing(self, line):
+        if line:
+            self.bridge.node.get_logger().info(f"[{self.bridge.id}] {line}")
+
+    def _robot_pose(self, plan):
+        """The robot's pose in the plan's frame, or None; only for timing."""
+        read = getattr(self.bridge, "_route_progress_pose", None)
+        try:
+            return read(plan.frame_id) if callable(read) else None
+        except Exception:
+            return None
+
+    def controller_accepted(self, goal_generation):
+        """Bridge hook: the controller accepted the goal of this generation."""
+        if goal_generation == self.executing_goal_generation:
+            self.timing.mark("accepted")
+
+    def controller_finished(self):
+        """Bridge hook: the controller goal reached a terminal state."""
+        self.timing.controller_finished()
 
     @staticmethod
     def _bounded_float(value, lower, upper, default):
@@ -300,6 +434,7 @@ class MggExploration:
             self.pending = self.start_client.call_async(self.request_type())
             self.pending_kind = "start"
             self.pending_recovery = False
+            self.timing.requested()
         except Exception as exc:
             self.warn(f"start request failed: {exc}")
             self.stop()
@@ -364,6 +499,7 @@ class MggExploration:
         was_active = self.active
         self.active = False
         self.generation += 1
+        self._log_timing(self.timing.finish(status))
         self.pending_plan = None
         self.pending_authority_replan = None
         self.executing_plan = None
@@ -398,6 +534,9 @@ class MggExploration:
         self._completed_goal_superseded()
         self._check_controller_result(now)
         self._drive_controller_replan(now)
+        if self.executing_plan is not None:
+            pose = self._robot_pose(self.executing_plan[0])
+            self._log_timing(self.timing.observe(pose))
         if self.coordinator is not None:
             self.coordinator.tick()
             candidate = self.executing_plan or self.pending_plan
@@ -423,6 +562,7 @@ class MggExploration:
                 elif decision == "rejected" and self.pending_plan == candidate:
                     self.pending_plan = None
                     self.pending_authority_replan = None
+                    self._log_timing(self.timing.finish("reservation rejected"))
                     self.status = "waiting"
                     self.reason = getattr(
                         self.coordinator,
@@ -436,6 +576,11 @@ class MggExploration:
                     )
                 elif decision != "granted" and self.executing_plan == candidate:
                     reason = getattr(self.coordinator, "last_decision_reason", decision)
+                    held = self.timing.since_grant()
+                    if held is not None:
+                        # How soon after its grant a reservation is lost says
+                        # whether the settle interval is long enough.
+                        reason = f"{reason}, {held:.2f} s after its grant"
                     self.warn(f"peer reservation lost ({reason}); stopping path")
                     owner = self.executing_goal_generation
                     cancel_if_current = getattr(
@@ -526,6 +671,8 @@ class MggExploration:
             self._stop_without_motion(status="stopped")
             return
         nav_status = self.bridge.nav_status
+        if nav_status in ("succeeded", "failed"):
+            self._log_timing(self.timing.finish(f"controller {nav_status}"))
         if nav_status == "succeeded":
             self.executing_plan = None
             self.executing_goal_generation = None
@@ -711,6 +858,12 @@ class MggExploration:
             self.stop()
             return
         self.last_path_revision_ns = plan.revision_ns
+        try:
+            now_ns = int(self.bridge.node.get_clock().now().nanoseconds)
+            age_s = (now_ns - plan.revision_ns) / 1e9
+        except Exception:
+            age_s = None
+        self._log_timing(self.timing.received(plan.revision_ns, age_s))
         generation = self.generation
         # A newer planner route supersedes any cancelled path retained only as
         # a peer-reservation token. Its same-session generation must not make
@@ -746,6 +899,7 @@ class MggExploration:
             if decision == "rejected":
                 # Any previous executing path was cancelled above. Cancelling
                 # again also changes ownership of an already-completed goal.
+                self._log_timing(self.timing.finish("reservation rejected"))
                 self.status = "waiting"
                 self.coordinator.release(generation)
                 self._request_replan(generation)
@@ -756,6 +910,8 @@ class MggExploration:
         if not self.active or generation != self.generation:
             return
         self.pending_authority_replan = None
+        if self.coordinator is not None:
+            self.timing.mark("granted")
         try:
             self.status = "exploring"
             self.reason = None
@@ -794,6 +950,7 @@ class MggExploration:
         self.executing_goal_generation = accepted
         self.completed_goal_generation = None
         self.awaiting_replan_path = False
+        self.timing.sent(self._robot_pose(plan))
 
     def _request_replan(self, generation, *, recovery=False):
         if not self.active or generation != self.generation:
@@ -815,6 +972,7 @@ class MggExploration:
             self.pending = self.replan_client.call_async(self.request_type())
             self.pending_kind = "replan"
             self.pending_recovery = recovery
+            self.timing.requested()
             request_deadline = time.monotonic() + 30.0
             self.deadline = (
                 min(request_deadline, self.controller_replan_deadline)

@@ -87,6 +87,18 @@ a materially changed component-to-navigation transform, an expired authority,
 or a conflicting lower-cost lease still invalidates it. Reservations use bounded
 receipt-relative leases and are renewed while the full path executes.
 
+The adapter logs one `exploration timing:` line per path at info level, when
+the robot has moved 0.10 m from where it stood when the path was submitted, or
+when the path ends before that (superseded, rejected, stopped, controller
+terminal). Times are monotonic seconds from the path's arrival: `->granted`
+(peer reservation), `->sent` (submitted to the controller), `->accepted` (the
+controller accepted it; the simulation bridge reports this) and `->moved`
+(sampled on the 0.2 s exploration tick, so an upper bound). `age` is the path's
+age on the node clock at arrival, `replan->path` the planner round trip and
+`terminal->replan` the delay from the previous controller result to the replan
+request. At most one line a second is written; skipped lines are counted in the
+next. A lost reservation's warning says how long after its grant it was lost.
+
 Each peer bridge sends its map authority every second. While a fresh authority
 cannot be built (stale sensor input, a failed transform, a lagging product, or a
 stalled snapshot tick) it re-sends the last fresh one, so a short stall does not

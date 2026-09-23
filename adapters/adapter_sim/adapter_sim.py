@@ -658,6 +658,9 @@ class RobotBridge(
                 return
 
             self._goal_handle = handle
+            exploration = getattr(self, "exploration", None)
+            if exploration is not None:
+                exploration.controller_accepted(generation)
             try:
                 result = handle.get_result_async()
                 result.add_done_callback(
@@ -752,6 +755,9 @@ class RobotBridge(
         self._reset_route_watchdog()
         if status == "failed" and not self._nav_quiet_unknown:
             self._arm_escape()
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.controller_finished()
 
     # -- route progress watchdog ------------------------------------------
     #
