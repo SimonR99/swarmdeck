@@ -2,19 +2,16 @@
   import { onMount } from 'svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { replicaCatalogue } from '$lib/stores/replicaCatalogue.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import {
     automaticCatalogueEntry,
     automaticSelectionIsCoherent,
     activeMergedRobotIds,
-    catalogueSelection,
-    fetchReplicaCatalogue,
-    type ReplicaCatalogue
+    catalogueSelection
   } from './replicaCatalogue';
 
   let { enabled = true } = $props<{ enabled?: boolean }>();
-  let catalogue = $state<ReplicaCatalogue | null>(null);
-  let refreshController: AbortController | null = null;
 
   function preferredRobotId() {
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) return mapStore.viewRobot;
@@ -30,8 +27,10 @@
   }
 
   function apply() {
+    const catalogue = replicaCatalogue.catalogue;
     const current = replicaTactical.selection;
     if (catalogue) {
+      replicaTactical.setActiveMissionPresent(Boolean(catalogue.active_session_id));
       replicaTactical.setMergedRobotIds(activeMergedRobotIds(
         catalogue,
         preferredRobotId(),
@@ -77,29 +76,12 @@
     replicaTactical.show(nextSelection, 'auto');
   }
 
-  async function refresh() {
-    if (refreshController) return;
-    const controller = new AbortController();
-    refreshController = controller;
-    try {
-      catalogue = await fetchReplicaCatalogue(undefined, controller.signal);
-      replicaTactical.setActiveMissionPresent(Boolean(catalogue.active_session_id));
-      apply();
-    } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
-        // The visible selector reports catalogue failures; auto mode simply
-        // keeps the last coherent selection through a transient outage.
-      }
-    } finally {
-      if (refreshController === controller) refreshController = null;
-    }
-  }
-
-  // Re-evaluate immediately when the operator changes local robot focus or
-  // fleet selection; the ten-second poll is only for catalogue publication.
-  // Only the roster is read, never a pose: reading the robots themselves
-  // re-ran this effect on every `robot_state` message.
+  // Re-evaluate when the catalogue publishes something new, and immediately
+  // when the operator changes local robot focus or fleet selection. Only the
+  // roster is read, never a pose: reading the robots themselves re-ran this
+  // effect on every `robot_state` message.
   $effect(() => {
+    replicaCatalogue.catalogue;
     enabled;
     replicaTactical.preference;
     mapStore.viewMode;
@@ -109,12 +91,6 @@
     apply();
   });
 
-  onMount(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 10_000);
-    return () => {
-      window.clearInterval(timer);
-      refreshController?.abort();
-    };
-  });
+  // The ten-second poll is only for catalogue publication.
+  onMount(() => replicaCatalogue.subscribe());
 </script>

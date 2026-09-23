@@ -11,7 +11,7 @@
     "test": "npm run test:fleet && npm run test:video && npm run test:replicas && npm run test:replica-acceptance && npm run test:map3d",
     "test:fleet": "node --experimental-strip-types --test tests/alertToast.test.ts tests/navigationStatus.test.ts tests/peerStatus.test.ts tests/resetHttp.test.ts tests/robotStateMerge.test.ts tests/sameFieldValue.test.ts tests/trailRecorder.test.ts tests/detectionWindow.test.ts",
     "test:video": "node --experimental-strip-types --test tests/cameraStream.test.ts",
-    "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts tests/replicaCatalogue.test.ts tests/liveReplicaFrame.test.ts",
+    "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts tests/replicaCatalogue.test.ts tests/liveReplicaFrame.test.ts tests/replicaCataloguePoll.test.ts",
     "test:replica-acceptance": "node --experimental-strip-types --test tests/liveReplicaAcceptance.test.ts",
     "test:replica-http": "node --experimental-strip-types --test tests/replicaCatalogue.http.test.ts",
     "test:map3d": "node --experimental-strip-types --test tests/terrainData.test.ts tests/mapFrames.test.ts tests/robotPresence.test.ts tests/voxelTerrain.test.ts tests/mapViewport.test.ts tests/optimizedScopes.test.ts tests/globalGoal.test.ts tests/layerChanges.test.ts tests/renderScheduler.test.ts tests/mapPollScheduler.test.ts tests/sceneInputs.test.ts tests/gaussians.test.ts tests/mapMembership.test.ts tests/robotRoute.test.ts"
