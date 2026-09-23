@@ -5,7 +5,7 @@ import { session } from '$lib/stores/session.svelte';
 import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
-import { MockFleet } from './mock';
+import type { MockFleet } from './mock';
 import { fetchJsonWithTimeout, resetRequestId, resetRobotMap } from './resetHttp';
 
 /**
@@ -191,7 +191,14 @@ function dispatch(msg: ServerMessage) {
   }
 }
 
-function startMock() {
+/**
+ * The local simulator, fetched only when `?mock` asked for it. A live
+ * dashboard must never load synthetic robots, let alone ship them in the
+ * bundle it parses at startup.
+ */
+async function startMock() {
+  if (!started || mock) return;
+  const { MockFleet } = await import('./mock');
   if (!started || mock) return;
   session.setConnection('mock');
   mock = new MockFleet(dispatch, MOCK_ROBOTS);
@@ -203,7 +210,7 @@ function connect() {
     return;
   }
   if (FORCE_MOCK) {
-    startMock();
+    void startMock();
     return;
   }
   session.setConnection('connecting');
