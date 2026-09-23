@@ -47,6 +47,7 @@
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
   import { DeadlineWakeup, MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
+  import { LayerUpdateGate } from './layerUpdateGate';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
@@ -132,7 +133,10 @@
   // no input change announces: polls that fail or return 404 adopt no frame.
   const freshnessWakeup = new DeadlineWakeup(
     (now) => liveReplicaFreshnessDeadline(liveReplica, now),
-    () => requestRender()
+    () => {
+      layerUpdates.invalidateFreshness();
+      requestRender();
+    }
   );
 
   function setLiveReplica(next: LiveReplicaSelection | null) {
@@ -748,7 +752,7 @@
 
   // Animation & Rendering Loop
   let rafId = 0;
-  let lastLayers = 0;
+  const layerUpdates = new LayerUpdateGate();
   const scheduler = new RenderScheduler();
   /** Wall clock until which telemetry counts as movement. */
   let movingUntil = 0;
@@ -802,8 +806,7 @@
       }
     });
 
-    if (timestamp - lastLayers >= 200) {
-      lastLayers = timestamp;
+    if (layerUpdates.take(timestamp)) {
       scene.layers.update({
         robots,
         trails,
