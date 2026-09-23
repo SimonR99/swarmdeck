@@ -25,6 +25,25 @@ from a sidecar container in the MGG container's PID namespace. Because
 the sidecar gets `SYS_ADMIN` and `SYS_PTRACE` with no seccomp filter. No sudo
 is needed.
 
+Each report header now includes the short git commit (`--commit SHA` to
+override; default is auto-detected from the script's own repo). Use this to
+correlate each dated entry with the code it measured.
+
+`--browser [--browser-url URL] [--browser-idle-s N]` measures browser
+main-thread CPU via headless Chromium + Playwright CDP. Opens the dashboard
+at URL (default `http://localhost:5173`), records CDP
+`TaskDuration`/`ScriptDuration` over an idle window and then over synthetic
+mouse-drag panning events. Requires `node` ≥ 18 and the Playwright package
+(pre-installed via `npx playwright` on the workstation and tuf). Prints a
+clear message and continues without crashing if no browser is available.
+
+`--latency` measures plan-to-motion latency and replan cadence. Collects
+`robot_state` WebSocket events from the server container and MGG
+`docker logs --timestamps` output over the measurement window, then reports
+median/p90/max latency (from MGG plan completion — used as a proxy for
+adapter path dispatch, lag < 10 ms — to robot pose displacement > 0.10 m)
+and replan cadence per robot. Clock: host UTC wall clock; typical error < 1 ms.
+
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
 Baseline for the plan, from manual runs before the harness existed and the

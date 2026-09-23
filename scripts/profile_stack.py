@@ -6,6 +6,8 @@ Run on the host that runs the stack, while it runs:
     scripts/profile_stack.py                 # 30 s window, no profiles
     scripts/profile_stack.py --profiles      # plus py-spy of the Python hot spots
     scripts/profile_stack.py --window 60 --label "after lattice cache"
+    scripts/profile_stack.py --browser       # browser main-thread CPU (item 6)
+    scripts/profile_stack.py --latency       # plan-to-motion latency trace (item 2)
 
 It reports what the clean-up plan (docs/superpowers/plans/
 2026-09-23-cleanup-optimization.md) is measured by:
@@ -15,11 +17,14 @@ It reports what the clean-up plan (docs/superpowers/plans/
 - MGG plan cycles: wall time and its lattice ("grid") and gain parts, from
   the planner's own log lines within the window;
 - GUI WebSocket traffic: messages and bytes per second by type;
+- optionally, browser main-thread CPU at idle and while panning (--browser);
+- optionally, plan-to-motion latency and replan cadence per robot (--latency);
 - optionally, py-spy profiles of the Python processes, taken from a
   throwaway sidecar container that joins each container's PID namespace,
   so nothing in the stack is modified.
 
-Only docker and python3 are needed on the host.
+Only docker and python3 are needed on the host. The --browser flag also needs
+node (for Playwright) or a local Chromium binary; it degrades gracefully.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import argparse
 import collections
 import datetime as dt
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -55,6 +61,20 @@ PLAN_LINE = re.compile(
     r"(\d+) vertices, (\d+) edges.*?; (\d+) ms \(global (\d+), grid (\d+), "
     r"gain (\d+), select (\d+)\)"
 )
+
+# docker logs --timestamps prefix: 2006-01-02T15:04:05.999999999Z
+_DOCKER_TS = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)Z\s+(.*)"
+)
+
+# Hint for the Playwright node-modules search: the npx-cache entry that is
+# most likely to exist on a freshly installed host.  _find_playwright_modules()
+# always does a full directory scan as a fallback, so this hint going stale
+# (after a Playwright version bump) is not fatal.
+_PLAYWRIGHT_MODULES_HINT = Path.home() / ".npm/_npx"
+
+# Motion threshold for plan-to-motion latency (metres)
+_MOTION_THRESHOLD_M = 0.10
 
 
 def sh(args, **kwargs) -> subprocess.CompletedProcess:
@@ -360,14 +380,381 @@ def perf_mgg(seconds: int) -> str:
     return (result.stdout + result.stderr).strip()
 
 
+# -------------------------------------------------------------- browser CPU
+
+
+_BROWSER_JS = r"""
+const pwPath = process.env.PW_MODULES;
+let pw;
+try { pw = require(pwPath + '/playwright'); } catch(e) {
+  try { pw = require(pwPath + '/playwright-core'); } catch(e2) {
+    console.log(JSON.stringify({error: 'playwright not found: ' + e2.message}));
+    process.exit(0);
+  }
+}
+const { chromium } = pw;
+const URL   = process.env.DASH_URL;
+const IDLE  = parseFloat(process.env.IDLE_S  || '5');
+const PANS  = parseInt(  process.env.PANS     || '3');
+
+function metric(arr, name) {
+  const m = arr.find(x => x.name === name);
+  return m ? m.value : 0;
+}
+
+(async () => {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    });
+    const ctx  = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const page = await ctx.newPage();
+    const cdp  = await ctx.newCDPSession(page);
+    await cdp.send('Performance.enable');
+
+    // Navigate and settle; tolerate a stack that is not running
+    try { await page.goto(URL, { waitUntil: 'networkidle', timeout: 20000 }); }
+    catch(_) {}
+    await new Promise(r => setTimeout(r, 2000));
+
+    // -- idle phase --
+    const r0 = (await cdp.send('Performance.getMetrics')).metrics;
+    await new Promise(r => setTimeout(r, IDLE * 1000));
+    const r1 = (await cdp.send('Performance.getMetrics')).metrics;
+    const idle_wall   = metric(r1, 'Timestamp') - metric(r0, 'Timestamp');
+    const idle_task   = metric(r1, 'TaskDuration')   - metric(r0, 'TaskDuration');
+    const idle_script = metric(r1, 'ScriptDuration')  - metric(r0, 'ScriptDuration');
+
+    // -- panning phase: synthetic mouse drags across the viewport centre --
+    const vp  = page.viewportSize();
+    const cx  = vp ? vp.width  / 2 : 640;
+    const cy  = vp ? vp.height / 2 : 360;
+    const r2  = (await cdp.send('Performance.getMetrics')).metrics;
+    for (let i = 0; i < PANS; i++) {
+      await page.mouse.move(cx - 100, cy);
+      await page.mouse.down();
+      for (let dx = 0; dx <= 200; dx += 20) {
+        await page.mouse.move(cx - 100 + dx, cy + Math.sin(dx * 0.05) * 30);
+        await new Promise(r => setTimeout(r, 40));
+      }
+      await page.mouse.up();
+      await new Promise(r => setTimeout(r, 600));
+    }
+    const r3  = (await cdp.send('Performance.getMetrics')).metrics;
+    const pan_wall   = metric(r3, 'Timestamp') - metric(r2, 'Timestamp');
+    const pan_task   = metric(r3, 'TaskDuration')   - metric(r2, 'TaskDuration');
+    const pan_script = metric(r3, 'ScriptDuration')  - metric(r2, 'ScriptDuration');
+
+    console.log(JSON.stringify({
+      idle_cpu_pct:    idle_wall > 0 ? 100 * idle_task   / idle_wall : null,
+      idle_script_pct: idle_wall > 0 ? 100 * idle_script / idle_wall : null,
+      idle_wall_s: idle_wall,
+      pan_cpu_pct:    pan_wall > 0 ? 100 * pan_task   / pan_wall : null,
+      pan_script_pct: pan_wall > 0 ? 100 * pan_script / pan_wall : null,
+      pan_wall_s: pan_wall,
+    }));
+  } catch (e) {
+    console.log(JSON.stringify({ error: String(e) }));
+  } finally {
+    if (browser) await browser.close();
+  }
+})();
+"""
+
+
+def _find_playwright_modules() -> Path | None:
+    """Return path to a node_modules directory that contains playwright.
+
+    Searches the npx cache directory (~/.npm/_npx) for any entry that
+    contains playwright or playwright-core, sorted for reproducibility.
+    No hard-coded cache hash: works after a Playwright version upgrade.
+    """
+    npx_cache = _PLAYWRIGHT_MODULES_HINT
+    if npx_cache.is_dir():
+        for entry in sorted(npx_cache.iterdir()):
+            candidate = entry / "node_modules"
+            if (candidate / "playwright").exists() or (
+                candidate / "playwright-core"
+            ).exists():
+                return candidate
+    return None
+
+
+def browser_cpu(
+    url: str,
+    idle_s: float = 5.0,
+    pans: int = 3,
+) -> dict:
+    """Measure browser renderer-thread CPU at idle and while panning via CDP.
+
+    Uses Playwright (found in the npx cache) to drive a headless Chromium.
+    Falls back gracefully with an ``error`` key when no browser is available.
+
+    Metric: CDP ``Performance.getMetrics`` ``TaskDuration`` /
+    ``ScriptDuration`` deltas divided by the ``Timestamp`` delta (seconds).
+    CPU % = TaskDuration_delta / Timestamp_delta * 100.  The Timestamp clock
+    is monotonic within the renderer process (seconds since process start);
+    it is not correlated with wall time, but the ratio is accurate.
+    """
+    pw_modules = _find_playwright_modules()
+    if pw_modules is None:
+        return {"error": "playwright node modules not found (run: npx playwright install)"}
+    node = next(
+        (Path(p) for p in ("/usr/bin/node", "/usr/local/bin/node") if Path(p).exists()),
+        None,
+    )
+    if node is None:
+        return {"error": "node not found"}
+    env = {
+        **os.environ,
+        "PW_MODULES": str(pw_modules),
+        "DASH_URL": url,
+        "IDLE_S": str(idle_s),
+        "PANS": str(pans),
+    }
+    timeout = idle_s + pans * 3 + 90
+    result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
+    for line in reversed((result.stdout + "\n" + result.stderr).splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                pass
+    return {"error": (result.stderr or result.stdout).strip()[-300:]}
+
+
+# ------------------------------------------------------ plan-to-motion latency
+
+
+def parse_timestamped_plan_lines(log_text: str) -> list[tuple[float, dict]]:
+    """Parse ``docker logs --timestamps`` output of the mgg container.
+
+    Returns a list of ``(utc_epoch_s, cycle_dict)`` sorted by time.
+    This is a pure function so it can be unit-tested on captured log snippets.
+    """
+    results: list[tuple[float, dict]] = []
+    for line in log_text.splitlines():
+        ts_match = _DOCKER_TS.match(line)
+        if not ts_match:
+            continue
+        ts_base, ts_frac, content = ts_match.groups()
+        plan_match = PLAN_LINE.search(content)
+        if not plan_match:
+            continue
+        # Parse timestamp; truncate nanoseconds to microseconds for strptime
+        frac6 = (ts_frac + "000000")[:6]
+        try:
+            ts_dt = dt.datetime.strptime(
+                f"{ts_base}.{frac6}", "%Y-%m-%dT%H:%M:%S.%f"
+            ).replace(tzinfo=dt.timezone.utc)
+            epoch = ts_dt.timestamp()
+        except ValueError:
+            continue
+        robot, cells, vertices, edges, total, _glob, grid, gain, select = (
+            plan_match.groups()
+        )
+        results.append((
+            epoch,
+            {
+                "robot": robot,
+                "cells": int(cells),
+                "vertices": int(vertices),
+                "edges": int(edges),
+                "total": int(total),
+                "grid": int(grid),
+                "gain": int(gain),
+                "select": int(select),
+            },
+        ))
+    results.sort(key=lambda x: x[0])
+    return results
+
+
+def replan_cadence(plan_events: list[tuple[float, dict]]) -> dict[str, list[float]]:
+    """Compute inter-replan intervals (seconds) per robot from timestamped plan events.
+
+    Returns ``{robot_id: [interval_s, ...]}``. Pure function.
+    """
+    per_robot: dict[str, list[float]] = collections.defaultdict(list)
+    last_time: dict[str, float] = {}
+    for epoch, cycle in plan_events:
+        robot = cycle["robot"]
+        if robot in last_time:
+            per_robot[robot].append(epoch - last_time[robot])
+        last_time[robot] = epoch
+    return dict(per_robot)
+
+
+_WS_ROBOT_STATE_PROBE = r"""
+import asyncio, json, time, websockets
+
+async def main():
+    events = []
+    t_end = time.time() + WINDOW
+    try:
+        async with websockets.connect(
+            "ws://localhost:8080/ws", max_size=None, open_timeout=5
+        ) as ws:
+            while time.time() < t_end:
+                try:
+                    m = await asyncio.wait_for(ws.recv(), 0.2)
+                except asyncio.TimeoutError:
+                    continue
+                try:
+                    msg = json.loads(m)
+                    if msg.get("type") == "robot_state" and "pose" in msg:
+                        events.append([
+                            time.time(),
+                            str(msg.get("robot_id", "?")),
+                            float(msg["pose"].get("x", 0.0)),
+                            float(msg["pose"].get("y", 0.0)),
+                        ])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    print(json.dumps(events))
+
+asyncio.run(main())
+"""
+
+
+def latency_trace(window: float) -> dict:
+    """Measure plan-to-motion latency and replan cadence.
+
+    Approach:
+    1. Collect ``robot_state`` WebSocket events from the server container
+       for ``window`` seconds. Each event carries ``time.time()`` (container
+       wall clock) and the robot's pose ``(x, y)``.
+    2. Parse ``docker logs --timestamps`` of the mgg container to get UTC
+       timestamps for each MGG plan-cycle log line in the same window.
+    3. The MGG plan completion time is used as a proxy for "path dispatched":
+       the adapter subscribes to the MGG path topic and sends it to Nav2
+       within the same ROS spin cycle (< 10 ms typical on the same host).
+    4. For each plan event (per robot), find the earliest robot_state event
+       after that timestamp where pose displacement exceeds
+       _MOTION_THRESHOLD_M from the pose at plan time.
+    5. Latency = motion_start_time - plan_timestamp.
+
+    Clock: host UTC wall clock. Docker log timestamps are set by the Docker
+    daemon from the host clock. ``time.time()`` inside the server container
+    uses the same host clock on Linux (containers share the host kernel).
+    Typical error between the two: < 1 ms.
+
+    Returns a dict with per-robot ``latency_s`` and ``cadence_s`` lists,
+    ``plan_count``, and an ``error`` key if the stack is unreachable.
+    """
+    probe = _WS_ROBOT_STATE_PROBE.replace("WINDOW", str(window))
+    start_epoch = time.time()
+    ws_result = sh(
+        ["docker", "exec", "-i", container("server"), "python", "-"],
+        input=probe,
+        timeout=window + 30,
+    )
+    end_epoch = time.time()
+    try:
+        raw_events = json.loads(ws_result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"error": (ws_result.stderr or ws_result.stdout).strip()[-300:]}
+
+    # events: [[utc_s, robot_id, x, y], ...]
+    robot_events: dict[str, list[tuple[float, float, float]]] = collections.defaultdict(list)
+    for row in raw_events:
+        utc, rid, x, y = row
+        if rid != "__error__":
+            robot_events[rid].append((float(utc), float(x), float(y)))
+
+    # Fetch MGG logs with a generous --since window (+60 s) to avoid missing
+    # the boundary, then filter to [start_epoch, end_epoch] so that plan
+    # cycles that completed before the robot-state probe started are excluded.
+    # Without this filter, plans from up to 60 s before the probe could be
+    # correlated against current-window motion, producing false latencies.
+    logs = sh(
+        [
+            "docker", "logs", "--timestamps",
+            "--since", f"{int(window) + 60}s",
+            container("mgg"),
+        ],
+    )
+    all_plan_events = parse_timestamped_plan_lines(logs.stdout + logs.stderr)
+    plan_events = [
+        (t, c) for t, c in all_plan_events if start_epoch <= t <= end_epoch
+    ]
+
+    cadences = replan_cadence(plan_events)
+    latencies: dict[str, list[float]] = collections.defaultdict(list)
+
+    for plan_epoch, cycle in plan_events:
+        robot = cycle["robot"]
+        events = robot_events.get(robot, [])
+        if not events:
+            continue
+        # Robot position at plan time: use the LAST sample at or before the
+        # plan timestamp, not the first. Using the first would mean a large
+        # pre-plan displacement (robot moved earlier in the window) could
+        # already exceed _MOTION_THRESHOLD_M, making the very next
+        # post-plan sample appear as immediate motion even if the robot
+        # has not moved since the path was dispatched.
+        ref_pos = None
+        for utc, x, y in reversed(events):
+            if utc <= plan_epoch:
+                ref_pos = (x, y)
+                break
+        if ref_pos is None:
+            ref_pos = (events[0][1], events[0][2])
+        # find first event after plan_epoch where displacement > threshold
+        for utc, x, y in events:
+            if utc <= plan_epoch:
+                continue
+            dist = ((x - ref_pos[0]) ** 2 + (y - ref_pos[1]) ** 2) ** 0.5
+            if dist >= _MOTION_THRESHOLD_M:
+                latencies[robot].append(utc - plan_epoch)
+                break
+
+    return {
+        "plan_count": len(plan_events),
+        "latency_s": dict(latencies),
+        "cadence_s": cadences,
+    }
+
+
+# ------------------------------------------------------------------ git
+
+
+def git_commit(override: str = "") -> str:
+    """Return the short HEAD commit of this script's repo, or the override string.
+
+    Allows each dated report to name the code it measured. Pass ``--commit``
+    when running from a directory that is not the stack's own checkout.
+    """
+    if override:
+        return override
+    result = sh(
+        [
+            "git",
+            "-C",
+            str(Path(__file__).resolve().parent),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ]
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
 # ---------------------------------------------------------------- report
 
 
 def report(args) -> str:
     started = time.monotonic()
+    commit = git_commit(getattr(args, "commit", ""))
     lines = [
         f"## {dt.datetime.now().isoformat(timespec='minutes')}"
-        + (f" - {args.label}" if args.label else ""),
+        + (f" - {args.label}" if args.label else "")
+        + f" (commit {commit})",
         "",
     ]
     containers = running_containers()
@@ -431,6 +818,65 @@ def report(args) -> str:
             lines += [f"- {share:.0f}% `{frame}`" for share, frame in frames] or [
                 "- no samples"
             ]
+
+    if getattr(args, "browser", False):
+        burl = getattr(args, "browser_url", "http://localhost:5173")
+        lines += ["", "### Browser main-thread CPU (CDP Performance.getMetrics)"]
+        bcpu = browser_cpu(burl, idle_s=getattr(args, "browser_idle_s", 5.0))
+        if "error" in bcpu:
+            lines.append(f"- browser measurement unavailable: {bcpu['error']}")
+        else:
+            lines.append(
+                f"- **idle**: task {bcpu.get('idle_cpu_pct', '?'):.1f} % CPU, "
+                f"script {bcpu.get('idle_script_pct', '?'):.1f} % "
+                f"(over {bcpu.get('idle_wall_s', 0):.1f} s)"
+            )
+            lines.append(
+                f"- **panning**: task {bcpu.get('pan_cpu_pct', '?'):.1f} % CPU, "
+                f"script {bcpu.get('pan_script_pct', '?'):.1f} % "
+                f"(over {bcpu.get('pan_wall_s', 0):.1f} s)"
+            )
+            lines.append(f"  URL: {burl}")
+
+    if getattr(args, "latency", False):
+        lines += [
+            "",
+            "### Plan-to-motion latency"
+            f" (MGG plan \u2192 robot displacement > {_MOTION_THRESHOLD_M:.2f} m)",
+        ]
+        lt = latency_trace(args.window)
+        if "error" in lt:
+            lines.append(f"- latency trace unavailable: {lt['error']}")
+        else:
+            lines.append(f"- MGG plan cycles in window: {lt['plan_count']}")
+            lines.append(
+                "  - Clock: host UTC wall clock (docker log timestamps vs "
+                "container time.time()); typical error < 1 ms"
+            )
+            lat = lt.get("latency_s", {})
+            cad = lt.get("cadence_s", {})
+            if not lat and not cad:
+                lines.append("  - No correlated events (fleet not exploring?)")
+            for robot in sorted(set(list(lat.keys()) + list(cad.keys()))):
+                parts = [f"**{robot}**"]
+                if robot in cad and cad[robot]:
+                    iv = sorted(cad[robot])
+                    p90 = iv[min(int(len(iv) * 0.9), len(iv) - 1)]
+                    parts.append(
+                        f"replan cadence: median {statistics.median(iv):.2f} s,"
+                        f" p90 {p90:.2f} s, max {max(iv):.2f} s"
+                        f" ({len(iv)} intervals)"
+                    )
+                if robot in lat and lat[robot]:
+                    lv = sorted(lat[robot])
+                    p90 = lv[min(int(len(lv) * 0.9), len(lv) - 1)]
+                    parts.append(
+                        f"latency: median {statistics.median(lv):.2f} s,"
+                        f" p90 {p90:.2f} s, max {max(lv):.2f} s"
+                        f" ({len(lv)} samples)"
+                    )
+                lines.append("  - " + "; ".join(parts))
+
     return "\n".join(lines) + "\n"
 
 
@@ -452,6 +898,33 @@ def main() -> int:
     )
     parser.add_argument("--label", default="")
     parser.add_argument("--append", type=Path, help="append the report to this file")
+    parser.add_argument(
+        "--commit",
+        default="",
+        metavar="SHA",
+        help="git commit recorded in the header (default: auto-detected from this repo)",
+    )
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="measure browser main-thread CPU via headless Chromium + Playwright CDP",
+    )
+    parser.add_argument(
+        "--browser-url",
+        default="http://localhost:5173",
+        help="dashboard URL for --browser (default: http://localhost:5173)",
+    )
+    parser.add_argument(
+        "--browser-idle-s",
+        type=float,
+        default=5.0,
+        help="idle measurement window for --browser in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--latency",
+        action="store_true",
+        help="measure plan-to-motion latency and replan cadence per robot",
+    )
     args = parser.parse_args()
     text = report(args)
     print(text)
