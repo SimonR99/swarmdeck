@@ -809,7 +809,10 @@ class MolaWorker:
                     # only to compare against a hash that came from the same
                     # process in the first place. `stat` still catches a
                     # truncated, missing or oversized write.
-                    size, digest = response["output_size_bytes"], response["output_sha256"]
+                    size, digest = (
+                        response["output_size_bytes"],
+                        response["output_sha256"],
+                    )
                     if not _stat_matches(output_path, size, self.max_output_bytes):
                         self._invalidate_runtime(peer_root)
                         raise WorkerError("native artifact does not match its response")

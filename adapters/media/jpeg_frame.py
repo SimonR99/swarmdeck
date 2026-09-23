@@ -17,9 +17,12 @@ import numpy as np
 def raw_frame_bytes(msg: Any) -> tuple[str, bytes] | None:
     """Return tightly packed raw pixels and their GStreamer format, dropping padding."""
     formats = {
-        "rgb8": ("RGB", 3), "8uc3": ("RGB", 3),
-        "bgr8": ("BGR", 3), "rgba8": ("RGBA", 4),
-        "bgra8": ("BGRA", 4), "mono8": ("GRAY8", 1),
+        "rgb8": ("RGB", 3),
+        "8uc3": ("RGB", 3),
+        "bgr8": ("BGR", 3),
+        "rgba8": ("RGBA", 4),
+        "bgra8": ("BGRA", 4),
+        "mono8": ("GRAY8", 1),
     }
     encoding = str(getattr(msg, "encoding", "")).lower()
     if encoding not in formats:

@@ -877,8 +877,15 @@ class ArgosBridge(Node):
                 )
                 if same_raw:
                     (
-                        _, hits, cloud_data, points_sha256, scan_ranges,
-                        prox_ranges, nav_scan_ranges, nav_prox_ranges, old_pose_key,
+                        _,
+                        hits,
+                        cloud_data,
+                        points_sha256,
+                        scan_ranges,
+                        prox_ranges,
+                        nav_scan_ranges,
+                        nav_prox_ranges,
+                        old_pose_key,
                     ) = robot.last_scan_products
                 else:
                     hits = cloud_data = points_sha256 = None
@@ -889,13 +896,14 @@ class ArgosBridge(Node):
                 if old_pose_key != nav_pose_key:
                     nav_scan_ranges = nav_prox_ranges = None
                 need_hits = points_needed or capture_needed
-                need_rays = (need_hits and (cloud_data is None or hits is None)) or (
-                    capture_needed and hits and points_sha256 is None
-                ) or (
-                    scan_needed and scan_ranges is None
-                ) or (prox_needed and prox_ranges is None) or (
-                    nav_scan_needed and nav_scan_ranges is None
-                ) or (nav_prox_needed and nav_prox_ranges is None)
+                need_rays = (
+                    (need_hits and (cloud_data is None or hits is None))
+                    or (capture_needed and hits and points_sha256 is None)
+                    or (scan_needed and scan_ranges is None)
+                    or (prox_needed and prox_ranges is None)
+                    or (nav_scan_needed and nav_scan_ranges is None)
+                    or (nav_prox_needed and nav_prox_ranges is None)
+                )
                 if need_rays:
                     arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
                     hit_mask = arr["hit"] != 0
@@ -908,13 +916,19 @@ class ArgosBridge(Node):
                         out[:, 2] = hit_pts["z"]
                         out[:, 3] = hit_pts["ring"]
                         cloud_data = out.tobytes()
-                        points_sha256 = hashlib.sha256(
-                            np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
-                        ).hexdigest() if capture_needed else None
+                        points_sha256 = (
+                            hashlib.sha256(
+                                np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
+                            ).hexdigest()
+                            if capture_needed
+                            else None
+                        )
                     elif capture_needed and hits and points_sha256 is None:
                         xyz = np.empty((hits, 3), dtype="<f4")
                         xyz[:, 0], xyz[:, 1], xyz[:, 2] = (
-                            hit_pts["x"], hit_pts["y"], hit_pts["z"]
+                            hit_pts["x"],
+                            hit_pts["y"],
+                            hit_pts["z"],
                         )
                         points_sha256 = hashlib.sha256(xyz.tobytes()).hexdigest()
                     if scan_needed and scan_ranges is None:
@@ -923,7 +937,10 @@ class ArgosBridge(Node):
                         ).tolist()
                     if prox_needed and prox_ranges is None:
                         prox_ranges = project_laserscan_proximity(
-                            hit_pts, robot.lidar_x, robot.lidar_z, robot.base_height,
+                            hit_pts,
+                            robot.lidar_x,
+                            robot.lidar_z,
+                            robot.base_height,
                             prox_min_height=robot.prox_min_height,
                             prox_range_max=robot.prox_range_max,
                         ).tolist()
@@ -933,22 +950,37 @@ class ArgosBridge(Node):
                         if nav_pose is not None:
                             if nav_scan_needed and nav_scan_ranges is None:
                                 nav_scan_ranges = project_laserscan_navigation(
-                                    hit_pts, robot.lidar_x, robot.lidar_z, nav_pose,
+                                    hit_pts,
+                                    robot.lidar_x,
+                                    robot.lidar_z,
+                                    nav_pose,
                                     range_max=float(_max_range),
                                 ).tolist()
                             if nav_prox_needed and nav_prox_ranges is None:
-                                nav_prox_ranges = project_laserscan_proximity_navigation(
-                                    hit_pts, robot.lidar_x, robot.lidar_z,
-                                    robot.base_height, nav_pose,
-                                    prox_min_height=robot.prox_min_height,
-                                    prox_range_max=robot.prox_range_max,
-                                ).tolist()
+                                nav_prox_ranges = (
+                                    project_laserscan_proximity_navigation(
+                                        hit_pts,
+                                        robot.lidar_x,
+                                        robot.lidar_z,
+                                        robot.base_height,
+                                        nav_pose,
+                                        prox_min_height=robot.prox_min_height,
+                                        prox_range_max=robot.prox_range_max,
+                                    ).tolist()
+                                )
                 if need_hits and hits is None:
                     hits = 0
                 robot.last_scan_raw = raw
                 robot.last_scan_products = (
-                    _max_range, hits, cloud_data, points_sha256, scan_ranges,
-                    prox_ranges, nav_scan_ranges, nav_prox_ranges, nav_pose_key,
+                    _max_range,
+                    hits,
+                    cloud_data,
+                    points_sha256,
+                    scan_ranges,
+                    prox_ranges,
+                    nav_scan_ranges,
+                    nav_prox_ranges,
+                    nav_pose_key,
                 )
 
                 # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
@@ -971,33 +1003,33 @@ class ArgosBridge(Node):
                     robot.pub_points.publish(cloud)
                 if capture_needed and hits and scan_tick_valid:
                     robot.pub_capture.publish(
-                            String(
-                                data=json.dumps(
-                                    {
-                                        "schema": "swarmdeck.raw-capture.v1",
-                                        "provider": "simulation",
-                                        "source_contract": (
-                                            "argos.photorealistic_lidar.hit_endpoints."
-                                            "single_tick.v1"
-                                        ),
-                                        "geometry": "raw_ray_capture",
-                                        "stamp_ns": scan_stamp.sec * 1_000_000_000
-                                        + scan_stamp.nanosec,
-                                        "frame_id": robot.frame_lidar,
-                                        "clock": "ros_sim_time",
-                                        "first_return": True,
-                                        "instantaneous": True,
-                                        "single_sensor_origin": True,
-                                        "producer_id": self.capture_producer_id,
-                                        "sensor_epoch": self.sensor_epoch,
-                                        "point_count": hits,
-                                        "points_sha256": points_sha256,
-                                    },
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                )
+                        String(
+                            data=json.dumps(
+                                {
+                                    "schema": "swarmdeck.raw-capture.v1",
+                                    "provider": "simulation",
+                                    "source_contract": (
+                                        "argos.photorealistic_lidar.hit_endpoints."
+                                        "single_tick.v1"
+                                    ),
+                                    "geometry": "raw_ray_capture",
+                                    "stamp_ns": scan_stamp.sec * 1_000_000_000
+                                    + scan_stamp.nanosec,
+                                    "frame_id": robot.frame_lidar,
+                                    "clock": "ros_sim_time",
+                                    "first_return": True,
+                                    "instantaneous": True,
+                                    "single_sensor_origin": True,
+                                    "producer_id": self.capture_producer_id,
+                                    "sensor_epoch": self.sensor_epoch,
+                                    "point_count": hits,
+                                    "points_sha256": points_sha256,
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
                             )
                         )
+                    )
 
                 # 2. Planar LaserScan (horizontal ring slice in sensor frame)
                 if scan_needed:

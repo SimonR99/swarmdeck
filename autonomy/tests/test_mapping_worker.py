@@ -465,7 +465,9 @@ def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
         # The published sha256 is exactly what the fake runtime reported,
         # which happens to be correct here; the point is it was never
         # locally recomputed to get there (`forbidden` never raised above).
-        assert artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        assert (
+            artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        )
     finally:
         worker.close()
 
@@ -527,8 +529,13 @@ def test_persistent_mode_trusts_a_fresh_planner_output_hash_without_rehashing(
         planner_path = peer / "mola" / planner["path"]
         # Both published hashes are exactly what the fake runtime reported
         # (`forbidden` never raised above, for either artifact).
-        assert artifact["sha256"] == hashlib.sha256(component_path.read_bytes()).hexdigest()
-        assert planner["sha256"] == hashlib.sha256(planner_path.read_bytes()).hexdigest()
+        assert (
+            artifact["sha256"]
+            == hashlib.sha256(component_path.read_bytes()).hexdigest()
+        )
+        assert (
+            planner["sha256"] == hashlib.sha256(planner_path.read_bytes()).hexdigest()
+        )
     finally:
         worker.close()
 

@@ -124,7 +124,8 @@ class Ros2JpegRtspPublisher(Node):
     def _on_raw_frame(self, msg: Image) -> None:
         if (
             self._failed.is_set()
-            or time.monotonic() - self._last_compressed_at < COMPRESSED_PREFERENCE_TIMEOUT_S
+            or time.monotonic() - self._last_compressed_at
+            < COMPRESSED_PREFERENCE_TIMEOUT_S
             or not self._can_push(self.raw_source)
         ):
             return
@@ -135,7 +136,8 @@ class Ros2JpegRtspPublisher(Node):
         caps = (format_name, msg.width, msg.height)
         if caps != self._raw_caps:
             self.raw_source.set_property(
-                "caps", Gst.Caps.from_string(
+                "caps",
+                Gst.Caps.from_string(
                     f"video/x-raw,format={format_name},width={msg.width},"
                     f"height={msg.height},framerate={round(1 / self._frame_period_s)}/1"
                 ),

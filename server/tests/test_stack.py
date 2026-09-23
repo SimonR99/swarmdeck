@@ -336,7 +336,9 @@ def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
     from swarmdeck_server.fleet.registry import OFFLINE_AFTER_S
 
     logged = []
-    monkeypatch.setattr(app_module.events, "log", lambda kind, payload: logged.append((kind, payload)))
+    monkeypatch.setattr(
+        app_module.events, "log", lambda kind, payload: logged.append((kind, payload))
+    )
     settings_store.value["unattended_threshold_s"] = 1.0
     unattended = app_registry.hello({"robot_id": "r0"}, sink=None)
     unattended.last_attended = time.monotonic() - 5.0
@@ -347,6 +349,8 @@ def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
 
     assert app_module._alerts["unattended_r0"]["kind"] == "unattended"
     assert app_module._alerts["disconnect_r1"]["kind"] == "adapter_disconnect"
-    logged_kinds = [payload["alert"]["kind"] for kind, payload in logged if kind == "alert"]
+    logged_kinds = [
+        payload["alert"]["kind"] for kind, payload in logged if kind == "alert"
+    ]
     assert "unattended" in logged_kinds
     assert "adapter_disconnect" in logged_kinds

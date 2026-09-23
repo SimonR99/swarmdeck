@@ -474,6 +474,7 @@ def _robot_state_signature(message: dict[str, Any]) -> str:
             for key, value in stable["live_mapping"].items()
             if key != "authority_age_s"
         }
+
     def rounded(value: Any) -> Any:
         if isinstance(value, float):
             # Normalize signed zero too: JSON distinguishes -0.0 from 0.0.

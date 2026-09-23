@@ -64,9 +64,7 @@ PLAN_LINE = re.compile(
 )
 
 # docker logs --timestamps prefix: 2006-01-02T15:04:05.999999999Z
-_DOCKER_TS = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)Z\s+(.*)"
-)
+_DOCKER_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)Z\s+(.*)")
 
 # Hint for the Playwright node-modules search: the npx-cache entry that is
 # most likely to exist on a freshly installed host.  _find_playwright_modules()
@@ -550,7 +548,9 @@ def browser_cpu(
     """
     pw_modules = _find_playwright_modules()
     if pw_modules is None:
-        return {"error": "playwright node modules not found (run: npx playwright install)"}
+        return {
+            "error": "playwright node modules not found (run: npx playwright install)"
+        }
     node = next(
         (Path(p) for p in ("/usr/bin/node", "/usr/local/bin/node") if Path(p).exists()),
         None,
@@ -613,19 +613,21 @@ def parse_timestamped_plan_lines(log_text: str) -> list[tuple[float, dict]]:
         robot, cells, vertices, edges, total, _glob, grid, gain, select = (
             plan_match.groups()
         )
-        results.append((
-            epoch,
-            {
-                "robot": robot,
-                "cells": int(cells),
-                "vertices": int(vertices),
-                "edges": int(edges),
-                "total": int(total),
-                "grid": int(grid),
-                "gain": int(gain),
-                "select": int(select),
-            },
-        ))
+        results.append(
+            (
+                epoch,
+                {
+                    "robot": robot,
+                    "cells": int(cells),
+                    "vertices": int(vertices),
+                    "edges": int(edges),
+                    "total": int(total),
+                    "grid": int(grid),
+                    "gain": int(gain),
+                    "select": int(select),
+                },
+            )
+        )
     results.sort(key=lambda x: x[0])
     return results
 
@@ -686,8 +688,10 @@ def _registration_changed(before: tuple | None, after: tuple | None) -> bool:
     if before is None or after is None:
         return before != after
     angle = math.remainder(after[2] - before[2], 2 * math.pi)
-    return (math.hypot(after[0] - before[0], after[1] - before[1]) > _REGISTRATION_TOLERANCE
-            or abs(angle) > _REGISTRATION_TOLERANCE)
+    return (
+        math.hypot(after[0] - before[0], after[1] - before[1]) > _REGISTRATION_TOLERANCE
+        or abs(angle) > _REGISTRATION_TOLERANCE
+    )
 
 
 def latency_trace(window: float) -> dict:
@@ -729,14 +733,20 @@ def latency_trace(window: float) -> dict:
         if "pose" not in row:
             continue
         transform = row.get("navigation_transform")
-        tx, ty, yaw = (float((transform or {}).get(key, 0)) for key in ("x", "y", "yaw"))
+        tx, ty, yaw = (
+            float((transform or {}).get(key, 0)) for key in ("x", "y", "yaw")
+        )
         x, y = float(row["pose"]["x"]) - tx, float(row["pose"]["y"]) - ty
         c, s = math.cos(yaw), math.sin(yaw)
         # Undo the GUI world placement: compare in the navigation frame.
-        robot_events[row["robot_id"]].append((
-            float(row["utc"]), c * x + s * y, -s * x + c * y,
-            (tx, ty, yaw) if transform is not None else None,
-        ))
+        robot_events[row["robot_id"]].append(
+            (
+                float(row["utc"]),
+                c * x + s * y,
+                -s * x + c * y,
+                (tx, ty, yaw) if transform is not None else None,
+            )
+        )
 
     # Fetch MGG logs with a generous --since window (+60 s) to avoid missing
     # the boundary, then filter to [start_epoch, end_epoch] so that plan
@@ -745,15 +755,16 @@ def latency_trace(window: float) -> dict:
     # correlated against current-window motion, producing false latencies.
     logs = sh(
         [
-            "docker", "logs", "--timestamps",
-            "--since", f"{int(window) + 60}s",
+            "docker",
+            "logs",
+            "--timestamps",
+            "--since",
+            f"{int(window) + 60}s",
             container("mgg"),
         ],
     )
     all_plan_events = parse_timestamped_plan_lines(logs.stdout + logs.stderr)
-    plan_events = [
-        (t, c) for t, c in all_plan_events if start_epoch <= t <= end_epoch
-    ]
+    plan_events = [(t, c) for t, c in all_plan_events if start_epoch <= t <= end_epoch]
 
     cadences = replan_cadence(plan_events)
     latencies: dict[str, list[float]] = collections.defaultdict(list)
@@ -762,16 +773,29 @@ def latency_trace(window: float) -> dict:
     for index, (plan_epoch, cycle) in enumerate(plan_events):
         robot = cycle["robot"]
         robot_resets = [utc for utc, ids in resets if ids is None or robot in ids]
-        last_reset = max((utc for utc in robot_resets if utc <= plan_epoch), default=-math.inf)
-        next_reset = min((utc for utc in robot_resets if utc > plan_epoch), default=math.inf)
-        next_plan = next((t for t, c in plan_events[index + 1:] if c["robot"] == robot), math.inf)
+        last_reset = max(
+            (utc for utc in robot_resets if utc <= plan_epoch), default=-math.inf
+        )
+        next_reset = min(
+            (utc for utc in robot_resets if utc > plan_epoch), default=math.inf
+        )
+        next_plan = next(
+            (t for t, c in plan_events[index + 1 :] if c["robot"] == robot), math.inf
+        )
         cutoff = min(next_plan, next_reset)
         cut_off = math.isfinite(cutoff)
         # Never borrow a reference from before a reset or after the cutoff.
-        events = [event for event in robot_events.get(robot, []) if last_reset < event[0] < cutoff]
+        events = [
+            event
+            for event in robot_events.get(robot, [])
+            if last_reset < event[0] < cutoff
+        ]
         measured = False
         if events:
-            reference = next((event for event in reversed(events) if event[0] <= plan_epoch), events[0])
+            reference = next(
+                (event for event in reversed(events) if event[0] <= plan_epoch),
+                events[0],
+            )
             _, ref_x, ref_y, ref_transform = reference
             for utc, x, y, transform in events:
                 if utc <= plan_epoch:
@@ -894,7 +918,10 @@ def report(args) -> str:
 
     if getattr(args, "browser", False):
         burl = getattr(args, "browser_url", "http://localhost:5173")
-        lines += ["", "### Browser process-tree CPU and WebGL (SwiftShader inflates CPU cost per frame)"]
+        lines += [
+            "",
+            "### Browser process-tree CPU and WebGL (SwiftShader inflates CPU cost per frame)",
+        ]
         bcpu = browser_cpu(burl, idle_s=getattr(args, "browser_idle_s", 5.0))
         if "error" in bcpu:
             lines.append(f"- browser measurement unavailable: {bcpu['error']}")
@@ -907,7 +934,9 @@ def report(args) -> str:
                     f"{bcpu[f'{phase}_draws_per_s']:.1f} draws/s "
                     f"(over {bcpu[f'{phase}_wall_s']:.1f} s)"
                 )
-            lines.append(f"  URL: {burl}; nproc: {bcpu['nproc']} (CPU: 100 % = one core)")
+            lines.append(
+                f"  URL: {burl}; nproc: {bcpu['nproc']} (CPU: 100 % = one core)"
+            )
 
     if getattr(args, "latency", False):
         lines += [
@@ -920,7 +949,9 @@ def report(args) -> str:
             lines.append(f"- latency trace unavailable: {lt['error']}")
         else:
             lines.append(f"- MGG plan cycles in window: {lt['plan_count']}")
-            lines.append(f"- Cut-off plans without a displacement sample: {lt['cut_off_plan_count']}")
+            lines.append(
+                f"- Cut-off plans without a displacement sample: {lt['cut_off_plan_count']}"
+            )
             lines.append(
                 "  - Clock: host UTC wall clock (docker log timestamps vs "
                 "container time.time()); typical error < 1 ms"

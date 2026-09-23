@@ -90,7 +90,11 @@ class PeerCoordinator:
             String, "/swarmdeck/exploration_reports", 20
         )
         self.report_subscription = shared_subscription(
-            bridge.node, String, "/swarmdeck/exploration_reports", self.receive_report, 20
+            bridge.node,
+            String,
+            "/swarmdeck/exploration_reports",
+            self.receive_report,
+            20,
         )
         self.exclusions_publisher = bridge.node.create_publisher(
             PoseArray, f"/{bridge.id}/mgg/coordination_exclusions", 5

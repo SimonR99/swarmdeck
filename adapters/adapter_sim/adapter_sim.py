@@ -373,15 +373,21 @@ class RobotBridge(
         # Only perception needs these three streams in the adapter itself.
         if self._detector is not None:
             node.create_subscription(
-                Image, f"/{robot_id}/camera/image", self._on_camera,
+                Image,
+                f"/{robot_id}/camera/image",
+                self._on_camera,
                 qos_profile_sensor_data,
             )
             node.create_subscription(
-                Image, f"/{robot_id}/camera/depth_image", self._on_camera_depth,
+                Image,
+                f"/{robot_id}/camera/depth_image",
+                self._on_camera_depth,
                 qos_profile_sensor_data,
             )
             node.create_subscription(
-                CameraInfo, f"/{robot_id}/camera/camera_info", self._on_camera_info,
+                CameraInfo,
+                f"/{robot_id}/camera/camera_info",
+                self._on_camera_info,
                 qos_profile_sensor_data,
             )
 

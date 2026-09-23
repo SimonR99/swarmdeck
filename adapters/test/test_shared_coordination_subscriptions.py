@@ -16,17 +16,37 @@ def test_peer_coordinators_share_fleet_subscriptions_and_authority_reader(monkey
         subscriptions[topic] = callback
         return object()
 
-    node = NS(create_subscription=Mock(side_effect=subscribe),
-              create_publisher=lambda *args: NS(publish=lambda message: None))
-    bridges = [NS(node=node, id=f"r{i}", navigation_frame=f"r{i}/odom") for i in range(4)]
+    node = NS(
+        create_subscription=Mock(side_effect=subscribe),
+        create_publisher=lambda *args: NS(publish=lambda message: None),
+    )
+    bridges = [
+        NS(node=node, id=f"r{i}", navigation_frame=f"r{i}/odom") for i in range(4)
+    ]
     coordinators = [PeerCoordinator(bridge, {}) for bridge in bridges]
-    assert len(subscriptions) == 2 + 4  # Two fleet topics and four distinct authority topics.
+    assert (
+        len(subscriptions) == 2 + 4
+    )  # Two fleet topics and four distinct authority topics.
     for topic in ("/swarmdeck/intentions", "/swarmdeck/exploration_reports"):
-        assert sum(call.args[1] == topic for call in node.create_subscription.call_args_list) == 1
-    assert all(sum(call.args[1] == f"/r{i}/map_authority"
-                   for call in node.create_subscription.call_args_list) == 1 for i in range(4))
-    assert all(c.authority_subscription is c.mapping_authority.subscription for c in coordinators)
-
+        assert (
+            sum(
+                call.args[1] == topic
+                for call in node.create_subscription.call_args_list
+            )
+            == 1
+        )
+    assert all(
+        sum(
+            call.args[1] == f"/r{i}/map_authority"
+            for call in node.create_subscription.call_args_list
+        )
+        == 1
+        for i in range(4)
+    )
+    assert all(
+        c.authority_subscription is c.mapping_authority.subscription
+        for c in coordinators
+    )
 
 
 def test_shared_subscription_fans_out_once_per_message_in_registration_order():
@@ -34,8 +54,12 @@ def test_shared_subscription_fans_out_once_per_message_in_registration_order():
 
     node = NS(create_subscription=Mock(return_value=object()))
     seen = []
-    first = shared_subscription(node, str, "/swarmdeck/intentions", lambda m: seen.append((1, m)), 20)
-    second = shared_subscription(node, str, "/swarmdeck/intentions", lambda m: seen.append((2, m)), 20)
+    first = shared_subscription(
+        node, str, "/swarmdeck/intentions", lambda m: seen.append((1, m)), 20
+    )
+    second = shared_subscription(
+        node, str, "/swarmdeck/intentions", lambda m: seen.append((2, m)), 20
+    )
     assert first is second
     node.create_subscription.assert_called_once()
     node.create_subscription.call_args.args[2]("message")
