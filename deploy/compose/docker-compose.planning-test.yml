@@ -37,7 +37,6 @@ services:
       - ../docker/sim-entrypoint.sh:/app/deploy/docker/sim-entrypoint.sh:ro
     environment:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       EXPLORE_SECONDS: "0"
       # The scenario and the odometry model come from the deployment's env
       # file, so a reset can switch worlds (Bistro, SubT Finals) without
