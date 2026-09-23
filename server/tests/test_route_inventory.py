@@ -13,8 +13,6 @@ from swarmdeck_server.api.gui_socket import handle_gui_message
 
 EXPECTED_ROUTES = set("""
 DELETE /api/fleet/{robot_id}
-GET /api/agent/captures/{filename}
-GET /api/agent/status
 GET /api/autonomy/chunks/{digest}
 GET /api/autonomy/replicas
 GET /api/autonomy/replicas/components
@@ -46,9 +44,6 @@ HEAD /docs/oauth2-redirect
 HEAD /openapi.json
 HEAD /redoc
 POST /api/adapter/camera
-POST /api/agent/chat
-POST /api/agent/snapshot/{robot_id}
-POST /api/agent/upload
 POST /api/autonomy/replicas
 POST /api/autonomy/replicas/components/live/{session_id}/goal
 POST /api/fleet/{robot_id}/discard

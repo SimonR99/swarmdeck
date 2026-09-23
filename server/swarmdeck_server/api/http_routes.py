@@ -65,41 +65,6 @@ async def post_discard_fleet_robot(robot_id: str) -> dict[str, Any]:
     return await handler(robot_id)
 
 
-@router.get("/api/agent/status")
-async def get_agent_status() -> dict[str, Any]:
-    from .agent_routes import get_agent_status as handler
-
-    return await handler()
-
-
-@router.post("/api/agent/chat")
-async def post_agent_chat(request: Request) -> Response:
-    from .agent_routes import post_agent_chat as handler
-
-    return await handler(request)
-
-
-@router.post("/api/agent/upload")
-async def post_agent_upload(request: Request) -> Any:
-    from .agent_routes import post_agent_upload as handler
-
-    return await handler(request)
-
-
-@router.get("/api/agent/captures/{filename}")
-async def get_agent_capture(filename: str) -> Any:
-    from .agent_routes import get_agent_capture as handler
-
-    return await handler(filename)
-
-
-@router.post("/api/agent/snapshot/{robot_id}")
-async def post_agent_snapshot(robot_id: str) -> Any:
-    from .agent_routes import post_agent_snapshot as handler
-
-    return await handler(robot_id)
-
-
 @router.post("/api/robot/{robot_id}/drive")
 async def post_robot_drive(robot_id: str, request: Request) -> Any:
     from .teleop_routes import post_robot_drive as handler
