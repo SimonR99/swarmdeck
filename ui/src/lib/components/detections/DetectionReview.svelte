@@ -129,7 +129,7 @@
       <div
         class="pointer-events-auto flex items-center justify-between gap-2 rounded-full border
                border-border bg-surface/95 px-2.5 py-0.5 text-[8px] font-semibold text-fg-muted
-               shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl"
+               shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)]"
       >
         <span>
           {review.proposals.length} awaiting review
@@ -157,7 +157,7 @@
           aria-label="Detection proposal"
           onclick={() => selectProposal(p)}
           onkeydown={(ev) => ev.key === 'Enter' && selectProposal(p)}
-          class="pointer-events-auto flex flex-col items-stretch border shadow-xl backdrop-blur-xl cursor-pointer
+          class="pointer-events-auto flex flex-col items-stretch border shadow-xl cursor-pointer
                  transition-all duration-200
                  {review.selected === p.id
                    ? 'border-accent bg-surface ring-4 ring-accent/35 rounded-2xl p-2.5 gap-2 shadow-[0_12px_32px_-8px_rgb(47_99_199/0.5)] z-20'
@@ -254,7 +254,7 @@
 
         {#if mergeOpen === p.id}
           <div class="pointer-events-auto w-48 rounded-[--radius-control] border border-border bg-surface/95
-                      shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl">
+                      shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)]">
             <div class="px-2 pt-1.5 text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
               Merge into
             </div>
@@ -283,7 +283,7 @@
       {#if review.entities.length}
         <button
           class="flex items-center gap-1 rounded-full border bg-surface/95 px-2 py-0.5 text-[8px]
-                 font-semibold backdrop-blur-xl transition-colors
+                 font-semibold transition-colors
                  {listOpen ? 'border-accent text-accent' : 'border-border text-fg-muted hover:text-fg'}"
           onclick={() => (listOpen = !listOpen)}
         >
@@ -294,7 +294,7 @@
       {#if review.ignored}
         <button
           class="flex items-center gap-1 rounded-full border border-border bg-surface/95 px-2 py-0.5
-                 text-[8px] font-medium text-fg-dim backdrop-blur-xl hover:text-fg"
+                 text-[8px] font-medium text-fg-dim hover:text-fg"
           title="Stop suppressing ignored objects, so they can be proposed again"
           onclick={() => actions.clearIgnoredDetections()}
         >
@@ -305,7 +305,7 @@
     </div>
 
     {#if listOpen && review.entities.length}
-      <div class="pointer-events-auto w-56 rounded-[--radius-control] border border-border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl">
+      <div class="pointer-events-auto w-56 rounded-[--radius-control] border border-border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)]">
         <div class="flex items-center justify-between border-b border-border px-2 py-1">
           <span class="text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
             Confirmed objects

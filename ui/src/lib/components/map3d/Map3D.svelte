@@ -967,7 +967,7 @@
   <!-- 3D Tactical Status HUD (Top Left) -->
   <div
     class="panel-glow pointer-events-none absolute left-3 bottom-12 z-20 flex max-w-[calc(100%_-_1.5rem)] flex-col gap-1 rounded-[--radius-control]
-           border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl backdrop-blur-xl"
+           border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl"
   >
     <div class="flex items-center gap-2">
       <span
@@ -1015,7 +1015,7 @@
   <!-- 3D Controls Bar (Top Right) -->
   <div class="absolute left-3 right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
     {#if tacticalReplica}
-      <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl backdrop-blur-xl">
+      <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl">
         <div class="min-w-0">
           <div class="font-semibold text-accent">
             {#if liveTactical && replicaCloud?.view.solution_order_known}
@@ -1043,7 +1043,7 @@
     <!-- Rendering budgets default to integrated graphics. -->
     <div
       class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
-             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+             bg-surface/95 p-1 shadow-2xl text-[10px]"
     >
       <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">View</span>
       {#each [{ id: 'voxels', label: 'Voxels' }, { id: 'mesh', label: 'Mesh' }, { id: 'points', label: 'Points' }, { id: 'gaussians', label: 'Gaussians' }] as mode}
@@ -1070,7 +1070,7 @@
     {#if renderMode !== 'gaussians'}
       <div
         class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
-             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+             bg-surface/95 p-1 shadow-2xl text-[10px]"
       >
         <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">Color</span
         >
@@ -1109,7 +1109,7 @@
     <!-- Ceiling Cutoff Slider -->
     <div
       class="panel-glow flex items-center gap-2 rounded-[--radius-control] border border-border/90
-             bg-surface/95 px-3 py-1.5 shadow-2xl backdrop-blur-xl"
+             bg-surface/95 px-3 py-1.5 shadow-2xl"
     >
       <div
         class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-accent"
@@ -1169,7 +1169,7 @@
     <div
       class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
              border-accent/40 bg-surface/95 px-4 py-2 text-[11px] font-medium text-accent
-             shadow-2xl backdrop-blur-xl"
+             shadow-2xl"
     >
       <Crosshair class="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
       Click 3D ground destination for {canGoal} robot{canGoal > 1 ? 's' : ''} · Esc to cancel
@@ -1189,7 +1189,7 @@
       >
         <div
           class="flex flex-col items-center overflow-hidden rounded-xl border border-border/80
-                 bg-surface/95 p-2 shadow-2xl backdrop-blur-xl"
+                 bg-surface/95 p-2 shadow-2xl"
         >
           <img
             src={activeObj.image}

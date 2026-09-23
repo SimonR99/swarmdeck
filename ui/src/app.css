@@ -172,7 +172,6 @@
   padding: 0 16px;
   color: var(--color-accent-container-fg);
   box-shadow: 0 4px 12px -8px rgb(25 32 42 / 0.35);
-  backdrop-filter: blur(12px);
   font-size: 12px;
   font-weight: 650;
   transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 100ms ease;

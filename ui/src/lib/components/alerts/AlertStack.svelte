@@ -5,10 +5,13 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
 
+  // The tint is a gradient layered over the card's bg-surface/96, not a second
+  // background colour replacing it: the cards are not blurred, so they need
+  // the opaque surface under them to read over the map.
   const tones = {
-    info: 'border-accent/35 bg-accent/10 text-accent',
-    warn: 'border-warn/35 bg-warn/10 text-warn',
-    critical: 'border-critical/40 bg-critical/12 text-danger'
+    info: 'border-accent/35 bg-linear-to-b from-accent/10 to-accent/10 text-accent',
+    warn: 'border-warn/35 bg-linear-to-b from-warn/10 to-warn/10 text-warn',
+    critical: 'border-critical/40 bg-linear-to-b from-critical/12 to-critical/12 text-danger'
   } as const;
 </script>
 
@@ -16,7 +19,7 @@
   {#each session.alerts.slice(0, 4) as a (a.id)}
     <div
       class="pointer-events-auto flex items-start gap-3 rounded-[--radius-card] border bg-surface/96 px-4 py-3
-             shadow-[0_8px_24px_-14px_rgb(25_32_42/0.42)] backdrop-blur-xl {tones[a.level]}"
+             shadow-[0_8px_24px_-14px_rgb(25_32_42/0.42)] {tones[a.level]}"
     >
       {#if a.level === 'critical'}
         <OctagonAlert class="mt-0.5 h-4 w-4 shrink-0" />
