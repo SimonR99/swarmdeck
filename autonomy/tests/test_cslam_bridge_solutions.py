@@ -322,10 +322,14 @@ def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updat
     Publisher = bridge_module.AuthorityHeartbeatPublisher
     published, logged, now = [], [], [0.0]
     publisher = Publisher(
-        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: None,
+        clock=lambda: now[0],
     )
 
-    publisher.update("authority-v1")
+    publisher.update("authority-v1", "epoch-0")
     # `update` is never called again here, simulating a `_snapshot` timer
     # that stalls for minutes; every scheduled tick still republishes the
     # last cached message, on schedule, independent of that stall.
@@ -354,14 +358,18 @@ def test_authority_heartbeat_publisher_never_logs_a_gap_while_resending_a_stale_
     Publisher = bridge_module.AuthorityHeartbeatPublisher
     published, logged, now = [], [], [0.0]
     publisher = Publisher(
-        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: None,
+        clock=lambda: now[0],
     )
 
     for _ in range(10):
         # `_snapshot` re-sends the same cached authority every tick because
         # a fresh one could not be built (e.g. sensor input stale), exactly
         # as `authority_heartbeat` decides.
-        publisher.update("authority-v1")
+        publisher.update("authority-v1", "epoch-0")
         now[0] += 1.0
         publisher.tick()
 
@@ -375,7 +383,11 @@ def test_authority_heartbeat_publisher_logs_no_authority_yet_before_any_update(
     Publisher = bridge_module.AuthorityHeartbeatPublisher
     published, logged, now = [], [], [0.0]
     publisher = Publisher(
-        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: None,
+        clock=lambda: now[0],
     )
 
     # Nothing published yet, and not a full period since construction: no
@@ -401,10 +413,14 @@ def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
     Publisher = bridge_module.AuthorityHeartbeatPublisher
     published, logged, now = [], [], [0.0]
     publisher = Publisher(
-        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: None,
+        clock=lambda: now[0],
     )
 
-    publisher.update("authority-v1")
+    publisher.update("authority-v1", "epoch-0")
     now[0] += 1.0
     publisher.tick()
     assert logged == []
@@ -431,8 +447,16 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     Publisher = bridge_module.AuthorityHeartbeatPublisher
     heartbeat = bridge_module.authority_heartbeat
     published, now = [], [0.0]
+    # This test exercises `authority_heartbeat`'s own cache invalidation (a
+    # mission/run/epoch field mismatch inside the message), not the
+    # publisher's stat-level epoch fencing (covered separately below), so
+    # the durable epoch identity is held constant throughout.
     publisher = Publisher(
-        published.append, period_s=1.0, log=lambda reason: None, clock=lambda: now[0]
+        published.append,
+        period_s=1.0,
+        log=lambda reason: None,
+        epoch_identity=lambda: "epoch-0",
+        clock=lambda: now[0],
     )
 
     mission = str(uuid.uuid4())
@@ -443,14 +467,14 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
 
     message, cache = heartbeat(good, None, **kwargs0)
-    publisher.update(message)
+    publisher.update(message, "epoch-0")
     publisher.tick()
     assert published[-1] == good
 
     # The build is momentarily gated (e.g. sensor stale): the cache is
     # resent verbatim, never silently dropped.
     message, cache = heartbeat(None, cache, **kwargs0)
-    publisher.update(message)
+    publisher.update(message, "epoch-0")
     publisher.tick()
     assert published[-1] == good
 
@@ -463,7 +487,89 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
     message, cache = heartbeat(None, cache, **kwargs1)
     assert message["state"] == "resetting" and cache is None
-    publisher.update(message)
+    publisher.update(message, "epoch-0")
     publisher.tick()
     assert published[-1] == message
     assert published[-1] != good
+
+
+def test_authority_heartbeat_publisher_invalidate_clears_the_cache_immediately(
+    bridge_module,
+):
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: "epoch-0",
+        clock=lambda: now[0],
+    )
+
+    publisher.update("authority-v1", "epoch-0")
+    now[0] += 1.0
+    publisher.tick()
+    assert published == ["authority-v1"]
+
+    publisher.invalidate()
+    now[0] += 1.0
+    publisher.tick()
+    # Nothing published this tick: the cache was cleared, not merely stale.
+    assert published == ["authority-v1"]
+
+    now[0] += 1.0
+    publisher.tick()
+    assert logged[-1] == "epoch retired"
+
+
+def test_authority_heartbeat_stops_resending_after_the_durable_epoch_changes(
+    tmp_path, bridge_module
+):
+    """The reviewer's exact scenario: change the on-disk epoch while the old
+    bridge is alive. `tick`'s own stat-level check of map-epoch.json
+    (`_file_identity`, the real function, and `claim_map_epoch`, the real
+    durable-epoch writer) stops the heartbeat from resending the old
+    authority, with no `Bridge.snapshot()` call involved at all: an executor
+    stall on the old bridge, or simply the old process not yet having
+    exited, must never let it keep broadcasting a retired epoch.
+    """
+
+    from autonomy.map_epochs import claim_map_epoch
+
+    file_identity = bridge_module._file_identity
+    mission = str(uuid.uuid4())
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 0, the old bridge's own
+    epoch_path = tmp_path / mission / "robot_0" / "map-epoch.json"
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append,
+        period_s=1.0,
+        log=logged.append,
+        epoch_identity=lambda: file_identity(epoch_path),
+        clock=lambda: now[0],
+    )
+
+    # The old bridge built and cached its authority under epoch 0, exactly
+    # as `Bridge._snapshot` does (the identity it validated `record` under).
+    publisher.update("authority-epoch-0", file_identity(epoch_path))
+    now[0] += 1.0
+    publisher.tick()
+    assert published == ["authority-epoch-0"]
+
+    # A fresh launch claims a new epoch on disk (`peer.launch.py`'s own
+    # startup path, `garbage_collect_missions`/`checkpoint_wal`'s neighbour).
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 1
+
+    now[0] += 1.0
+    publisher.tick()
+    # Never resent: the durable epoch moved on since this authority was
+    # built, caught by `tick`'s own check, not by `snapshot()` (never
+    # called here at all).
+    assert published == ["authority-epoch-0"]
+
+    now[0] += 1.0
+    publisher.tick()
+    assert published == ["authority-epoch-0"]
+    assert logged[-1] == "epoch retired"

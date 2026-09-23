@@ -149,6 +149,23 @@ def write_text_if_changed(path, text, last):
     return text
 
 
+def _file_identity(path):
+    """Fields an atomic replacement changes, or None when the file is absent.
+
+    A cheap `stat()`, never a read: the same identity idiom already used for
+    ``map-epoch.json`` elsewhere (``autonomy/product_authority.py``,
+    ``deploy/autonomy/mola_worker.py``), reused here so the heartbeat thread
+    can re-check the durable map epoch on every tick without reading and
+    parsing JSON off its own critical path.
+    """
+
+    try:
+        value = Path(path).stat()
+    except OSError:
+        return None
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
 def sensor_input_is_fresh(last_sensor_at, now=None):
     """Keep authority liveness tied to real sensor delivery, not ROS time."""
 
@@ -218,15 +235,31 @@ class AuthorityHeartbeatPublisher:
     interruption to the *wire* heartbeat is. Callers rate-limit repeated
     reasons themselves (e.g. ROS's ``throttle_duration_sec``), since a
     stall generally outlasts one tick.
+
+    `epoch_identity()` is a cheap, zero-argument callable (a `stat()`, never
+    a read) returning the durable map epoch's current on-disk identity, or
+    None when it cannot be read this instant. `tick` re-checks it, in the
+    same lock acquisition that reads the cached message, against the
+    identity `update` recorded for that message: a mismatch means a fresh
+    launch claimed a new map epoch since this authority was built, so the
+    message is discarded there and then and never published, regardless of
+    whether `Bridge.snapshot()`'s own epoch check (on the possibly delayed
+    main executor) has run yet. `publish()` itself still happens outside the
+    lock: only *deciding* what (if anything) to publish -- reading the
+    message and checking its epoch -- must be atomic against a concurrent
+    `update()`/`invalidate()`.
     """
 
-    def __init__(self, publish, *, period_s, log, clock=time.monotonic):
+    def __init__(self, publish, *, period_s, log, epoch_identity, clock=time.monotonic):
         self._publish = publish
         self._period_s = period_s
         self._log = log
+        self._epoch_identity = epoch_identity
         self._clock = clock
         self._lock = Lock()
         self._message = None
+        self._message_epoch = None
+        self._no_message_reason = "no authority yet"
         # The monotonic time of the last successful publish, or None before
         # the first one; `_started_at` stands in for it until then, so a
         # robot that never gets a first authority still eventually logs
@@ -234,17 +267,48 @@ class AuthorityHeartbeatPublisher:
         self._last_published_at = None
         self._started_at = clock()
 
-    def update(self, message):
-        """Replace the message the next tick(s) publish; never publishes."""
+    def update(self, message, epoch):
+        """Replace the message, and the epoch identity it is valid for.
+
+        Never publishes. `epoch` is whatever `epoch_identity()` returned at
+        the moment `message` was validated against the durable map epoch
+        (`Bridge._snapshot`, itself inside `map_epoch_lock`); `tick` compares
+        it against a fresh read on every publish.
+        """
 
         with self._lock:
             self._message = message
+            self._message_epoch = epoch
+
+    def invalidate(self):
+        """Discard the cached message: a durable epoch change retired it.
+
+        Called from `Bridge.snapshot()`'s own epoch check as soon as it
+        notices (best effort, since that runs on the main executor); `tick`
+        enforces the same fencing unconditionally, so a stalled executor
+        never delays it.
+        """
+
+        with self._lock:
+            self._message = None
+            self._message_epoch = None
+            self._no_message_reason = "epoch retired"
 
     def tick(self):
         """Publish the cached message, if any, and log an actual publish gap."""
 
         with self._lock:
+            if self._message is not None and self._message_epoch is not None:
+                current = self._epoch_identity()
+                if current is not None and current != self._message_epoch:
+                    # The durable map epoch moved on since this authority
+                    # was validated: never publish it again, from this tick
+                    # on, whether or not `Bridge.snapshot()` has noticed yet.
+                    self._message = None
+                    self._message_epoch = None
+                    self._no_message_reason = "epoch retired"
             message = self._message
+            reason_if_no_message = self._no_message_reason
             last = self._last_published_at
         now = self._clock()
         gap_from = self._started_at if last is None else last
@@ -254,11 +318,12 @@ class AuthorityHeartbeatPublisher:
                 self._last_published_at = now
         if now - gap_from > self._period_s:
             # A message was ready and this tick still published late: the
-            # heartbeat thread itself was delayed. No message at all, this
-            # early, means `_snapshot` has never run once yet; either way
-            # this is never conflated with a `_snapshot` build failure that
-            # left a perfectly good cached message being re-sent on time.
-            reason = "the thread was late" if message is not None else "no authority yet"
+            # heartbeat thread itself was delayed. No message at all is
+            # either the very first one (never built) or one just retired
+            # by an epoch change; either way this is never conflated with a
+            # `_snapshot` build failure that left a perfectly good cached
+            # message being re-sent on time.
+            reason = "the thread was late" if message is not None else reason_if_no_message
             self._log(reason)
 
     def run(self, closed):
@@ -596,6 +661,7 @@ class Bridge(Node):
             lambda message: self.authority_pub.publish(message),
             period_s=AUTHORITY_HEARTBEAT_PERIOD_S,
             log=self._log_authority_gap,
+            epoch_identity=lambda: _file_identity(self.root / "map-epoch.json"),
         )
         self.authority_heartbeat_thread = Thread(
             target=self._authority_heartbeat.run,
@@ -1237,6 +1303,12 @@ class Bridge(Node):
         with map_epoch_lock(self.root):
             record = read_map_epoch(self.root)
             if record is None or record["run_id"] != self.core.run_id:
+                # A fresh launch retired this robot's map epoch: stop
+                # resending whatever was cached for the old one. `tick`
+                # enforces the same fencing unconditionally (a cheap `stat`
+                # of map-epoch.json, every tick), so this is the fast path
+                # for when this timer is not itself stalled, not the only one.
+                self._authority_heartbeat.invalidate()
                 return
             self._snapshot()
 
@@ -1368,8 +1440,14 @@ class Bridge(Node):
         # this tick's own build-failure diagnostic; the heartbeat logs an
         # *actual* publish gap on its own terms, never merely because this
         # tick could not build a fresh authority.
+        #
+        # `_snapshot` runs inside `map_epoch_lock` (`snapshot()`), so this
+        # `map-epoch.json` identity is exactly what `record` (already
+        # confirmed to name `self.core.run_id`) was read from: the epoch
+        # this message is valid for, for `tick`'s own re-check.
         self._authority_heartbeat.update(
-            String(data=json.dumps(message, allow_nan=False))
+            String(data=json.dumps(message, allow_nan=False)),
+            _file_identity(self.root / "map-epoch.json"),
         )
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
