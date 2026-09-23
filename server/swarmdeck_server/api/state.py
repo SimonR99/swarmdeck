@@ -56,7 +56,6 @@ _alert_suppress_until: dict[str, float] = {}
 # acknowledged failure's suppression cannot silence the next one.
 _nav_failure_alerts: dict[str, str] = {}
 _nav_failure_serial = itertools.count(1)
-_camera_frames: dict[str, tuple[bytes, float, int]] = {}
 _detections: dict[str, dict[str, Any]] = {}
 # Live camera tracks above; operator-validated map objects below. They are
 # deliberately separate stores: a track is "what a camera can see right now",
@@ -70,14 +69,6 @@ REVIEW_PATH = REPO / "sessions" / "detections.json"
 _review_pushed_at = 0.0
 _review_dirty = False
 _review_saved_at = 0.0
-_camera_seq = 0
-
-# A robot still reporting telemetry can stop delivering frames entirely — a
-# congested link starves the camera POST long before it starves the 5 Hz
-# websocket. `GET /api/camera` answers 200 with the last frame regardless of
-# age, so nothing else in the system distinguishes that from live video.
-# Measured on a healthy link: p95 frame age 0.63 s. Well clear of it.
-CAMERA_STALE_S = 3.0
 
 # gui socket -> the robot whose camera that dashboard is currently showing.
 # Keyed by socket rather than a single global, because two operators watching
@@ -137,7 +128,6 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             pose.get("z", 0.0),
         )
     map_service.__dict__.update(new_service.__dict__)
-    _camera_frames.clear()
     _detections.clear()
     # Deliberately does NOT persist. This runs at startup, before load_review(),
     # so writing here would truncate the saved objects on every boot and then
@@ -232,23 +222,6 @@ async def set_camera_watch(source: Any, robot_id: str) -> None:
     else:
         _camera_watchers.pop(source, None)
     await push_camera_interest({previous, robot_id})
-
-
-def frozen_camera_message(robot: Any) -> str | None:
-    """Alert text for a frozen camera on an otherwise healthy robot, else None.
-
-    Only while the robot is online: an offline robot has a frozen camera by
-    definition, and `adapter_disconnect` already reports that — two alerts for
-    one cause is how an alert stack gets ignored. A robot with no camera at all
-    never qualifies either, because it has no frame that could have gone stale.
-    """
-    frame = _camera_frames.get(robot.robot_id)
-    if frame is None or not robot.online:
-        return None
-    frozen_s = time.monotonic() - frame[1]
-    if frozen_s <= CAMERA_STALE_S:
-        return None
-    return f"{robot.robot_id} camera frozen for {int(frozen_s)} s"
 
 
 def review_state() -> dict[str, Any]:
@@ -503,13 +476,6 @@ async def state_loop_tick(now: float | None = None) -> None:
         else:
             await clear_alert(did)
 
-        sid = f"stream_{r.robot_id}"
-        frozen = frozen_camera_message(r)
-        if frozen is not None:
-            await raise_alert(sid, "warn", "stream_loss", frozen, r.robot_id)
-        else:
-            await clear_alert(sid)
-
     for robot_id in set(_state_loop_cache) - seen:
         _state_loop_cache.pop(robot_id, None)
 
@@ -697,7 +663,6 @@ async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
         # the geometry they were placed against.
         review_store.reset()
         save_review(force=True)
-        _camera_frames.clear()
         # Alerts describe a world that no longer exists — an `unattended` warning
         # for a robot now back at its spawn pose is stale by construction. The
         # suppression window goes too, so a condition that genuinely returns

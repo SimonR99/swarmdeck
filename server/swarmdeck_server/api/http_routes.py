@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
-
-from . import state
 
 router = APIRouter()
 
@@ -196,43 +192,3 @@ async def get_gaussians(request: Request) -> Response:
     from .reconstruction_routes import get_gaussians as handler
 
     return await handler(request)
-
-
-@router.post("/api/adapter/camera")
-async def post_camera(request: Request) -> Any:
-    """Accept a throttled JPEG preview from an adapter.
-
-    This is the ROS-free fallback when the low-latency WHEP pipeline is not
-    installed. Adapters remain responsible for converting their native camera
-    format into a browser-ready JPEG.
-    """
-
-    rid = request.query_params.get("robot_id", "")
-    if not rid:
-        return JSONResponse({"error": "robot_id required"}, status_code=400)
-    if request.headers.get("content-type", "").split(";", 1)[0] != "image/jpeg":
-        return JSONResponse({"error": "image/jpeg required"}, status_code=415)
-    frame = await request.body()
-    if not frame or len(frame) > 2_000_000 or not frame.startswith(b"\xff\xd8"):
-        return JSONResponse({"error": "invalid JPEG frame"}, status_code=400)
-
-    state._camera_seq += 1
-    state._camera_frames[rid] = (frame, time.monotonic(), state._camera_seq)
-    return {"ok": True, "bytes": len(frame), "seq": state._camera_seq}
-
-
-@router.get("/api/camera/{robot_id}")
-async def get_camera(robot_id: str) -> Response:
-    current = state._camera_frames.get(robot_id)
-    if current is None:
-        return Response(status_code=404, headers={"Cache-Control": "no-store"})
-    frame, received_at, seq = current
-    return Response(
-        content=frame,
-        media_type="image/jpeg",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Camera-Seq": str(seq),
-            "X-Frame-Age-Ms": str(int((time.monotonic() - received_at) * 1000)),
-        },
-    )

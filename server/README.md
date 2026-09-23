@@ -10,3 +10,10 @@ not create independent fleet instances: this remains one fleet per process.
 - `/api/agent/*` belongs to Cortex, not this server. The production nginx and
   development Vite proxies route those requests to the agent service on port
   8085. Direct requests to the fleet server now return 404.
+- `POST /api/adapter/camera` and `GET /api/camera/{robot_id}` are removed:
+  adapters use the media pipeline, not server-side JPEG uploads. Camera stream
+  loss is no longer inferred from that unused cache. `/api/robot/{id}/vision`
+  retains `camera_streaming: false`, `frame_age_ms: null`, and `frame_seq: null`
+  for CLI consumers; detections and robot metadata are unchanged. The robot
+  tool's snapshot command uses its primary agent vision path, without a JPEG
+  endpoint fallback.

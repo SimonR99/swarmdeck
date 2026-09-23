@@ -1113,20 +1113,9 @@ def main() -> None:
     )
 
     def _run_snap(args):
-        try:
-            from agent.tools.vision import cmd_snapshot
+        from agent.tools.vision import cmd_snapshot
 
-            cmd_snapshot(args)
-        except Exception:
-            raw_jpeg = _http_get(f"/api/camera/{args.robot_id}", args.server)
-            out_path = (
-                args.save
-                or f"/app/agent/captures/snapshot_{args.robot_id}_{int(time.time())}.jpg"
-            )
-            os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(raw_jpeg)
-            print(f"Captured snapshot from {args.robot_id} -> {out_path}")
+        cmd_snapshot(args)
 
     p_snap.set_defaults(func=_run_snap)
 

@@ -229,13 +229,6 @@ async def get_robot_vision(robot_id: str) -> Any:
     # Ensure interest is requested so adapter streams frames if available
     await state.push_camera_interest({robot_id})
 
-    frame_tuple = state._camera_frames.get(robot_id)
-    has_frame = frame_tuple is not None
-    frame_age_ms = (
-        int((time.monotonic() - frame_tuple[1]) * 1000) if frame_tuple else None
-    )
-    seq = frame_tuple[2] if frame_tuple else None
-
     # Retrieve live tracks for this robot
     tracks = [d for d in state._detections.values() if d.get("robot_id") == robot_id]
 
@@ -243,10 +236,10 @@ async def get_robot_vision(robot_id: str) -> Any:
         "robot_id": robot_id,
         "robot_type": robot.robot_type,
         "pose": robot.pose,
-        "camera_streaming": has_frame
-        and (frame_age_ms is not None and frame_age_ms < 5000),
-        "frame_age_ms": frame_age_ms,
-        "frame_seq": seq,
+        # JPEG preview ingestion is retired; retain the CLI response shape.
+        "camera_streaming": False,
+        "frame_age_ms": None,
+        "frame_seq": None,
         "tracks": tracks,
     }
 

@@ -20,7 +20,6 @@ GET /api/autonomy/replicas/components/live/{session_id}
 GET /api/autonomy/replicas/components/view/{session_id}
 GET /api/autonomy/replicas/view/{robot_id}/{session_id}
 GET /api/autonomy/replicas/{robot_id}/{session_id}
-GET /api/camera/{robot_id}
 GET /api/config
 GET /api/detection/classes
 GET /api/detections
@@ -43,7 +42,6 @@ HEAD /docs
 HEAD /docs/oauth2-redirect
 HEAD /openapi.json
 HEAD /redoc
-POST /api/adapter/camera
 POST /api/autonomy/replicas
 POST /api/autonomy/replicas/components/live/{session_id}/goal
 POST /api/fleet/{robot_id}/discard

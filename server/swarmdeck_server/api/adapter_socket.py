@@ -57,11 +57,6 @@ async def adapter_socket(ws: WebSocket) -> None:
             # visibly online with no way to reach it. See Registry.disconnect.
             state.registry.disconnect(robot_id, ws)
             state.events.log("adapter_disconnect", {"robot_id": robot_id})
-            # Drop the stale preview, but only if nothing took this robot's
-            # place: `GET /api/camera/<id>` otherwise serves a departed robot's
-            # last frame indefinitely, with only X-Frame-Age-Ms to say so.
-            if not state.registry.has_sink(robot_id):
-                state._camera_frames.pop(robot_id, None)
 
 
 def registry_id_of(hello: dict[str, Any]) -> str | None:
