@@ -146,6 +146,7 @@ COPY deploy/patches/cslam-map-epoch.patch /tmp/cslam-map-epoch.patch
 COPY deploy/patches/cslam-inter-robot-descriptors.patch /tmp/cslam-inter-robot-descriptors.patch
 COPY deploy/patches/cslam-closure-consistency.patch /tmp/cslam-closure-consistency.patch
 COPY deploy/patches/cslam-unchanged-graph.patch /tmp/cslam-unchanged-graph.patch
+COPY deploy/patches/cslam-scancontext-index.patch /tmp/cslam-scancontext-index.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
@@ -158,7 +159,8 @@ RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-map-epoch.patch \
     && git apply /tmp/cslam-inter-robot-descriptors.patch \
     && git apply /tmp/cslam-closure-consistency.patch \
-    && git apply /tmp/cslam-unchanged-graph.patch
+    && git apply /tmp/cslam-unchanged-graph.patch \
+    && git apply /tmp/cslam-scancontext-index.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \

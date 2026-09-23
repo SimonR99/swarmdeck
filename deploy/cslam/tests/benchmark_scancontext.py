@@ -1,0 +1,38 @@
+"""Run in the C-SLAM image with patched source on PYTHONPATH."""
+
+from time import perf_counter
+
+import numpy as np
+from scipy import spatial
+
+from cslam.lidar_pr.scancontext_matching import ScanContextMatching
+
+
+def median_ms(function, repeats):
+    samples = []
+    for _ in range(repeats):
+        start = perf_counter()
+        function()
+        samples.append((perf_counter() - start) * 1000)
+    return round(float(np.median(samples)), 3)
+
+
+rng = np.random.default_rng(19)
+for count in (1000, 5000, 20000):
+    matcher = ScanContextMatching()
+    for index in range(count):
+        matcher.add_item(rng.random(1200), index)
+    query = rng.random(1200)
+    ringkey = query.reshape(20, 60).mean(axis=1)
+    matcher._candidate_indices(ringkey)
+    old = lambda: spatial.KDTree(np.array(matcher.ringkeys[:count])).query(
+        ringkey, k=10
+    )
+    new = lambda: matcher._candidate_indices(ringkey)
+    # Fixed scoring work is unchanged. Report it separately from index costs.
+    print(
+        f"n={count}: index old={median_ms(old, 30)}ms "
+        f"cached={median_ms(new, 30)}ms "
+        f"full_cached_search={median_ms(lambda: matcher.search(query, 1), 3)}ms",
+        flush=True,
+    )
