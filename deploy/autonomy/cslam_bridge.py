@@ -136,6 +136,46 @@ def sensor_input_is_fresh(last_sensor_at, now=None):
     return last_sensor_at > 0.0 and 0.0 <= age < AUTHORITY_SENSOR_TTL_S
 
 
+def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch, run_id):
+    """Decide the map-authority message to publish this tick.
+
+    Sensor freshness, TF and the product read gate a *fresh* authority, but
+    they never gate the heartbeat itself: a freshly built ``authority``
+    (``build_authority``'s dict, or None when this tick could not produce
+    one) is published and cached; otherwise the last cached authority is
+    re-sent byte-for-byte so MGG's snapshot never expires from a transient
+    stall. The cache is honoured only while it still names the peer's
+    current mission, run and map epoch, so a real reset (a new run_id) falls
+    through to a ``resetting`` status instead of an authority for a map that
+    no longer exists.
+
+    Returns ``(message, new_cache)``. ``new_cache`` is the dict to keep for
+    the next tick: the fresh authority, the same cached authority when it was
+    re-sent, or None once there is nothing left worth re-sending.
+    """
+
+    if built is not None:
+        return built, built
+    if (
+        cached is not None
+        and cached.get("robot_id") == robot_id
+        and cached.get("mission_id") == mission_id
+        and cached.get("robot_map_epoch") == robot_map_epoch
+        and cached.get("run_id") == run_id
+    ):
+        return cached, cached
+    return (
+        {
+            "robot_id": robot_id,
+            "mission_id": mission_id,
+            "robot_map_epoch": robot_map_epoch,
+            "run_id": run_id,
+            "state": "resetting",
+        },
+        None,
+    )
+
+
 def transform_pose(transform):
     from geometry_msgs.msg import Pose
 
@@ -449,6 +489,12 @@ class Bridge(Node):
         # frame state could be paired with it.
         self.authority_revision = None
         self.authority_skipped = 0
+        # The last authority actually published (fresh or re-sent), kept so
+        # the heartbeat can re-send it verbatim while a fresh one cannot be
+        # built; see `authority_heartbeat`.
+        self.authority_cache = None
+        self.authority_gap_ticks = 0
+        self.authority_gap_reason = ""
         self._product_memo = {}
 
     def _color_image(self, message):
@@ -1129,11 +1175,20 @@ class Bridge(Node):
             )
         self.authority_revision = None
         source_reset_stamp = self.source_reset_stamp()
-        if (
-            self.core.revision
-            and sensor_input_is_fresh(last_sensor_at)
-            and source_reset_stamp is not None
-        ):
+        # A fresh authority needs sensor freshness, the reset ACK and a
+        # product paired to the current revision; none of that gates the
+        # heartbeat below, only whether this tick's authority is fresh or
+        # re-sent (`authority_heartbeat`). `gap_reason` names why this tick
+        # could not build a fresh one, for the rate-limited log.
+        built_authority = None
+        gap_reason = None
+        if not self.core.revision:
+            gap_reason = "no graph revision yet"
+        elif not sensor_input_is_fresh(last_sensor_at):
+            gap_reason = "sensor input stale"
+        elif source_reset_stamp is None:
+            gap_reason = "map reset acknowledgement unavailable"
+        else:
             try:
                 # Corrections are data, never a second TF authority. The
                 # navigation/planning frame is the continuous odometry frame.
@@ -1170,27 +1225,36 @@ class Bridge(Node):
                     )
                     if source_reset_stamp:
                         authority["source_reset_stamp"] = source_reset_stamp
-                    self.authority_pub.publish(
-                        String(data=json.dumps(authority, allow_nan=False))
-                    )
-                    self.authority_revision = artifact.revision
+                    built_authority = authority
                 elif product is not None:
                     self.authority_skipped += 1
+                    gap_reason = "worker product lags the current graph revision"
+                else:
+                    gap_reason = "no product published yet"
             except TransformException:
-                pass
-        if self.authority_revision is None:
-            self.authority_pub.publish(
-                String(
-                    data=json.dumps(
-                        {
-                            "robot_id": self.robot,
-                            "mission_id": self.core.mission_id,
-                            "robot_map_epoch": self.core.map_epoch,
-                            "run_id": self.core.run_id,
-                            "state": "resetting",
-                        }
-                    )
-                )
+                gap_reason = "transform lookup failed"
+        message, self.authority_cache = authority_heartbeat(
+            built_authority,
+            self.authority_cache,
+            robot_id=self.robot,
+            mission_id=self.core.mission_id,
+            robot_map_epoch=self.core.map_epoch,
+            run_id=self.core.run_id,
+        )
+        self.authority_revision = message.get("mapping_graph_revision")
+        self.authority_pub.publish(String(data=json.dumps(message, allow_nan=False)))
+        self.authority_gap_reason = gap_reason or ""
+        if gap_reason is not None:
+            self.authority_gap_ticks += 1
+            resent = built_authority is None and message is self.authority_cache
+            self.get_logger().warn(
+                f"map authority heartbeat gap ({gap_reason}): "
+                + (
+                    "re-sending the last published authority"
+                    if resent
+                    else "no authority to re-send, reporting resetting"
+                ),
+                throttle_duration_sec=5.0,
             )
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
@@ -1282,6 +1346,13 @@ class Bridge(Node):
                 else self.core.revision - self.authority_revision
             ),
             "authority_skipped": self.authority_skipped,
+            # Heartbeat gaps: ticks that could not build a fresh authority
+            # (re-sent the last good one, or reported resetting when there
+            # was none) and why the most recent one happened. The headline
+            # metric for the heartbeat fix is MGG never seeing the map go
+            # unavailable despite this counting above zero.
+            "authority_gap_ticks": self.authority_gap_ticks,
+            "authority_gap_reason": self.authority_gap_reason,
             # The worker's last build outcome (`mola/worker.json`): null until
             # a worker has reported, "" after a published build, otherwise the
             # failure, such as the point budget (`manifest exceeds point count

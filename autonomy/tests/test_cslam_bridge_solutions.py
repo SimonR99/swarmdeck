@@ -193,3 +193,102 @@ def test_parked_scans_repeat_only_at_the_scene_change_period(bridge_module):
     assert not parked_since(rest, (1.03, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0), 10.0, 9.0)
     # A parked robot still feeds Swarm-SLAM's scene-change rule at its period.
     assert not parked_since(rest, rest, 9.0 + bridge_module.PARKED_REPUBLISH_S, 9.0)
+
+
+def _authority(mission_id, run_id, epoch, revision):
+    return {
+        "robot_id": "robot_0",
+        "mission_id": mission_id,
+        "robot_map_epoch": epoch,
+        "run_id": run_id,
+        "component_id": "component:merged",
+        "solution_order": [0, -1],
+        "correction_revision": 0,
+        "map_epoch": epoch,
+        "mapping_graph_revision": revision,
+        "geometry_revision": f"{revision:064x}",
+        "map_source_stamp": {"sec": 0, "nanosec": 0},
+        "navigation_frame": "robot_0/odom",
+        "T_component_navigation": IDENTITY_SE3,
+        "planning_frame": "robot_0/odom",
+        "T_component_planning": IDENTITY_SE3,
+    }
+
+
+def test_authority_heartbeat_republishes_the_cache_verbatim_while_gated(bridge_module):
+    """The heartbeat keeps MGG's snapshot alive across a transient stall.
+
+    ``cslam_bridge._snapshot`` gates a *fresh* authority on sensor freshness,
+    the reset ACK and a paired product; none of that used to gate the
+    heartbeat, so a single slow tick sent ``resetting`` and expired MGG's
+    snapshot (~3 s TTL). ``authority_heartbeat`` is the fix: keep the last
+    good authority in service until a fresher one lands or the run itself
+    changes.
+    """
+    from autonomy.map_epochs import robot_run_id
+
+    heartbeat = bridge_module.authority_heartbeat
+    mission = str(uuid.uuid4())
+    run_id = robot_run_id(mission, "robot_0", 0)
+    good = _authority(mission, run_id, 0, 7)
+    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+
+    # A fresh authority is published and cached as-is.
+    message, cache = heartbeat(good, None, **kwargs)
+    assert message is good and cache is good
+
+    # No fresh authority this tick (a gated build, or none attempted): the
+    # cached one is re-sent byte-identical, never rebuilt or mutated.
+    message, cache = heartbeat(None, cache, **kwargs)
+    assert message is good and cache is good
+
+    # A newer fresh authority replaces the cache, and stays authoritative on
+    # the next gap; the bridge never regresses to a revision already
+    # superseded.
+    newer = _authority(mission, run_id, 0, 9)
+    message, cache = heartbeat(newer, cache, **kwargs)
+    assert message is newer and cache is newer
+    message, cache = heartbeat(None, cache, **kwargs)
+    assert message is newer
+
+    # A run change (mission id, map epoch or run id) is a real reset: the
+    # stale authority is never re-sent for a run it no longer names.
+    reset_run_id = robot_run_id(mission, "robot_0", 1)
+    message, cache = heartbeat(
+        None,
+        cache,
+        robot_id="robot_0",
+        mission_id=mission,
+        robot_map_epoch=1,
+        run_id=reset_run_id,
+    )
+    assert message == {
+        "robot_id": "robot_0",
+        "mission_id": mission,
+        "robot_map_epoch": 1,
+        "run_id": reset_run_id,
+        "state": "resetting",
+    }
+    assert cache is None
+
+    # With nothing cached and nothing fresh, resetting is reported.
+    message, cache = heartbeat(None, None, **kwargs)
+    assert message["state"] == "resetting" and cache is None
+
+
+def test_authority_heartbeat_resend_is_a_valid_causal_update(bridge_module):
+    """The re-sent authority passes the contract that rejects causal rollback."""
+
+    from adapters.mapping_authority import accepts_authority_update
+    from autonomy.map_epochs import robot_run_id
+
+    heartbeat = bridge_module.authority_heartbeat
+    mission = str(uuid.uuid4())
+    run_id = robot_run_id(mission, "robot_0", 0)
+    good = _authority(mission, run_id, 0, 7)
+    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+
+    assert accepts_authority_update(good, None)
+    resent, _ = heartbeat(None, good, **kwargs)
+    # Identical heartbeats are accepted, never treated as rollback.
+    assert accepts_authority_update(resent, good)
