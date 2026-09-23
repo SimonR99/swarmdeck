@@ -441,6 +441,12 @@ def test_routes_list_and_serve_the_deployment_scope(setup):
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/png"
         assert response.headers["X-Map-Seq"] == "1"
+        assert response.headers["ETag"]
+        cached = client.get(
+            f"/api/map/optimized/{scope_of(session)}",
+            headers={"If-None-Match": response.headers["ETag"]},
+        )
+        assert cached.status_code == 304
         assert int(response.headers["X-Map-Width"]) == meta.width
         assert int(response.headers["X-Map-Height"]) == meta.height
         assert float(response.headers["X-Map-Resolution"]) == meta.resolution
@@ -469,6 +475,28 @@ def test_pose_only_jitter_inside_tolerance_does_not_rebuild_the_raster(setup):
     setup["map_service"].transforms["robot_1"] = (10.01, 5.0, 0.0, math.pi / 2)
     report = refresher.refresh(session, placements(session))
     assert report["status"] == "unchanged"
+
+
+def test_optimized_png_cache_insert_uses_the_optimized_lock(monkeypatch):
+    entered = []
+
+    class ObservedLock:
+        def __enter__(self):
+            entered.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            entered.append("exit")
+
+    meta = GridMeta(0.2, 2, 2, 0.0, 0.0)
+    cells = np.zeros((2, 2), dtype=np.int8)
+    map_routes._optimized_png_cache.clear()
+    monkeypatch.setattr(map_routes, "_optimized_png_cache_bytes", 0)
+    monkeypatch.setattr(map_routes, "_optimized_lock", ObservedLock())
+
+    _etag, body = map_routes._png_for_optimized_map("scope", 1, meta, cells)
+
+    assert body.startswith(b"\x89PNG")
+    assert entered == ["enter", "exit", "enter", "exit"]
 
 
 def test_rebuilt_raster_advances_its_sequence(setup):

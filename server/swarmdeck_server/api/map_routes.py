@@ -7,11 +7,13 @@ no occupancy-map merge, SLAM ingress, or server-side planning code.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -33,6 +35,10 @@ _server_scopes: set[str] = set()
 _optimized_seq: dict[str, int] = {}
 _raster_generation = 0
 _robot_epoch_locks: dict[str, asyncio.Lock] = {}
+_OPTIMIZED_PNG_CACHE_MAX_ENTRIES = 16
+_OPTIMIZED_PNG_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_optimized_png_cache: OrderedDict[tuple[str, int], tuple[str, bytes]] = OrderedDict()
+_optimized_png_cache_bytes = 0
 _MAP_EPOCH_CACHE_MAX_ENTRIES = 256
 _map_epoch_cache: OrderedDict[tuple[int, str, str], int | None] = OrderedDict()
 _map_epoch_cache_lock = threading.Lock()
@@ -152,6 +158,7 @@ def retire_server_scopes(keep: str | Iterable[str] | None = None) -> list[str]:
             _optimized.pop(scope, None)
             _server_scopes.discard(scope)
             _optimized_seq.pop(scope, None)
+        _drop_optimized_png_cache(dead)
     return dead
 
 
@@ -249,6 +256,7 @@ async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> 
             _optimized.pop(scope, None)
             _optimized_seq.pop(scope, None)
             _server_scopes.discard(scope)
+        _drop_optimized_png_cache(dead)
     await registry.send(robot_id, {"type": "stop", **stamps()})
     await map_service.reset_robot_async(robot_id)
     await broadcast({"type": "network_clear", "robot_id": robot_id})
@@ -390,6 +398,7 @@ def _prune_optimized_maps(scopes: Any) -> list[str]:
         for scope in dead:
             _optimized.pop(scope, None)
             _optimized_seq.pop(scope, None)
+        _drop_optimized_png_cache(dead)
     return dead
 
 
@@ -410,7 +419,59 @@ async def get_optimized_index() -> dict[str, Any]:
     return {"type": "optimized_maps", "maps": items}
 
 
-async def get_optimized_map(scope: str) -> Response:
+def _etag_for_optimized_map(scope: str, seq: int) -> str:
+    token = hashlib.sha256(f"{scope}\0{seq}".encode()).hexdigest()[:24]
+    return f'"optimized-map-{token}"'
+
+
+def _client_has_etag(header: str | None, etag: str) -> bool:
+    if not header:
+        return False
+    return any(item.strip() == etag for item in header.split(","))
+
+
+def _drop_optimized_png_cache(scopes: Iterable[str] | None = None) -> None:
+    global _optimized_png_cache_bytes
+    if scopes is None:
+        _optimized_png_cache.clear()
+        _optimized_png_cache_bytes = 0
+        return
+    dead = set(scopes)
+    for key in list(_optimized_png_cache):
+        if key[0] in dead:
+            _optimized_png_cache_bytes -= len(_optimized_png_cache.pop(key)[1])
+
+
+def _png_for_optimized_map(
+    scope: str, seq: int, meta: GridMeta, cells: np.ndarray
+) -> tuple[str, bytes]:
+    global _optimized_png_cache_bytes
+    cache_key = (scope, seq)
+    with _optimized_lock:
+        cached = _optimized_png_cache.get(cache_key)
+        if cached is not None:
+            _optimized_png_cache.move_to_end(cache_key)
+            return cached
+    from ..mapsvc.output import grid_png
+
+    encoded = (_etag_for_optimized_map(scope, seq), grid_png(meta, cells))
+    with _optimized_lock:
+        cached = _optimized_png_cache.get(cache_key)
+        if cached is not None:
+            _optimized_png_cache.move_to_end(cache_key)
+            return cached
+        _optimized_png_cache[cache_key] = encoded
+        _optimized_png_cache_bytes += len(encoded[1])
+        while (
+            len(_optimized_png_cache) > _OPTIMIZED_PNG_CACHE_MAX_ENTRIES
+            or _optimized_png_cache_bytes > _OPTIMIZED_PNG_CACHE_MAX_BYTES
+        ):
+            _old_key, (_old_etag, body) = _optimized_png_cache.popitem(last=False)
+            _optimized_png_cache_bytes -= len(body)
+    return encoded
+
+
+async def get_optimized_map(scope: str, if_none_match: str | None = None) -> Response:
     with _optimized_lock:
         entry = _optimized.get(scope)
         seq = _optimized_seq.get(scope, 0)
@@ -419,19 +480,20 @@ async def get_optimized_map(scope: str) -> Response:
             {"error": f"no optimized map for {scope!r}"}, status_code=404
         )
     meta, cells, _robots, transforms = entry
-    from ..mapsvc.output import grid_png
-
-    return Response(
-        content=grid_png(meta, cells),
-        media_type="image/png",
-        headers=_map_headers(
+    etag, body = _png_for_optimized_map(scope, seq, meta, cells)
+    headers = {
+        **_map_headers(
             {
                 **meta.as_dict(),
                 "seq": seq,
                 **({"transforms": transforms} if transforms is not None else {}),
             }
         ),
-    )
+        "ETag": etag,
+    }
+    if _client_has_etag(if_none_match, etag):
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="image/png", headers=headers)
 
 
 def reset_optimized_maps() -> None:
@@ -440,4 +502,5 @@ def reset_optimized_maps() -> None:
         _optimized.clear()
         _server_scopes.clear()
         _optimized_seq.clear()
+        _drop_optimized_png_cache()
         _raster_generation += 1

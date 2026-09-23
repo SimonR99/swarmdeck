@@ -979,10 +979,10 @@ async def get_optimized_index() -> dict[str, Any]:
 
 
 @app.get("/api/map/optimized/{scope}")
-async def get_optimized_map(scope: str) -> Response:
+async def get_optimized_map(scope: str, request: Request) -> Response:
     from .map_routes import get_optimized_map as handler
 
-    return await handler(scope)
+    return await handler(scope, request.headers.get("if-none-match"))
 
 
 @app.get("/api/map/gaussians")
