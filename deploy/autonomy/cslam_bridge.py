@@ -96,6 +96,11 @@ MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 AUTHORITY_SENSOR_TTL_S = 3.0
+# The wire cadence of the map authority heartbeat, independent of
+# `_snapshot`'s own 1 Hz timer: `AuthorityHeartbeatPublisher.run` publishes
+# on this period from its own thread, so a snapshot tick that never runs at
+# all (an executor starved by other callbacks) never silences the topic.
+AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
 # A parked robot's scans are the same scan. Swarm-SLAM earns keyframes by
 # distance, and by scene change at most once per
 # keyframe_scene_change_min_period_s (cslam_lidar.yaml), so a scan that
@@ -190,6 +195,64 @@ def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch,
         },
         None,
     )
+
+
+class AuthorityHeartbeatPublisher:
+    """Publish the cached map authority on its own schedule and thread.
+
+    `update` (called from `Bridge._snapshot`, on the busy main executor)
+    only replaces the cached message; it never publishes. `tick` (called
+    from `run`, on a dedicated thread that never touches the executor)
+    publishes whatever is cached. A `_snapshot` tick that takes arbitrarily
+    long, or does not run at all for a while, delays only the next *fresh*
+    authority; the heartbeat itself keeps firing on `period_s` regardless,
+    which is the fix for MGG's snapshot expiring from an executor stall.
+
+    `log(reason)` is called from `tick`, on the heartbeat thread, whenever
+    the cached message has named a non-empty ``gap_reason`` for at least one
+    full `period_s`; callers rate-limit it themselves (e.g. ROS's
+    ``throttle_duration_sec``), since a stall generally outlasts one tick.
+    """
+
+    def __init__(self, publish, *, period_s, log, clock=time.monotonic):
+        self._publish = publish
+        self._period_s = period_s
+        self._log = log
+        self._clock = clock
+        self._lock = Lock()
+        self._message = None
+        self._gap_reason = ""
+        self._gap_since = None
+
+    def update(self, message, gap_reason):
+        """Replace the message the next tick(s) publish; never publishes."""
+
+        with self._lock:
+            self._message = message
+            if gap_reason:
+                if self._gap_since is None:
+                    self._gap_since = self._clock()
+                self._gap_reason = gap_reason
+            else:
+                self._gap_since = None
+                self._gap_reason = ""
+
+    def tick(self):
+        """Publish the current cached message, if any, and log a stale gap."""
+
+        with self._lock:
+            message, reason, since = self._message, self._gap_reason, self._gap_since
+        if message is None:
+            return
+        self._publish(message)
+        if since is not None and self._clock() - since >= self._period_s:
+            self._log(reason)
+
+    def run(self, closed):
+        """Tick every `period_s` until `closed` is set (a `threading.Event`)."""
+
+        while not closed.wait(self._period_s):
+            self.tick()
 
 
 def transform_pose(transform):
@@ -514,6 +577,20 @@ class Bridge(Node):
         self._product_memo = {}
         # status.json is only rewritten when its content actually changes.
         self._last_status_json = None
+        # Publishes the cached authority on its own thread, never the main
+        # executor `_snapshot` runs on; see `AuthorityHeartbeatPublisher`.
+        self._authority_heartbeat = AuthorityHeartbeatPublisher(
+            lambda message: self.authority_pub.publish(message),
+            period_s=AUTHORITY_HEARTBEAT_PERIOD_S,
+            log=self._log_authority_gap,
+        )
+        self.authority_heartbeat_thread = Thread(
+            target=self._authority_heartbeat.run,
+            args=(self.closed,),
+            name=f"{self.robot}-authority-heartbeat",
+            daemon=True,
+        )
+        self.authority_heartbeat_thread.start()
 
     def _color_image(self, message):
         accepted = self._remember_color_frame(self.color_images, message, "color")
@@ -1134,6 +1211,15 @@ class Bridge(Node):
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
+    def _log_authority_gap(self, reason):
+        """Called from the heartbeat thread: an actual publish gap persists."""
+
+        self.get_logger().warn(
+            f"map authority heartbeat gap ({reason}): re-sending the last "
+            "published authority, or reporting resetting if there is none",
+            throttle_duration_sec=5.0,
+        )
+
     def snapshot(self):
         with map_epoch_lock(self.root):
             record = read_map_epoch(self.root)
@@ -1260,20 +1346,16 @@ class Bridge(Node):
             run_id=self.core.run_id,
         )
         self.authority_revision = message.get("mapping_graph_revision")
-        self.authority_pub.publish(String(data=json.dumps(message, allow_nan=False)))
         self.authority_gap_reason = gap_reason or ""
         if gap_reason is not None:
             self.authority_gap_ticks += 1
-            resent = built_authority is None and message is self.authority_cache
-            self.get_logger().warn(
-                f"map authority heartbeat gap ({gap_reason}): "
-                + (
-                    "re-sending the last published authority"
-                    if resent
-                    else "no authority to re-send, reporting resetting"
-                ),
-                throttle_duration_sec=5.0,
-            )
+        # Only the cached message changes here; `authority_heartbeat_thread`
+        # publishes it on its own schedule, off this (possibly busy) main
+        # executor, and logs an actual publish gap once one has lasted a
+        # full heartbeat period.
+        self._authority_heartbeat.update(
+            String(data=json.dumps(message, allow_nan=False)), gap_reason or ""
+        )
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
         # budget; the failure is only visible here and in the worker's log.

@@ -309,3 +309,109 @@ def test_authority_heartbeat_resend_is_a_valid_causal_update(bridge_module):
     resent, _ = heartbeat(None, good, **kwargs)
     # Identical heartbeats are accepted, never treated as rollback.
     assert accepts_authority_update(resent, good)
+
+
+def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updates(
+    bridge_module,
+):
+    """`tick` never waits on `update`: a `_snapshot` tick that is slow, or
+    that never runs at all (the executor starved by other callbacks), delays
+    only the next *fresh* authority, never the wire heartbeat itself.
+    """
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+
+    # No update yet: a tick before the first snapshot publishes nothing.
+    publisher.tick()
+    assert published == []
+
+    publisher.update("authority-v1", "")
+    # `update` is never called again here, simulating a `_snapshot` timer
+    # that stalls for minutes; every scheduled tick still republishes the
+    # last cached message, on schedule, independent of that stall.
+    for _ in range(5):
+        now[0] += 1.0
+        publisher.tick()
+    assert published == ["authority-v1"] * 5
+    # No gap_reason was ever set, so nothing is logged despite five ticks.
+    assert logged == []
+
+
+def test_authority_heartbeat_publisher_logs_once_a_gap_outlasts_one_period(
+    bridge_module,
+):
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+
+    publisher.update("authority-v1", "sensor input stale")
+    publisher.tick()  # same instant: not yet a full period since the gap started
+    assert published == ["authority-v1"]
+    assert logged == []
+
+    now[0] += 1.0
+    publisher.tick()
+    assert logged == ["sensor input stale"]
+
+    # The gap clears: no more logging, even though ticking continues.
+    publisher.update("authority-v1", "")
+    now[0] += 1.0
+    publisher.tick()
+    assert logged == ["sensor input stale"]
+
+
+def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
+    bridge_module,
+):
+    """A map-epoch reset must never resend the old authority: `update`
+    replaces the cache with whatever `authority_heartbeat` decided, and the
+    next tick publishes exactly that, matching its own contract end to end.
+    """
+
+    from autonomy.map_epochs import robot_run_id
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    heartbeat = bridge_module.authority_heartbeat
+    published, now = [], [0.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=lambda reason: None, clock=lambda: now[0]
+    )
+
+    mission = str(uuid.uuid4())
+    run_id0 = robot_run_id(mission, "robot_0", 0)
+    good = _authority(mission, run_id0, 0, 7)
+    kwargs0 = dict(
+        robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id0
+    )
+
+    message, cache = heartbeat(good, None, **kwargs0)
+    publisher.update(message, "")
+    publisher.tick()
+    assert published[-1] == good
+
+    # The build is momentarily gated (e.g. sensor stale): the cache is
+    # resent verbatim, never silently dropped.
+    message, cache = heartbeat(None, cache, **kwargs0)
+    publisher.update(message, "sensor input stale")
+    publisher.tick()
+    assert published[-1] == good
+
+    # A real epoch reset: the cache no longer names the current run, so the
+    # decision falls through to `resetting`, and the publisher immediately
+    # starts sending that instead, never the stale authority again.
+    run_id1 = robot_run_id(mission, "robot_0", 1)
+    kwargs1 = dict(
+        robot_id="robot_0", mission_id=mission, robot_map_epoch=1, run_id=run_id1
+    )
+    message, cache = heartbeat(None, cache, **kwargs1)
+    assert message["state"] == "resetting" and cache is None
+    publisher.update(message, "no graph revision yet")
+    publisher.tick()
+    assert published[-1] == message
+    assert published[-1] != good
