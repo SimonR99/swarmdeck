@@ -92,6 +92,14 @@ class Robot:
         return time.monotonic() - self.last_attended
 
     def to_state(self) -> dict[str, Any]:
+        live_mapping = self.live_mapping if self.online else None
+        if live_mapping is not None:
+            live_mapping = {
+                key: value
+                for key, value in live_mapping.items()
+                if key
+                not in {"planned_path", "global_planned_path", "local_planned_path"}
+            }
         return {
             "type": "robot_state",
             "robot_id": self.robot_id,
@@ -110,7 +118,7 @@ class Robot:
             "exploration_reason": self.exploration_reason,
             "exploration_goal": self.exploration_goal,
             "peer_slam": self.peer_slam if self.online else None,
-            "live_mapping": self.live_mapping if self.online else None,
+            "live_mapping": live_mapping,
             "fleet_exploration_status": (
                 self.fleet_exploration_status if self.online else "unknown"
             ),

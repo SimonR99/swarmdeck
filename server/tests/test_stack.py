@@ -143,6 +143,28 @@ def test_robot_state_leaves_already_merged_pose_untouched():
     assert robot_state(MergedRobot()) == state
 
 
+def test_robot_state_drops_live_mapping_duplicate_paths():
+    robot = app_registry.hello({"robot_id": "r0"}, sink=None)
+    robot.nav_status = "active"
+    robot.goal = {"x": 1.0, "y": 2.0}
+    robot.global_planned_path = [{"x": 0.0, "y": 0.0}]
+    robot.planned_path = robot.global_planned_path
+    robot.live_mapping = {
+        "mission_id": "m",
+        "planned_path": [{"x": 99.0, "y": 99.0}],
+        "global_planned_path": [{"x": 99.0, "y": 99.0}],
+        "local_planned_path": [{"x": 99.0, "y": 99.0}],
+        "authority_age_s": 0.1,
+    }
+
+    state = robot.to_state()
+
+    assert state["planned_path"] == [{"x": 0.0, "y": 0.0}]
+    assert "planned_path" not in state["live_mapping"]
+    assert "global_planned_path" not in state["live_mapping"]
+    assert "local_planned_path" not in state["live_mapping"]
+
+
 def test_map_status_reports_deployment_transforms_and_roundtrips_pose():
     # The public optimized-map header remains SE(2), while the canonical
     # placement used by 3D composition retains the surveyed start height.
