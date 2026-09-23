@@ -39,13 +39,6 @@ async def gui_socket(ws: WebSocket) -> None:
         print(f"[gui] socket error: {exc}")
     finally:
         state._gui_clients.discard(ws)
-        # A closed dashboard is not watching anything. Without this the last
-        # robot it looked at would upload full-rate video forever. Only that
-        # robot can have changed, and it may still be watched by someone else --
-        # push_camera_interest re-reads the remaining watchers to decide.
-        departed = state._camera_watchers.pop(ws, None)
-        if departed:
-            await state.push_camera_interest({departed})
 
 
 def gui_snapshot() -> list[dict[str, Any]]:
@@ -324,9 +317,6 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         state.suppress_alert(aid)
         await state.clear_alert(aid)
 
-    elif kind == "switch_camera":
-        await state.set_camera_watch(source, rid)
-
     elif kind in ("discard_robot", "remove_robot"):
         if rid and rid in state.registry.robots:
             state.registry.disconnect(rid)
@@ -338,5 +328,5 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 {"type": "fleet_change", "robots": state.fleet_snapshot()}
             )
 
-    elif kind in ("select_robots", "report_target"):
+    elif kind in ("select_robots", "report_target", "switch_camera"):
         pass  # logged above; no robot-side effect

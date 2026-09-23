@@ -11,7 +11,6 @@ Provides clean REST endpoints for:
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 
 from fastapi import Request
@@ -225,9 +224,6 @@ async def get_robot_vision(robot_id: str) -> Any:
     robot = state.registry.robots.get(robot_id)
     if not robot:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    # Ensure interest is requested so adapter streams frames if available
-    await state.push_camera_interest({robot_id})
 
     # Retrieve live tracks for this robot
     tracks = [d for d in state._detections.values() if d.get("robot_id") == robot_id]

@@ -82,10 +82,6 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         if r.coordinate_frame == "merged":
             state.map_service.set_transform(robot_id, 0.0, 0.0, 0.0)
         await ws.send_json({"type": "hello_ack", "robot_id": robot_id})
-        # Adapters come up assuming they are watched, so a reconnect during a
-        # session would otherwise resume full-rate video for a robot nobody has
-        # on screen, and stay that way until the operator happened to switch.
-        await state.push_camera_interest({robot_id})
         known_ids = {
             item.get("id")
             for item in state.settings_store.value.get("robots", [])

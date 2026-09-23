@@ -17,3 +17,6 @@ not create independent fleet instances: this remains one fleet per process.
   for CLI consumers; detections and robot metadata are unchanged. The robot
   tool's snapshot command uses its primary agent vision path, without a JPEG
   endpoint fallback.
+- Adapter `camera_interest` messages are no longer emitted. GUI
+  `switch_camera` messages remain accepted and logged for existing dashboards,
+  but camera selection has no server-to-adapter side effect.

@@ -354,3 +354,25 @@ def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
     ]
     assert "unattended" in logged_kinds
     assert "adapter_disconnect" in logged_kinds
+
+
+def test_camera_selection_does_not_send_unused_adapter_interest():
+    class Socket:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    socket = Socket()
+
+    async def scenario():
+        await handle_adapter_message(
+            {"type": "hello", "protocol": 2, "robot_id": "r0"}, socket
+        )
+        await handle_gui_message(
+            {"type": "switch_camera", "robot_id": "r0"}, source=object()
+        )
+
+    asyncio.run(scenario())
+    assert socket.messages == [{"type": "hello_ack", "robot_id": "r0"}]

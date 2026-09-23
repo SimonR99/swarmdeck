@@ -70,11 +70,6 @@ _review_pushed_at = 0.0
 _review_dirty = False
 _review_saved_at = 0.0
 
-# gui socket -> the robot whose camera that dashboard is currently showing.
-# Keyed by socket rather than a single global, because two operators watching
-# two different robots both need their frames.
-_camera_watchers: dict[Any, str] = {}
-
 # How long to wait for adapters to report `reset_done` before clearing server
 # state. The adapters reset simulator poses, odometry, and navigation state.
 # Generous, because waiting too little can clear state while an adapter still
@@ -175,53 +170,6 @@ def discard_disabled_detections(settings: dict[str, Any]) -> list[str]:
     for detection_id in stale:
         _detections.pop(detection_id, None)
     return stale
-
-
-def camera_is_watched(robot_id: str) -> bool:
-    return robot_id in set(_camera_watchers.values())
-
-
-async def push_camera_interest(robot_ids: Any) -> None:
-    """Tell each robot whether any dashboard is currently showing its camera.
-
-    Camera frames are by far the largest thing a robot sends -- measured at
-    73-78 KB per frame against 0.4 KB of telemetry -- and until now every robot
-    uploaded them continuously while at most one was ever displayed. On a
-    contended link that crowded out the traffic that actually matters.
-
-    Best-effort by design: `registry.send` returns False for a robot that is not
-    connected, and adapters default to uploading. Losing this message costs
-    bandwidth, never video.
-    """
-    for robot_id in robot_ids:
-        if not robot_id:
-            continue
-        await registry.send(
-            robot_id,
-            {
-                "type": "camera_interest",
-                "watched": camera_is_watched(robot_id),
-                **stamps(),
-            },
-        )
-
-
-async def set_camera_watch(source: Any, robot_id: str) -> None:
-    """Record which robot a dashboard is showing and notify both robots.
-
-    Both: the one gaining a viewer has to start uploading at full rate, and the
-    one losing its last viewer has to stop.
-    """
-    if source is None:
-        return
-    previous = _camera_watchers.get(source)
-    if previous == robot_id:
-        return
-    if robot_id:
-        _camera_watchers[source] = robot_id
-    else:
-        _camera_watchers.pop(source, None)
-    await push_camera_interest({previous, robot_id})
 
 
 def review_state() -> dict[str, Any]:
