@@ -409,18 +409,63 @@
     }
   });
 
-  // Continuous render loop & resize observer
-  $effect(() => {
-    let raf = 0;
-    const loop = () => {
+  // Redraw on demand & resize observer.
+  //
+  // The canvas used to redraw on every animation frame whether or not anything
+  // had changed, and did so even while the 3D view was covering it. Nothing on
+  // it animates on its own, so a frame is drawn only when one of the things it
+  // is drawn from changed.
+  let redrawHandle = 0;
+  function scheduleDraw() {
+    if (redrawHandle || show3D || document.hidden) return;
+    redrawHandle = requestAnimationFrame(() => {
+      redrawHandle = 0;
       draw();
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    const ro = new ResizeObserver(() => draw());
+    });
+  }
+
+  $effect(() => {
+    // Everything the canvas is drawn from.
+    void show3D;
+    void mapStore.revision;
+    void mapStore.seq;
+    void mapStore.ready;
+    void mapStore.info;
+    void mapStore.viewMode;
+    void mapStore.viewRobot;
+    void mapStore.slamGraphs;
+    void fleet.sceneRevision;
+    void fleet.selected;
+    void trails.revision;
+    void review.proposals;
+    void review.entities;
+    void review.selected;
+    void review.highlighted;
+    void settings.value.robots;
+    void view.scale;
+    void view.tx;
+    void view.ty;
+    void view.rotation;
+    void view.initialised;
+    void follow;
+    void showGrid;
+    void showTrails;
+    void showLabels;
+    void showSensors;
+    void showPlans;
+    void showNetwork;
+    untrack(scheduleDraw);
+  });
+
+  $effect(() => {
+    const ro = new ResizeObserver(() => scheduleDraw());
     if (host) ro.observe(host);
+    const onVisibility = () => scheduleDraw();
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      cancelAnimationFrame(raf);
+      if (redrawHandle) cancelAnimationFrame(redrawHandle);
+      redrawHandle = 0;
+      document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
     };
   });
