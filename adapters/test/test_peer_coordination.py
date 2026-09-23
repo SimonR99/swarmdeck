@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 import uuid
 import numpy as np
 import pytest
-from adapters.peer_coordination import PeerCoordinator
+from adapters.peer_coordination import PeerCoordinator, reservation_settle_s
 from adapters.exploration import PlannerPath, PlannerPose
 from autonomy.map_epochs import robot_run_id
 
@@ -666,7 +666,7 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
     assert r1.reserve(elsewhere, 2) == "granted"
 
 
-def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
+def _settling_coordinator(monkeypatch, config):
     monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
     monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=lambda **kw: NS(**kw)))
     monkeypatch.setitem(
@@ -681,7 +681,9 @@ def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
         create_publisher=lambda *args: NS(publish=lambda msg: None),
         create_subscription=lambda *args: None,
     )
-    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="map"), {})
+    coordinator = PeerCoordinator(
+        NS(node=node, id="r0", navigation_frame="map"), config
+    )
     now = [0.0]
     coordinator.clock = lambda: now[0]
     assert coordinator.settle_remaining_s() is None
@@ -709,6 +711,11 @@ def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
         100,
         (PlannerPose(0, 0, 0, 0, 0, 0, 1), PlannerPose(5, 0, 0, 0, 0, 0, 1)),
     )
+    return coordinator, plan, now
+
+
+def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
+    coordinator, plan, now = _settling_coordinator(monkeypatch, {})
     assert coordinator.reserve(plan, 1) == "pending"
     assert coordinator.settle_remaining_s() == pytest.approx(0.5)
     now[0] = 0.4
@@ -716,4 +723,27 @@ def test_settle_remaining_counts_down_to_the_grant(monkeypatch):
     assert coordinator.settle_remaining_s() == pytest.approx(0.1)
     now[0] = 0.5
     assert coordinator.settle_remaining_s() is None
+    assert coordinator.reserve(plan, 1) == "granted"
+
+
+@pytest.mark.parametrize(
+    "configured, expected",
+    [(None, 0.5), ("0.2", 0.2), ("soon", 0.5), (math.nan, 0.5), (-1, 0.0), (60, 5.0)],
+)
+def test_reservation_settle_interval_is_bounded(configured, expected):
+    assert reservation_settle_s(configured) == expected
+
+
+@pytest.mark.parametrize(
+    "config, settle_s", [({}, 0.5), ({"reservation_settle_s": 0.15}, 0.15)]
+)
+def test_configured_settle_interval_decides_when_a_claim_is_granted(
+    monkeypatch, config, settle_s
+):
+    coordinator, plan, now = _settling_coordinator(monkeypatch, config)
+    assert coordinator.arbiter.settle_s == settle_s
+    assert coordinator.reserve(plan, 1) == "pending"
+    now[0] = settle_s - 0.01
+    assert coordinator.reserve(plan, 1) == "pending"
+    now[0] = settle_s
     assert coordinator.reserve(plan, 1) == "granted"

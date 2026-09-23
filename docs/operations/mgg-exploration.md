@@ -86,6 +86,11 @@ stale, partial, or wrong-mission authority cannot refresh it. A component change
 a materially changed component-to-navigation transform, an expired authority,
 or a conflicting lower-cost lease still invalidates it. Reservations use bounded
 receipt-relative leases and are renewed while the full path executes.
+A new claim is granted only after `exploration.reservation_settle_s` (default
+0.5 s, bounded to 0 to 5 s) without hearing a conflicting peer claim; the path
+is dispatched the moment that interval ends. The simulation sets 0.15 s, since
+its robots' intentions are published and received by one process. A claim that
+arrives after the grant still revokes it and stops the path.
 
 The adapter logs one `exploration timing:` line per path at info level, when
 the robot has moved 0.10 m from where it stood when the path was submitted, or

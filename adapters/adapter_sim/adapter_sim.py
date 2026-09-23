@@ -1291,6 +1291,12 @@ def create_adapter_node():
     )
 
 
+# Every simulated robot's intentions travel through this one process, so a
+# peer's claim arrives within milliseconds; the 0.5 s default covers radio links
+# between real robots. A grant that a later claim revokes still stops the path.
+SIM_RESERVATION_SETTLE_S = 0.15
+
+
 def spin_events(node) -> None:
     from rclpy.experimental import EventsExecutor
 
@@ -1360,6 +1366,7 @@ def main() -> None:
                 in ("1", "true", "yes"),
                 "planar_tolerance_m": robot_spec(platforms[i]).max_step_height,
                 "max_inclination_rad": math.radians(30.0),
+                "reservation_settle_s": SIM_RESERVATION_SETTLE_S,
                 # The simulation knows where it spawned every robot, so
                 # frontier reservations can be arbitrated in that frame while
                 # the robots' maps stay separate components.

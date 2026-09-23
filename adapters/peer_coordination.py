@@ -41,6 +41,20 @@ def deployment_transform(pose):
     )
 
 
+DEFAULT_RESERVATION_SETTLE_S = 0.5
+
+
+def reservation_settle_s(value):
+    """The configured settle interval, within LeaseArbiter's 0 to 5 s."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_RESERVATION_SETTLE_S
+    if not math.isfinite(parsed):
+        return DEFAULT_RESERVATION_SETTLE_S
+    return min(5.0, max(0.0, parsed))
+
+
 class PeerCoordinator:
     """Nonblocking reservation API used by MggExploration's command arbiter.
 
@@ -73,6 +87,11 @@ class PeerCoordinator:
         self.reservation_signature = None
         self.last_publish = 0.0
         self.radius = float(config.get("reservation_radius_m", 2.0))
+        # How long a new claim waits to hear conflicting peer claims before it
+        # is granted. It must cover intention delivery between the robots; a
+        # claim that arrives later still revokes the grant, but only after the
+        # robot has started to move.
+        self.settle_s = reservation_settle_s(config.get("reservation_settle_s"))
         # Leases are arbitrated inside one verified map component, so a fleet
         # whose robots each hold their own component (inter-robot closures off)
         # assigns no frontiers at all. A deployment that surveyed where every
@@ -194,6 +213,7 @@ class PeerCoordinator:
                     value["mission_id"],
                     set(value["participants"]),
                     clock=self.clock,
+                    settle_s=self.settle_s,
                 )
             self.arbiter.set_component(component)
             self.raw_authority = value
