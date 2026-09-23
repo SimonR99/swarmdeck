@@ -1,13 +1,13 @@
 # DDS transport profiles
 
-The ARGoS Compose stack uses `fastdds_large_data.xml` for **sim and peer0–3**.
+The ARGoS Compose stack uses `fastdds_large_data.xml` for **sim, peer0–3 and MGG**.
 It explicitly enables 16 MiB shared-memory segments and UDPv4, without adding
 Fast DDS's smaller built-in SHM transport. UDP remains available for discovery
 and participants on other hosts. The planning-test overlay inherits this profile.
 `fast_livo2` stays in its separate domain with `/tools/fastdds_large.xml`;
 ARGoS itself does not use ROS/DDS. Hardware Compose profiles are unchanged.
 
-Sim owns a private, shareable 2 GiB `/dev/shm`; peers join it with
+Sim owns a private, shareable 2 GiB `/dev/shm`; peers and MGG join it with
 `ipc: service:sim`, just as they join its network namespace. They depend on sim
 being started. Profile XML is bind-mounted read-only, so image rebuilds are not
 needed to change transport settings. All participating containers must have

@@ -393,10 +393,11 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mgg
     network_mode: service:sim
+    ipc: service:sim
     environment:
       SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/deploy/dds/fastdds_large_data.xml
       SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
       SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
       SWARMDECK_PEER_NAMES: "${SWARMDECK_PEER_NAMES:-}"
@@ -407,6 +408,7 @@ services:
     volumes:
       - ../../configs:/app/configs:ro
       - ../mgg:/app/deploy/mgg:ro
+      - ../dds:/app/deploy/dds:ro
       - ../../sessions/simulation-reset:/run/swarmdeck-reset
       - peer_maps:/maps:ro
     command: ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && exec python3 /app/deploy/mgg/supervisor.py"]

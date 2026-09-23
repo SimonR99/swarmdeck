@@ -28,6 +28,16 @@ def test_sim_and_peers_share_ipc_and_large_data_profile():
     assert "FASTDDS_BUILTIN_TRANSPORTS" not in overlay.read_text()
 
 
+def test_mgg_joins_the_same_sim_transport():
+    service = yaml.safe_load(COMPOSE.read_text())["services"]["mgg"]
+    assert service["ipc"] == "service:sim"
+    assert service["network_mode"] == "service:sim"
+    assert service["environment"]["FASTRTPS_DEFAULT_PROFILES_FILE"] == PROFILE
+    assert "FASTDDS_BUILTIN_TRANSPORTS" not in service["environment"]
+    assert "../dds:/app/deploy/dds:ro" in service["volumes"]
+    assert service["depends_on"]["sim"]["condition"] == "service_started"
+
+
 def test_large_data_profile_keeps_udp_for_remote_participants():
     ns = {"dds": "http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles"}
     root = ET.parse(ROOT / "deploy/dds/fastdds_large_data.xml").getroot()
