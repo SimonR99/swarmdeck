@@ -27,6 +27,9 @@
  * - `review.*` — the detection crystals and the selected detection popover.
  * - `replicaTactical.selection` / `preference` — which cloud is displayed,
  *   whether live overlays are drawn on it, and whether follow mode applies.
+ * - `liveReplicaRevision` — the live robot frame drawn on a replica. It is
+ *   polled every second with new freshness ages, so it is counted only when
+ *   what it draws changed (`liveReplicaDrawChanged`).
  *
  * Not listed, deliberately: `navigation.goalMode` only moves the ground
  * reticle, which follows the pointer and is redrawn by the pointer handler.
@@ -54,7 +57,7 @@ export interface SceneDrawStores {
 
 /** The component's own drawn state: display options and loaded replica data. */
 export interface SceneDrawState {
-  liveReplica: unknown;
+  liveReplicaRevision: number;
   replicaCloud: unknown;
   follow: boolean;
   showGrid: boolean;
@@ -87,7 +90,7 @@ export function sceneDrawInputs(stores: SceneDrawStores, state: SceneDrawState):
     stores.review.focused,
     stores.replicaTactical.selection,
     stores.replicaTactical.preference,
-    state.liveReplica,
+    state.liveReplicaRevision,
     state.replicaCloud,
     state.follow,
     state.showGrid,

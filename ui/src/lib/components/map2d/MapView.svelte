@@ -779,7 +779,7 @@
     <div
       class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
              border-accent/20 bg-surface/90 px-3 py-1.5 text-[10px] font-medium text-accent
-             shadow-sm backdrop-blur-xl"
+             shadow-sm"
     >
       <Crosshair class="mr-1 inline h-3 w-3" />
       Click destination for {canGoal} robot{canGoal > 1 ? 's' : ''} · Esc to cancel
@@ -802,7 +802,7 @@
     {#if layersOpen}
       <div
         class="panel-glow absolute bottom-14 right-0 w-64 rounded-[--radius-panel] border border-transparent bg-surface/97 p-4
-               text-[10px] shadow-[0_16px_40px_-18px_rgb(25_32_42/0.42)] backdrop-blur-xl"
+               text-[10px] shadow-[0_16px_40px_-18px_rgb(25_32_42/0.42)]"
       >
         <div class="mb-2 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
           Overlays
@@ -966,7 +966,7 @@
   {#if showNetwork && (mapStore.networkLayers.length > 0 || viewedNetwork)}
     <div
       class="pointer-events-none absolute top-3 left-3 z-20 rounded-[--radius-control] border border-border
-             bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
+             bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm"
     >
       <div class="mb-1 flex items-center justify-between gap-4">
         <span class="font-semibold uppercase tracking-[0.07em]">{viewedNetwork?.interface === 'ping' ? 'Network latency' : 'Wi-Fi quality'}</span>
@@ -1070,7 +1070,7 @@
       >
         <div
           class="flex flex-col items-center overflow-hidden rounded-xl border border-border/80
-                 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
+                 bg-surface/95 p-1.5 shadow-2xl"
         >
           <img
             src={activeObj.image}
@@ -1093,7 +1093,7 @@
   <div
     class="pointer-events-none absolute bottom-3 left-3 z-20 flex items-center gap-2 rounded-[--radius-control]
            border border-transparent bg-surface/92 px-3 py-1.5 text-[10px] tabular text-fg-dim
-           shadow-[0_2px_8px_-5px_rgb(25_32_42/0.35)] backdrop-blur-xl"
+           shadow-[0_2px_8px_-5px_rgb(25_32_42/0.35)]"
   >
     <span>{cursorWorld ? `${cursorWorld.x.toFixed(1)}, ${cursorWorld.y.toFixed(1)} m` : 'Move cursor to inspect'}</span>
     {#if mapStore.info}

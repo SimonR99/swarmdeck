@@ -111,7 +111,7 @@
         <FleetRail oncollapse={() => cortexStore.close()} />
       </div>
     {:else}
-      <div class="panel-tab panel-tab-left flex items-center gap-1 p-0.5 bg-surface/95 border border-border/80 rounded-full shadow-md backdrop-blur-md z-30">
+      <div class="panel-tab panel-tab-left flex items-center gap-1 p-0.5 bg-surface/95 border border-border/80 rounded-full shadow-md z-30">
         <button
           class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors hover:bg-surface-3 text-fg"
           aria-label="Show Fleet panel"

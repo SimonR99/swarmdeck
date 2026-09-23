@@ -7,6 +7,12 @@ export class GaussianLayer {
   public group = new THREE.Group();
   public count = 0;
   public bounds = new THREE.Box3();
+  /**
+   * Called when the splats on screen changed outside a render: a depth sort
+   * came back from the worker, or the model was cleared. The map draws on
+   * demand, so without this the canvas keeps the old picture.
+   */
+  public onDirty: () => void = () => {};
   private mesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial> | null = null;
   private records = new Float32Array();
   private worker: Worker;
@@ -32,6 +38,7 @@ export class GaussianLayer {
             a.array[i * width + k] = this.records[e.data.order[i] * 14 + offset + k];
         a.needsUpdate = true;
       }
+      this.onDirty();
     };
   }
   public load(buffer: ArrayBuffer, budget: number) {
@@ -153,6 +160,7 @@ export class GaussianLayer {
       this.mesh.geometry.dispose();
       this.mesh.material.dispose();
       this.mesh = null;
+      this.onDirty();
     }
   }
   public dispose() {

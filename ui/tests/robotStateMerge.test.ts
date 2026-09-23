@@ -72,3 +72,29 @@ test('the first message for a robot is adopted whole', () => {
     drawable: true
   });
 });
+
+test('a keep-alive with only recomputation noise in the pose is stored but does not redraw', () => {
+  const previous = robotState({ pose: { x: 3.9984943488578946, y: -0.642608897609956, yaw: 1.5910723733526169 } });
+  const update = mergeRobotState(
+    previous,
+    robotState({ pose: { x: 3.9984943488578946, y: -0.6426088976099558, yaw: 1.591072373352616 } })
+  );
+  assert.equal(update.changed, true);
+  assert.equal(update.drawable, false);
+  assert.equal(update.value.pose.y, -0.6426088976099558);
+});
+
+test('a one-centimetre move still redraws', () => {
+  const update = mergeRobotState(robotState(), robotState({ pose: { x: 1.01, y: 2, yaw: 0.5 } }));
+  assert.equal(update.drawable, true);
+});
+
+test('the live mapping authority age advances in every keep-alive without a redraw', () => {
+  const liveMapping = (age: number, yaw: number) => ({ component_id: 'component:0', authority_age_s: age, pose: { x: 0, y: 0, yaw } });
+  const previous = robotState({ live_mapping: liveMapping(0.228, -1.550527626647384) } as Partial<RobotState>);
+  const aged = mergeRobotState(previous, robotState({ live_mapping: liveMapping(0.233, -1.5505276266473842) } as Partial<RobotState>));
+  assert.equal(aged.changed, true);
+  assert.equal(aged.drawable, false);
+  const moved = mergeRobotState(previous, robotState({ live_mapping: { ...liveMapping(0.233, 0), component_id: 'component:1' } } as Partial<RobotState>));
+  assert.equal(moved.drawable, true);
+});

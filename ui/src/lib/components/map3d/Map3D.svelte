@@ -37,14 +37,16 @@
   } from './replicaTactical';
   import {
     fetchLiveReplicaFrame,
-    LIVE_REPLICA_FRESHNESS_BUDGET_S,
+    liveReplicaDrawChanged,
+    liveReplicaFreshnessDeadline,
+    liveRobotFreshness,
     liveRobotToMapRobot,
     liveReplicaMatchesSelection,
     postLiveReplicaGoal,
     type LiveReplicaSelection
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
+  import { DeadlineWakeup, MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
@@ -119,9 +121,27 @@
   let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
-  let liveReplica = $state<LiveReplicaSelection | null>(null);
+  // Read by the frame but not reactive: every poll brings new freshness ages,
+  // so setLiveReplica() bumps liveReplicaRevision only when what is drawn changed.
+  let liveReplica: LiveReplicaSelection | null = null;
+  let liveReplicaRevision = $state(0);
   let liveReplicaPending: AbortController | null = null;
   let liveReplicaKey = '';
+
+  // A drawn replica pose, goal or path disappears when it goes stale, which
+  // no input change announces: polls that fail or return 404 adopt no frame.
+  const freshnessWakeup = new DeadlineWakeup(
+    (now) => liveReplicaFreshnessDeadline(liveReplica, now),
+    () => requestRender()
+  );
+
+  function setLiveReplica(next: LiveReplicaSelection | null) {
+    const redraw = liveReplicaDrawChanged(liveReplica, next, performance.now());
+    liveReplica = next;
+    freshnessWakeup.arm();
+    // Called from effects too, which must not come to depend on the counter.
+    if (redraw) liveReplicaRevision = untrack(() => liveReplicaRevision) + 1;
+  }
 
   function robotsOnMap(): MapRobot[] {
     if (tacticalReplica) {
@@ -135,7 +155,7 @@
       )) return [];
       if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
       return liveReplica.frame.robots
-        .filter((robot) => robot.freshness.pose_s + age <= LIVE_REPLICA_FRESHNESS_BUDGET_S)
+        .filter((robot) => liveRobotFreshness(robot, age).pose)
         .filter((robot) => fleet.isEnabled(robot.robot_id))
         .filter((robot) => tacticalReplica.scope !== 'robot' || robot.robot_id === tacticalReplica.robotId)
         .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
@@ -282,7 +302,7 @@
       replicaRevision.clear();
       replicaNeedsRebuild = true;
       gaussianEtag = '';
-      liveReplica = null;
+      setLiveReplica(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
@@ -315,7 +335,7 @@
     try {
       const frame = await fetchLiveReplicaFrame(selection, controller.signal);
       if (key !== liveReplicaKey || !liveTactical || !replicaTactical.selection) return;
-      if (frame) liveReplica = { frame, receivedAt: startedAt };
+      if (frame) setLiveReplica({ frame, receivedAt: startedAt });
       // A 404/409 retains the last verified overlay until its three-second
       // freshness budget expires; this avoids blinking during a frame swap.
     } catch (reason) {
@@ -467,6 +487,7 @@
         gaussianEtag = '';
         scene.terrain.setGaussianProxy(renderMode === 'gaussians');
         gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
+        requestRender();
         return;
       }
       if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
@@ -493,6 +514,7 @@
       if (!controller.signal.aborted && currentScope === gaussianScope()) {
         const cached = gaussianCount > 0;
         scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
+        requestRender();
         gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${e instanceof Error ? e.message : String(e)}`;
       }
     } finally {
@@ -527,7 +549,7 @@
       liveReplicaKey = key;
       liveReplicaPending?.abort();
       liveReplicaPending = null;
-      liveReplica = null;
+      setLiveReplica(null);
     }
     if (key && mounted && active) void refreshLiveReplica();
   });
@@ -841,7 +863,7 @@
     void sceneDrawInputs(
       { fleet, settings, trails: trailStore, mapStore, review, replicaTactical },
       {
-        liveReplica,
+        liveReplicaRevision,
         replicaCloud,
         follow,
         showGrid,
@@ -895,6 +917,7 @@
 
     worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
     scene.gaussians.group.visible = renderMode === 'gaussians';
+    scene.gaussians.onDirty = () => requestRender();
     mounted = true;
     const splatPoll = window.setInterval(
       () => renderMode === 'gaussians' && void fetchGaussians(),
@@ -928,6 +951,7 @@
       worker = null;
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
+      freshnessWakeup.cancel();
       if (rafId) cancelAnimationFrame(rafId);
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
@@ -956,7 +980,7 @@
   <!-- 3D Tactical Status HUD (Top Left) -->
   <div
     class="panel-glow pointer-events-none absolute left-3 bottom-12 z-20 flex max-w-[calc(100%_-_1.5rem)] flex-col gap-1 rounded-[--radius-control]
-           border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl backdrop-blur-xl"
+           border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl"
   >
     <div class="flex items-center gap-2">
       <span
@@ -1004,7 +1028,7 @@
   <!-- 3D Controls Bar (Top Right) -->
   <div class="absolute left-3 right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
     {#if tacticalReplica}
-      <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl backdrop-blur-xl">
+      <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl">
         <div class="min-w-0">
           <div class="font-semibold text-accent">
             {#if liveTactical && replicaCloud?.view.solution_order_known}
@@ -1032,7 +1056,7 @@
     <!-- Rendering budgets default to integrated graphics. -->
     <div
       class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
-             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+             bg-surface/95 p-1 shadow-2xl text-[10px]"
     >
       <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">View</span>
       {#each [{ id: 'voxels', label: 'Voxels' }, { id: 'mesh', label: 'Mesh' }, { id: 'points', label: 'Points' }, { id: 'gaussians', label: 'Gaussians' }] as mode}
@@ -1059,7 +1083,7 @@
     {#if renderMode !== 'gaussians'}
       <div
         class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
-             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+             bg-surface/95 p-1 shadow-2xl text-[10px]"
       >
         <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">Color</span
         >
@@ -1098,7 +1122,7 @@
     <!-- Ceiling Cutoff Slider -->
     <div
       class="panel-glow flex items-center gap-2 rounded-[--radius-control] border border-border/90
-             bg-surface/95 px-3 py-1.5 shadow-2xl backdrop-blur-xl"
+             bg-surface/95 px-3 py-1.5 shadow-2xl"
     >
       <div
         class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-accent"
@@ -1158,7 +1182,7 @@
     <div
       class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
              border-accent/40 bg-surface/95 px-4 py-2 text-[11px] font-medium text-accent
-             shadow-2xl backdrop-blur-xl"
+             shadow-2xl"
     >
       <Crosshair class="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
       Click 3D ground destination for {canGoal} robot{canGoal > 1 ? 's' : ''} · Esc to cancel
@@ -1178,7 +1202,7 @@
       >
         <div
           class="flex flex-col items-center overflow-hidden rounded-xl border border-border/80
-                 bg-surface/95 p-2 shadow-2xl backdrop-blur-xl"
+                 bg-surface/95 p-2 shadow-2xl"
         >
           <img
             src={activeObj.image}
