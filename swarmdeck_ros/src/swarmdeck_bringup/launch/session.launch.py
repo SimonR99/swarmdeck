@@ -273,6 +273,7 @@ def setup(context, *args, **kwargs):
                             "use_sim_time": "true",
                             "robot_base_frame": f"{ns}/base_link",
                             "bounded_startup": "true",
+                            "use_composition": "true",
                             "robot_radius": f"{robot.footprint_radius:.3f}",
                             "footprint": robot.footprint,
                             "inflation_radius": f"{robot.footprint_radius + INFLATION_MARGIN:.3f}",
