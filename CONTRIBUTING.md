@@ -51,7 +51,8 @@ end-to-end simulation checks are in `tests/integration/`.
 
 Rendering changes also need a browser check. Exercise 2D/3D switching, local and
 global maps, ceiling clipping, and each affected representation. Check behavior
-with missing RGB or Gaussian data. Workload limits and synthetic test timings
+with missing RGB or Gaussian data. HUD panels over the 3D map must read well on
+both light and dark map content. Workload limits and synthetic test timings
 are not evidence of sustained performance on a particular GPU.
 
 ## Diagnostics and upstream patches

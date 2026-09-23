@@ -29,13 +29,16 @@ Each report header now includes the short git commit (`--commit SHA` to
 override; default is auto-detected from the script's own repo). Use this to
 correlate each dated entry with the code it measured.
 
-`--browser [--browser-url URL] [--browser-idle-s N]` measures browser
-main-thread CPU via headless Chromium + Playwright CDP. Opens the dashboard
-at URL (default `http://localhost:5173`), records CDP
-`TaskDuration`/`ScriptDuration` over an idle window and then over synthetic
-mouse-drag panning events. Requires `node` ≥ 18 and the Playwright package
-(pre-installed via `npx playwright` on the workstation and tuf). Prints a
-clear message and continues without crashing if no browser is available.
+`--browser [--browser-url URL] [--browser-idle-s N]` measures the launched
+Chromium process tree's CPU from Linux `/proc` (100 % = one core), including
+GPU/compositor descendants, and WebGL frames per second. Opens the dashboard
+at URL (default `http://localhost:5173`) for an idle window and synthetic
+mouse-drag panning. A WebGL frame is an animation-frame interval containing
+clear/draw work; Canvas2D work is not counted as WebGL. Endpoint process
+sampling can miss short-lived processes. Linux only; requires `node` ≥ 18,
+Playwright and its Chromium binary. The probe forces SwiftShader software
+rendering, which inflates CPU per frame and cannot establish a real-GPU idle
+CPU target. Prints an unavailable result if the optional probe fails.
 
 `--latency` measures **plan-log-to-displacement (proxy)** and replan cadence.
 It collects `robot_state` WebSocket events and resets from the server container
@@ -498,10 +501,11 @@ Two alternating runs each, 15 s idle, then three mouse-drag pans.
 | 2D | old | - | 1458 / 1478 | - | - |
 | 2D | new | - | 81 / 81 (56 in a later run) | - | - |
 
-- A parked fleet no longer redraws the maps. Keep-alives that change only
-  clocks and float noise are ignored, and the replica poll redraws only on
-  visible change. The 3D map draws only while something moves or the pointer
-  pans.
+- A parked fleet without animated decoration no longer redraws the maps.
+  Keep-alives that change only clocks and float noise are ignored, and the
+  replica poll redraws only on visible change. The 3D map renders on demand,
+  while movement or panning uses the quality-tier cap. A selected robot's
+  decoration still draws at 12 frames per second; a hidden tab draws nothing.
 - The last ~400 % was the browser re-blurring the panels over the map every
   display frame (`backdrop-blur`); the panels are now opaque, without blur.
 - The plan's target, the dashboard tab under 25 % CPU at idle, was set for

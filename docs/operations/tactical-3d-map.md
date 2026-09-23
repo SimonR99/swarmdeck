@@ -34,6 +34,11 @@ map to inspect interiors. It does not change robot navigation maps.
 | Balanced | 160,000 | 20,000 | 80,000 | 1.5 | 45 |
 | High detail | 300,000 | 40,000 | 150,000 | 2 | 60 |
 
+Rendering is on demand: a scene change requests a draw, and movement or camera
+interaction uses the profile's FPS cap. Decoration alone, such as a selected
+robot's reticle, draws at `DECORATION_FPS = 12`. A parked scene without animated
+decoration stops drawing; a hidden tab draws nothing.
+
 These are workload limits, not measured FPS guarantees. Shadows and multisample
 antialiasing are disabled. Geometry preparation and Gaussian sorting use workers.
 Only selected terrain representations allocate GPU geometry; switching modes
