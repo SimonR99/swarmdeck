@@ -160,6 +160,40 @@ def write_unique_temporary(path: Path, text: str) -> Path:
     return temporary
 
 
+# A live writer holds its temporary for one write and rename, well under this;
+# an older one was left by a process that died between the two.
+STALE_TEMPORARY_AGE_S = 60.0
+
+
+def remove_stale_unique_temporaries(
+    directory: Path, names: tuple[str, ...], now: float | None = None
+) -> list[Path]:
+    """Delete `write_unique_temporary` leftovers for ``names`` in ``directory``.
+
+    A crash between write and rename leaves ``.<name>.<pid>.<uuid>.tmp``
+    behind for good, since no later writer reuses that name. Only files
+    matching that exact pattern, directly in ``directory``, and older than
+    `STALE_TEMPORARY_AGE_S` are removed, so another process's temporary that
+    is about to be renamed is never touched. Returns the paths removed.
+    """
+
+    current = time.time() if now is None else now
+    removed = []
+    for name in names:
+        for temporary in directory.glob(f".{name}.*.tmp"):
+            pid, _, token = temporary.name[len(name) + 2 : -4].partition(".")
+            if not (pid.isdigit() and len(token) == 32):
+                continue
+            try:
+                if current - temporary.stat().st_mtime < STALE_TEMPORARY_AGE_S:
+                    continue
+                temporary.unlink()
+            except FileNotFoundError:
+                continue
+            removed.append(temporary)
+    return removed
+
+
 def publish_snapshot_if_new(
     path: Path,
     snapshot: dict,

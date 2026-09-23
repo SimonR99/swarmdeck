@@ -33,6 +33,8 @@ services:
       SWARMDECK_COLOR_FRAME_CONVENTION: "${SWARMDECK_COLOR_FRAME_CONVENTION:-optical}"
       SWARMDECK_USE_SIM_TIME: "false"
       SWARMDECK_SERVER_URL: "${SWARMDECK_SERVER_URL:-}"
+      SWARMDECK_MISSION_GC_KEEP_RECENT: "${SWARMDECK_MISSION_GC_KEEP_RECENT:-3}"
+      SWARMDECK_MISSION_GC_DRY_RUN: "${SWARMDECK_MISSION_GC_DRY_RUN:-false}"
     volumes:
       - ../../autonomy:/app/autonomy:ro
       - ../autonomy:/app/deploy/autonomy:ro

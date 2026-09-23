@@ -87,6 +87,16 @@ a materially changed component-to-navigation transform, an expired authority,
 or a conflicting lower-cost lease still invalidates it. Reservations use bounded
 receipt-relative leases and are renewed while the full path executes.
 
+Each peer bridge sends its map authority every second. While a fresh authority
+cannot be built (stale sensor input, a failed transform, a lagging product, or a
+stalled snapshot tick) it re-sends the last fresh one, so a short stall does not
+expire MGG's snapshot. The re-send stops 10 seconds after the last fresh build
+(`AUTHORITY_RESEND_MAX_S` in `deploy/autonomy/cslam_bridge.py`); the bridge then
+sends `resetting`, so a robot whose sensors, TF or bridge snapshot stay dead
+loses map authority. The operator sees this as the server refusing Explore and
+Home with `robot mapping authority is missing or stale`; the peer's
+`status.json` (`authority_gap_ticks`, `authority_gap_reason`) names the cause.
+
 Stops disable path intake first, cancel navigation, and issue zero velocity,
 even if PCI's stop service is unavailable. Old latched paths and late service
 responses cannot re-enable the session. A new start waits for earlier start/stop
@@ -426,7 +436,8 @@ MGG applies the platform step limit and its own roughness limit to those metrics
 This remains a deadline, not a promised route. Exploration
 keeps its shorter graph-search budget, and hardware retains its configured MGG
 default unless a site profile overrides it. The traversal lifecycle and external
-path execution live in the pinned `swarmdeck` branch; advance `MGG_REV` and
+path execution live in MGG's `ros2` branch at the pinned commit (see
+[interface checked](#interface-checked)); advance `MGG_REV` and
 rebuild every MGG and message image together when the planner changes.
 External execution leaves movement failure and its
 bounded replacement budget to the robot controller boundary. Empty or

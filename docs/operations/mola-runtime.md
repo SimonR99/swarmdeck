@@ -41,8 +41,10 @@ directories under the map store (`SWARMDECK_MAP_STORE`, default `/maps`). It
 keeps the active mission and the `SWARMDECK_MISSION_GC_KEEP_RECENT` most
 recently modified others (default 3) and deletes the rest. Set
 `SWARMDECK_MISSION_GC_DRY_RUN=true` to only log what it would delete. The
-launch then checkpoints the peer's geometry SQLite WAL
-(`PRAGMA wal_checkpoint(TRUNCATE)`) before any node opens it.
+launch then checkpoints the previous run's geometry SQLite WAL
+(`PRAGMA wal_checkpoint(TRUNCATE)`), through the `geometry` link while it still
+points at that run, before claiming the new map epoch moves the link to a new,
+empty run directory. A first launch has no link and skips the checkpoint.
 
 The default worker maintains one `swarmdeck-mola-import --serve` subprocess
 per peer, started on the peer's first build and closed when the peer

@@ -114,3 +114,31 @@ def test_checkpoint_wal_truncates_an_existing_database(tmp_path):
 def test_checkpoint_wal_is_a_noop_for_a_peer_that_never_opened_its_store(tmp_path):
     assert checkpoint_wal(tmp_path / "mapping.sqlite3") is False
     assert not (tmp_path / "mapping.sqlite3").exists()
+
+
+def test_a_mission_removed_by_a_concurrent_gc_is_skipped(tmp_path, monkeypatch):
+    # Four simulation peers share /maps and all collect at launch: a
+    # sibling's rmtree can remove a mission between listing and reading it.
+    import shutil
+
+    from autonomy import mission_gc
+
+    vanishing = make_mission(tmp_path, age_s=300)
+    oldest = make_mission(tmp_path, age_s=200)
+    current = make_mission(tmp_path, age_s=0)
+    read = mission_gc._mission_recency
+
+    def removed_by_a_sibling(path):
+        if path.name == vanishing:
+            shutil.rmtree(path)
+        return read(path)
+
+    monkeypatch.setattr(mission_gc, "_mission_recency", removed_by_a_sibling)
+
+    decisions = garbage_collect_missions(
+        tmp_path, current, keep_recent=0, dry_run=False, log=lambda line: None
+    )
+
+    assert {d.mission_id: d.kept for d in decisions} == {current: True, oldest: False}
+    assert not (tmp_path / oldest).exists()
+    assert (tmp_path / current).is_dir()

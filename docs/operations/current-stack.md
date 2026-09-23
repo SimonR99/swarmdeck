@@ -139,6 +139,22 @@ planner grid directly, without constructing an OctoMap tree. Independent
 raw-cloud mapping is disabled in MOLA mode; OctoMap belongs to the explicit
 legacy cloud backend.
 
+## Dashboard robot state
+
+The server sends each dashboard (`WS /ws`) a full snapshot when it connects: a
+`fleet_change` message with every robot's complete `robot_state`, then the
+session, settings, review and alert state (`gui_snapshot` in
+`server/swarmdeck_server/api/app.py`). After that, the 5 Hz state loop sends a
+robot's `robot_state` only when it has changed, plus a keep-alive of the
+unchanged state once a second per robot (`STATE_KEEPALIVE_S`). Change detection
+ignores clocks (`t_mono`, `t_wall`, `t_sess`, `unattended_s` and
+`live_mapping.authority_age_s`) and float noise (floats are compared rounded
+to six decimal places). Routes are sent only as the top-level `planned_path`,
+`global_planned_path` and `local_planned_path`; `live_mapping` does not repeat
+them. The UI uses the same rules to decide whether a merged update needs the
+maps redrawn (`ui/src/lib/stores/robotStateMerge.ts`). With no dashboard connected nothing
+is sent, but alerts are still evaluated.
+
 ## Hardware boundary
 
 The operator stack communicates with physical adapters over the configured

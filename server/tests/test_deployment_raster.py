@@ -477,6 +477,32 @@ def test_pose_only_jitter_inside_tolerance_does_not_rebuild_the_raster(setup):
     assert report["status"] == "unchanged"
 
 
+def test_yaw_tolerance_is_the_translation_tolerance_at_the_map_edge(setup):
+    # A yaw change moves a point by |yaw delta| x its distance from the
+    # rotation centre, so the tolerance is set by the map's extent: a fixed
+    # angle let the far edge of a large map drift by metres.
+    session, refresher = setup["session"], setup["refresher"]
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+    meta = map_routes._optimized[scope_of(session)][0]
+    corners = [
+        (
+            meta.origin_x + dx * meta.width * meta.resolution,
+            meta.origin_y + dy * meta.height * meta.resolution,
+        )
+        for dx in (0, 1)
+        for dy in (0, 1)
+    ]
+    lever = max(math.hypot(x - 10.0, y - 5.0) for x, y in corners)
+    tolerance = deployment_raster.POSE_REBUILD_TRANSLATION_M / lever
+    assert tolerance < 0.01
+
+    transforms = setup["map_service"].transforms
+    transforms["robot_1"] = (10.0, 5.0, 0.0, math.pi / 2 + 0.8 * tolerance)
+    assert refresher.refresh(session, placements(session))["status"] == "unchanged"
+    transforms["robot_1"] = (10.0, 5.0, 0.0, math.pi / 2 + 1.2 * tolerance)
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+
+
 def test_optimized_png_cache_insert_uses_the_optimized_lock(monkeypatch):
     entered = []
 
@@ -583,3 +609,85 @@ def test_incremental_raster_keeps_overlapping_history_without_raw_point_cap(
     assert corrected.meta == rebuilt.meta
     np.testing.assert_array_equal(corrected.cells, rebuilt.cells)
     assert corrected.meta.origin_x > 10.0
+
+
+def test_robot_digest_computes_the_submap_keys_once_per_robot(monkeypatch):
+    # Every `_submap_keys` call hashes all n submap ids for its cache key, so
+    # calling it per submap made the 3 s idle digest O(n^2) in keyframes.
+    refresher = deployment_raster.DeploymentRasterRefresher()
+    submaps = [{"submap_id": f"robot_0/{index}"} for index in range(50)]
+
+    class Catalogue:
+        def view(self, session_id, component):
+            return {
+                "component_id": component,
+                "snapshot_id": "snapshot",
+                "selected": {"submaps": submaps},
+            }
+
+    calls = []
+    submap_keys = refresher._submap_keys
+
+    def counting_submap_keys(view):
+        calls.append(view)
+        return submap_keys(view)
+
+    def stop(scope, view):
+        raise ValueError("stop after the digest")
+
+    monkeypatch.setattr(refresher, "_submap_keys", counting_submap_keys)
+    monkeypatch.setattr(refresher, "_incremental_raster", stop)
+    reports = refresher.refresh_robots(
+        "session",
+        Catalogue(),
+        {"robot_0": ("component", IDENTITY_SE3)},
+        {"robot_0": "robot:robot_0"},
+        0,
+    )
+    assert reports == {"robot_0": "skipped: stop after the digest"}
+    assert len(calls) == 1
+
+
+def test_optimized_map_etag_differs_after_seq_restarts_and_process_restarts(
+    monkeypatch,
+):
+    # ``seq`` restarts at 1 after a reset (and after a server restart); an
+    # ETag of scope and seq alone would answer a client's If-None-Match with
+    # 304 for different content.
+    for name, value in {
+        "_optimized": {},
+        "_optimized_seq": {},
+        "_optimized_publication": {},
+        "_server_scopes": set(),
+    }.items():
+        monkeypatch.setattr(map_routes, name, value, raising=False)
+    map_routes._optimized_png_cache.clear()
+    monkeypatch.setattr(map_routes, "_optimized_png_cache_bytes", 0)
+    meta = GridMeta(0.2, 2, 2, 0.0, 0.0)
+
+    def publish_and_fetch(value):
+        cells = np.full((2, 2), value, dtype=np.int8)
+        assert map_routes.publish_optimized_map("robot:robot_0", meta, cells, (), None)
+        response = asyncio.run(map_routes.get_optimized_map("robot:robot_0"))
+        assert response.headers["X-Map-Seq"] == "1"
+        return response.headers["ETag"], response.body
+
+    first_etag, first_body = publish_and_fetch(0)
+    map_routes.reset_optimized_maps()
+    second_etag, second_body = publish_and_fetch(100)
+    assert second_body != first_body
+    assert second_etag != first_etag
+    stale = asyncio.run(
+        map_routes.get_optimized_map("robot:robot_0", if_none_match=first_etag)
+    )
+    assert stale.status_code == 200
+
+    # A restarted server counts publications from the start again; its
+    # process nonce keeps the ETag apart.
+    map_routes.reset_optimized_maps()
+    monkeypatch.setattr(map_routes, "_optimized_publication_counter", 0, raising=False)
+    monkeypatch.setattr(
+        map_routes, "_OPTIMIZED_PROCESS_NONCE", "restarted", raising=False
+    )
+    third_etag, _ = publish_and_fetch(0)
+    assert third_etag not in {first_etag, second_etag}

@@ -73,6 +73,7 @@ from autonomy.cslam import (
     CslamMapper,
     pose_matrix,
     publish_snapshot_if_new,
+    remove_stale_unique_temporaries,
     write_unique_temporary,
 )
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
@@ -101,11 +102,20 @@ MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 AUTHORITY_SENSOR_TTL_S = 3.0
+# The peer-root files the bridge writes through `write_unique_temporary`;
+# a start deletes their temporaries that a crashed bridge left behind.
+BRIDGE_WRITTEN_FILES = ("snapshot.json", "status.json", "graph_solution.json")
 # The wire cadence of the map authority heartbeat, independent of
 # `_snapshot`'s own 1 Hz timer: `AuthorityHeartbeatPublisher.run` publishes
 # on this period from its own thread, so a snapshot tick that never runs at
 # all (an executor starved by other callbacks) never silences the topic.
 AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
+# How long the heartbeat keeps re-sending the last fresh authority while no
+# fresh one can be built. A healthy robot, parked or not, builds a fresh
+# authority every `_snapshot` tick, so this only bounds a stall: sensors, TF
+# or `_snapshot` itself that stay dead past it lose map authority (the
+# heartbeat falls back to `resetting`), as they did before the re-send.
+AUTHORITY_RESEND_MAX_S = 10.0
 # The longest a heartbeat send waits for map_epoch_lock. Other holders
 # (claims, the worker's publication renames and directory fsyncs, the peer
 # epoch watermark) can be slow; a send that cannot get the lock in time is
@@ -184,7 +194,21 @@ def authority_is_serializable(authority):
     return True
 
 
-def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch, run_id):
+def resetting_authority(*, robot_id, mission_id, robot_map_epoch, run_id):
+    """The authority message that tells MGG this run has no map to offer."""
+
+    return {
+        "robot_id": robot_id,
+        "mission_id": mission_id,
+        "robot_map_epoch": robot_map_epoch,
+        "run_id": run_id,
+        "state": "resetting",
+    }
+
+
+def authority_heartbeat(
+    built, cached, *, robot_id, mission_id, robot_map_epoch, run_id, cache_age_s
+):
     """Decide the map-authority message to publish this tick.
 
     Sensor freshness, TF and the product read gate a *fresh* authority, but
@@ -195,7 +219,9 @@ def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch,
     stall. The cache is honoured only while it still names the peer's
     current mission, run and map epoch, so a real reset (a new run_id) falls
     through to a ``resetting`` status instead of an authority for a map that
-    no longer exists.
+    no longer exists. ``cache_age_s`` is the time since ``cached`` was last
+    built fresh; once it reaches `AUTHORITY_RESEND_MAX_S` the stall is no
+    longer transient and the cache falls through to ``resetting`` too.
 
     Returns ``(message, new_cache)``. ``new_cache`` is the dict to keep for
     the next tick: the fresh authority, the same cached authority when it was
@@ -213,16 +239,16 @@ def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch,
         and cached.get("mission_id") == mission_id
         and cached.get("robot_map_epoch") == robot_map_epoch
         and cached.get("run_id") == run_id
+        and cache_age_s < AUTHORITY_RESEND_MAX_S
     ):
         return cached, cached
     return (
-        {
-            "robot_id": robot_id,
-            "mission_id": mission_id,
-            "robot_map_epoch": robot_map_epoch,
-            "run_id": run_id,
-            "state": "resetting",
-        },
+        resetting_authority(
+            robot_id=robot_id,
+            mission_id=mission_id,
+            robot_map_epoch=robot_map_epoch,
+            run_id=run_id,
+        ),
         None,
     )
 
@@ -236,7 +262,11 @@ class AuthorityHeartbeatPublisher:
     whatever is cached. A `_snapshot` tick that takes arbitrarily long, or
     does not run at all for a while, delays only the next *fresh* authority;
     the heartbeat keeps firing every `period_s` regardless, which is the fix
-    for MGG's snapshot expiring from an executor stall.
+    for MGG's snapshot expiring from an executor stall. The stall is bounded:
+    a message updated with ``fresh_at`` (the `clock` time its authority was
+    last built fresh) is sent as its ``resetting`` form once
+    `AUTHORITY_RESEND_MAX_S` has passed since then, so a `_snapshot` that
+    stops running altogether still loses map authority.
 
     `send(message)` returns None once it has published `message`, or the
     reason it did not. `Bridge._send_authority` validates the durable map
@@ -268,6 +298,7 @@ class AuthorityHeartbeatPublisher:
         # main executor.
         self._lock = Lock()
         self._message = None
+        self._fresh_at = None
         self._no_message_reason = "no authority yet"
         # Heartbeat-thread only: the monotonic time of the last completed
         # send, or None before the first; `_started_at` stands in for it
@@ -276,11 +307,16 @@ class AuthorityHeartbeatPublisher:
         self._last_sent_at = None
         self._started_at = clock()
 
-    def update(self, message):
-        """Replace the message the next tick(s) send; never sends."""
+    def update(self, message, fresh_at=None):
+        """Replace the message the next tick(s) send; never sends.
+
+        ``fresh_at`` bounds how long ``message`` is re-sent (see the class
+        docstring); None sends it until the next update.
+        """
 
         with self._lock:
             self._message = message
+            self._fresh_at = fresh_at
             self._no_message_reason = "no authority yet"
 
     def invalidate(self):
@@ -300,7 +336,19 @@ class AuthorityHeartbeatPublisher:
         started = self._clock()
         with self._lock:
             message = self._message
+            fresh_at = self._fresh_at
             reason = self._no_message_reason
+        if (
+            message is not None
+            and fresh_at is not None
+            and started - fresh_at >= AUTHORITY_RESEND_MAX_S
+        ):
+            message = resetting_authority(
+                robot_id=message["robot_id"],
+                mission_id=message["mission_id"],
+                robot_map_epoch=message["robot_map_epoch"],
+                run_id=message["run_id"],
+            )
         last = self._started_at if self._last_sent_at is None else self._last_sent_at
         if message is not None:
             try:
@@ -405,6 +453,7 @@ class Bridge(Node):
         # The peer root: snapshot.json, status.json and graph_solution.json
         # live here, and the MOLA worker publishes its products under mola/.
         self.root = root
+        remove_stale_unique_temporaries(root, BRIDGE_WRITTEN_FILES)
         reset_root = os.environ.get("SWARMDECK_SIM_RESET_DIR", "")
         self.reset_root = Path(reset_root) if reset_root else None
         record = read_map_epoch(root)
@@ -643,8 +692,11 @@ class Bridge(Node):
         self.authority_skipped = 0
         # The last authority actually published (fresh or re-sent), kept so
         # the heartbeat can re-send it verbatim while a fresh one cannot be
-        # built; see `authority_heartbeat`.
+        # built; see `authority_heartbeat`. `authority_fresh_at` is the
+        # monotonic time that cache was last built fresh, which bounds the
+        # re-send (`AUTHORITY_RESEND_MAX_S`).
         self.authority_cache = None
+        self.authority_fresh_at = None
         self.authority_gap_ticks = 0
         self.authority_gap_reason = ""
         self._product_memo = {}
@@ -1494,6 +1546,7 @@ class Bridge(Node):
                     gap_reason = "no product published yet"
             except TransformException:
                 gap_reason = "transform lookup failed"
+        now = time.monotonic()
         message, self.authority_cache = authority_heartbeat(
             built_authority,
             self.authority_cache,
@@ -1501,9 +1554,18 @@ class Bridge(Node):
             mission_id=self.core.mission_id,
             robot_map_epoch=self.core.map_epoch,
             run_id=self.core.run_id,
+            cache_age_s=(
+                0.0
+                if self.authority_fresh_at is None
+                else now - self.authority_fresh_at
+            ),
         )
-        if built_authority is not None and message is not built_authority:
+        if built_authority is not None and message is built_authority:
+            self.authority_fresh_at = now
+        elif built_authority is not None:
             gap_reason = "built authority is not serializable"
+        if self.authority_cache is None:
+            self.authority_fresh_at = None
         self.authority_revision = message.get("mapping_graph_revision")
         self.authority_gap_reason = gap_reason or ""
         if gap_reason is not None:
@@ -1514,7 +1576,7 @@ class Bridge(Node):
         # (`_send_authority`). `authority_gap_reason`/`authority_gap_ticks`
         # above are this tick's own build-failure diagnostic; the heartbeat
         # logs an *actual* send gap on its own terms.
-        self._authority_heartbeat.update(message)
+        self._authority_heartbeat.update(message, fresh_at=self.authority_fresh_at)
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
         # budget; the failure is only visible here and in the worker's log.

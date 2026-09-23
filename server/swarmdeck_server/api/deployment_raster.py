@@ -58,8 +58,10 @@ log = logging.getLogger(__name__)
 REFRESH_INTERVAL_S = 3.0
 MAX_POINTS = 8_000_000
 CACHE_BYTES = 256 * 1024 * 1024
+# A placement change smaller than this moves no mapped point by more than it:
+# a translation directly, a yaw change by |yaw delta| times the distance of
+# the farthest mapped point from the rotation centre (`_pose_delta_exceeds`).
 POSE_REBUILD_TRANSLATION_M = 0.05
-POSE_REBUILD_YAW_RAD = 0.01
 
 
 class _ChunkCache:
@@ -210,6 +212,9 @@ class DeploymentRasterRefresher:
         # point count; no per-submap point products remain resident.
         self.contributions: dict[str, _SubmapContribution] = {}
         self._placement_cache: dict[str, dict[str, Mapping[str, Any]]] = {}
+        # The world extent of the last composite raster built from the cached
+        # placements; the lever arm a yaw change is measured with.
+        self._composite_meta: GridMeta | None = None
         self._submap_key_cache: OrderedDict[tuple[Any, ...], dict[str, str]] = (
             OrderedDict()
         )
@@ -220,6 +225,7 @@ class DeploymentRasterRefresher:
         self.robot_built.clear()
         self.contributions.clear()
         self._placement_cache.clear()
+        self._composite_meta = None
         self._submap_key_cache.clear()
         self.chunks.clear()
 
@@ -511,7 +517,18 @@ class DeploymentRasterRefresher:
         }
 
     @staticmethod
-    def _pose_delta_exceeds(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    def _pose_delta_exceeds(
+        a: Mapping[str, Any], b: Mapping[str, Any], extent: GridMeta | None
+    ) -> bool:
+        """Whether moving placement ``a`` to ``b`` moves a mapped point by
+        `POSE_REBUILD_TRANSLATION_M` or more.
+
+        A yaw change turns each point about the transform's origin, so it
+        moves the farthest corner of ``extent`` (the last composite raster)
+        by about |yaw delta| x that corner's distance: a fixed angular
+        tolerance would let placements drift further the larger the map.
+        Without an extent, any yaw change counts.
+        """
         a_nav = se2_of(a["T_world_navigation"])
         b_nav = se2_of(b["T_world_navigation"])
         a_component = se2_of(a["T_world_component"])
@@ -526,7 +543,19 @@ class DeploymentRasterRefresher:
                 math.sin(first["yaw"] - second["yaw"]),
                 math.cos(first["yaw"] - second["yaw"]),
             )
-            if abs(yaw_delta) >= POSE_REBUILD_YAW_RAD:
+            if yaw_delta == 0.0:
+                continue
+            if extent is None:
+                return True
+            x0, y0 = extent.origin_x, extent.origin_y
+            x1 = x0 + extent.width * extent.resolution
+            y1 = y0 + extent.height * extent.resolution
+            lever = max(
+                math.hypot(x - first["x"], y - first["y"])
+                for x in (x0, x1)
+                for y in (y0, y1)
+            )
+            if abs(yaw_delta) * lever >= POSE_REBUILD_TRANSLATION_M:
                 return True
         return False
 
@@ -543,7 +572,7 @@ class DeploymentRasterRefresher:
             if (
                 old.get("component_id") != placement.get("component_id")
                 or old.get("solution_order") != placement.get("solution_order")
-                or self._pose_delta_exceeds(old, placement)
+                or self._pose_delta_exceeds(old, placement, self._composite_meta)
             ):
                 current = dict(placements)
                 self._placement_cache = {session_id: current}
@@ -597,6 +626,7 @@ class DeploymentRasterRefresher:
                 self.contributions.clear()
             self.built = None
             self._placement_cache.clear()
+            self._composite_meta = None
             return {"status": "no mission", "retired": retired}
 
         # A verified merge (a component two or more robots publish) is the
@@ -719,6 +749,8 @@ class DeploymentRasterRefresher:
             return {"status": "superseded", "scope": scope, "retired": retired}
         self.built = key
         self.failed = None
+        if merged is None:
+            self._composite_meta = raster.meta
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         log.info(
             "Fleet raster %s: %d robots, %d chunks (%d missing), %d points, "
@@ -782,14 +814,14 @@ class DeploymentRasterRefresher:
                 if submap["submap_id"].startswith(f"{robot}/")
             ]
             view = {**view, "selected": {**view["selected"], "submaps": owned}}
+            # Once per robot: each call hashes every submap id for its cache
+            # key, so calling it per submap made this digest quadratic.
+            keys = self._submap_keys(view)
             snapshot = replica_views.digest(
                 [
                     component,
                     transform,
-                    [
-                        self._submap_keys(view)[str(submap["submap_id"])]
-                        for submap in owned
-                    ],
+                    [keys[str(submap["submap_id"])] for submap in owned],
                 ]
             )
             if self.robot_built.get(scope) == snapshot and map_routes.has_optimized_map(
