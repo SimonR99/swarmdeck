@@ -751,8 +751,72 @@ def test_snapshot_builds_outside_map_epoch_lock_and_fences_each_write(
     Bridge.snapshot(bridge)
     assert free_during_build == [True, True]
     assert not status.exists()  # the claim deleted it; nothing recreated it
-    assert not status.with_suffix(".tmp").exists()
+    assert list(bridge.root.glob(".status.json.*.tmp")) == []
     assert bridge._authority_heartbeat._message is None
+
+
+def test_retired_and_current_bridge_writers_never_share_a_temporary(
+    tmp_path, bridge_module
+):
+    """The review's interleaving: an epoch-0 bridge passed its early check,
+    a claim moved to epoch 1, the epoch-1 bridge wrote its snapshot
+    temporary and paused before its fenced rename, then the epoch-0 bridge
+    wrote its own. Whichever rename runs first, snapshot.json holds only
+    the current bytes, and the retired writer never deletes the current
+    writer's temporary.
+    """
+
+    from autonomy.cslam import publish_snapshot_if_new
+    from autonomy.map_epochs import claim_map_epoch, robot_run_id
+
+    Bridge = bridge_module.Bridge
+    mission = str(uuid.uuid4())
+    root = tmp_path / mission / "robot_0"
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 0
+    claim_map_epoch(tmp_path, mission, "robot_0")  # epoch 1
+    writers = {
+        "current": NS(root=root, core=NS(run_id=robot_run_id(mission, "robot_0", 1))),
+        "retired": NS(root=root, core=NS(run_id=robot_run_id(mission, "robot_0", 0))),
+    }
+    snapshot = root / "snapshot.json"
+
+    def write(name, written, go, errors):
+        def replace(temporary, path):
+            written.set()  # temporary written, rename pending
+            assert go.wait(timeout=5)
+            Bridge._replace_if_current(writers[name], temporary, path)
+
+        try:
+            publish_snapshot_if_new(snapshot, {"writer": name}, 1, -1, replace=replace)
+        except Exception as exc:
+            errors.append(exc)
+
+    for renames in (("current", "retired"), ("retired", "current")):
+        snapshot.unlink(missing_ok=True)
+        written = {name: threading.Event() for name in writers}
+        go = {name: threading.Event() for name in writers}
+        errors = {name: [] for name in writers}
+        threads = {
+            name: threading.Thread(
+                target=write, args=(name, written[name], go[name], errors[name]), daemon=True
+            )
+            for name in writers
+        }
+        threads["current"].start()
+        assert written["current"].wait(timeout=5)
+        threads["retired"].start()  # writes after the current writer did
+        assert written["retired"].wait(timeout=5)
+        for name in renames:
+            go[name].set()
+            threads[name].join(timeout=5)
+            assert not threads[name].is_alive()
+
+        assert errors["current"] == [], renames
+        assert [type(error) for error in errors["retired"]] == [
+            bridge_module.MapEpochRetired
+        ]
+        assert json.loads(snapshot.read_text()) == {"writer": "current"}, renames
+        assert list(root.glob(".snapshot.json.*.tmp")) == []
 
 
 def _running_bridge(tmp_path, bridge_module, monkeypatch, *, period_s=0.01):
@@ -889,8 +953,7 @@ def test_cache_lock_send_lock_and_map_epoch_lock_never_deadlock(
     def executor():
         while not stop.is_set():
             bridge._authority_heartbeat.update(message)
-            temporary = target.with_suffix(".tmp")
-            temporary.write_text("tick")
+            temporary = bridge_module.write_unique_temporary(target, "tick")
             try:
                 Bridge._replace_if_current(bridge, temporary, target)
             except bridge_module.MapEpochRetired:

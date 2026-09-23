@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import time
 from typing import Callable
+import uuid
 import numpy as np
 
 from .capture_providers import CaptureProvenance, CaptureProvider, capture_provider
@@ -141,6 +142,24 @@ class DeferredSolution:
     rotation_rad: float
 
 
+def write_unique_temporary(path: Path, text: str) -> Path:
+    """Write ``text`` to a new, uniquely named sibling of ``path``; return it.
+
+    Writers of the same ``path`` (two bridge processes either side of a map
+    epoch claim) never share a temporary, so one can neither overwrite nor
+    delete the bytes another is about to rename into place.
+    """
+
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x") as stream:
+            stream.write(text)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
 def publish_snapshot_if_new(
     path: Path,
     snapshot: dict,
@@ -157,8 +176,7 @@ def publish_snapshot_if_new(
 
     if graph_revision == published_graph_revision:
         return published_graph_revision
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(snapshot, allow_nan=False))
+    temporary = write_unique_temporary(path, json.dumps(snapshot, allow_nan=False))
     replace(temporary, path)
     return graph_revision
 

@@ -69,7 +69,12 @@ from autonomy.peer_mask import (
     idle_mask_counters,
     peer_body,
 )
-from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
+from autonomy.cslam import (
+    CslamMapper,
+    pose_matrix,
+    publish_snapshot_if_new,
+    write_unique_temporary,
+)
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.map_epochs import (
     map_epoch_lock,
@@ -149,8 +154,7 @@ def write_text_if_changed(path, text, last, replace=os.replace):
 
     if text == last:
         return last
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(text)
+    temporary = write_unique_temporary(path, text)
     replace(temporary, path)
     return text
 
@@ -1327,7 +1331,10 @@ class Bridge(Node):
         re-reads the durable epoch under map_epoch_lock. Only the small epoch
         read and the rename happen under the lock; the heartbeat takes the
         same lock before every send. Raises MapEpochRetired, after removing
-        ``temporary``, when the epoch has moved on.
+        ``temporary``, when the epoch has moved on. ``temporary`` must be
+        this writer's own (`write_unique_temporary`): a bridge process of
+        another epoch writing the same file uses a different one, so neither
+        can overwrite or delete the bytes the other renames.
         """
 
         try:
@@ -1372,15 +1379,15 @@ class Bridge(Node):
                 tuple(self.core.poses),
                 self.core.poses,
             )
-            temporary = self.graph_solution_file.with_suffix(".tmp")
-            temporary.write_text(
+            temporary = write_unique_temporary(
+                self.graph_solution_file,
                 json.dumps(
                     {
                         "schema": "swarmdeck.pose-snapshot.v1",
                         "solution": solution.canonical_dict(),
                     },
                     allow_nan=False,
-                )
+                ),
             )
             self._replace_if_current(temporary, self.graph_solution_file)
             self.graph_solution_revision = self.core.revision
