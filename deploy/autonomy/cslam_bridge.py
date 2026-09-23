@@ -208,10 +208,16 @@ class AuthorityHeartbeatPublisher:
     authority; the heartbeat itself keeps firing on `period_s` regardless,
     which is the fix for MGG's snapshot expiring from an executor stall.
 
-    `log(reason)` is called from `tick`, on the heartbeat thread, whenever
-    the cached message has named a non-empty ``gap_reason`` for at least one
-    full `period_s`; callers rate-limit it themselves (e.g. ROS's
-    ``throttle_duration_sec``), since a stall generally outlasts one tick.
+    `log(reason)` is called on the heartbeat thread whenever the interval
+    since the last *successful* publication exceeds `period_s` -- that is
+    the only thing MGG actually observes as a gap. A `_snapshot` build
+    failure (stale sensor input, no product yet, ...) that still leaves a
+    valid cached message to re-send is never a gap by itself and is never
+    logged here (`_snapshot` tracks its own build-failure reason
+    separately, in `status.json`'s ``authority_gap_*``); only an
+    interruption to the *wire* heartbeat is. Callers rate-limit repeated
+    reasons themselves (e.g. ROS's ``throttle_duration_sec``), since a
+    stall generally outlasts one tick.
     """
 
     def __init__(self, publish, *, period_s, log, clock=time.monotonic):
@@ -221,31 +227,38 @@ class AuthorityHeartbeatPublisher:
         self._clock = clock
         self._lock = Lock()
         self._message = None
-        self._gap_reason = ""
-        self._gap_since = None
+        # The monotonic time of the last successful publish, or None before
+        # the first one; `_started_at` stands in for it until then, so a
+        # robot that never gets a first authority still eventually logs
+        # "no authority yet" rather than staying silent forever.
+        self._last_published_at = None
+        self._started_at = clock()
 
-    def update(self, message, gap_reason):
+    def update(self, message):
         """Replace the message the next tick(s) publish; never publishes."""
 
         with self._lock:
             self._message = message
-            if gap_reason:
-                if self._gap_since is None:
-                    self._gap_since = self._clock()
-                self._gap_reason = gap_reason
-            else:
-                self._gap_since = None
-                self._gap_reason = ""
 
     def tick(self):
-        """Publish the current cached message, if any, and log a stale gap."""
+        """Publish the cached message, if any, and log an actual publish gap."""
 
         with self._lock:
-            message, reason, since = self._message, self._gap_reason, self._gap_since
-        if message is None:
-            return
-        self._publish(message)
-        if since is not None and self._clock() - since >= self._period_s:
+            message = self._message
+            last = self._last_published_at
+        now = self._clock()
+        gap_from = self._started_at if last is None else last
+        if message is not None:
+            self._publish(message)
+            with self._lock:
+                self._last_published_at = now
+        if now - gap_from > self._period_s:
+            # A message was ready and this tick still published late: the
+            # heartbeat thread itself was delayed. No message at all, this
+            # early, means `_snapshot` has never run once yet; either way
+            # this is never conflated with a `_snapshot` build failure that
+            # left a perfectly good cached message being re-sent on time.
+            reason = "the thread was late" if message is not None else "no authority yet"
             self._log(reason)
 
     def run(self, closed):
@@ -1212,12 +1225,12 @@ class Bridge(Node):
             return None
 
     def _log_authority_gap(self, reason):
-        """Called from the heartbeat thread: an actual publish gap persists."""
+        """Called from the heartbeat thread: the actual publish interval
+        just exceeded one heartbeat period.
+        """
 
         self.get_logger().warn(
-            f"map authority heartbeat gap ({reason}): re-sending the last "
-            "published authority, or reporting resetting if there is none",
-            throttle_duration_sec=5.0,
+            f"map authority heartbeat gap ({reason})", throttle_duration_sec=5.0
         )
 
     def snapshot(self):
@@ -1351,10 +1364,12 @@ class Bridge(Node):
             self.authority_gap_ticks += 1
         # Only the cached message changes here; `authority_heartbeat_thread`
         # publishes it on its own schedule, off this (possibly busy) main
-        # executor, and logs an actual publish gap once one has lasted a
-        # full heartbeat period.
+        # executor. `authority_gap_reason`/`authority_gap_ticks` above are
+        # this tick's own build-failure diagnostic; the heartbeat logs an
+        # *actual* publish gap on its own terms, never merely because this
+        # tick could not build a fresh authority.
         self._authority_heartbeat.update(
-            String(data=json.dumps(message, allow_nan=False)), gap_reason or ""
+            String(data=json.dumps(message, allow_nan=False))
         )
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point

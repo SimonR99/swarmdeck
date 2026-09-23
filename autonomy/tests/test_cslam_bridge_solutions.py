@@ -325,11 +325,7 @@ def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updat
         published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
     )
 
-    # No update yet: a tick before the first snapshot publishes nothing.
-    publisher.tick()
-    assert published == []
-
-    publisher.update("authority-v1", "")
+    publisher.update("authority-v1")
     # `update` is never called again here, simulating a `_snapshot` timer
     # that stalls for minutes; every scheduled tick still republishes the
     # last cached message, on schedule, independent of that stall.
@@ -337,11 +333,43 @@ def test_authority_heartbeat_publisher_ticks_regardless_of_slow_or_stalled_updat
         now[0] += 1.0
         publisher.tick()
     assert published == ["authority-v1"] * 5
-    # No gap_reason was ever set, so nothing is logged despite five ticks.
+    # Every tick published exactly on `period_s`: no actual gap, nothing
+    # logged, despite five ticks.
     assert logged == []
 
 
-def test_authority_heartbeat_publisher_logs_once_a_gap_outlasts_one_period(
+def test_authority_heartbeat_publisher_never_logs_a_gap_while_resending_a_stale_cached_message(
+    bridge_module,
+):
+    """Stale sensor input with uninterrupted heartbeats must never log a gap.
+
+    `_snapshot` calls `update()` every tick regardless of whether it could
+    build a *fresh* authority; when it could not (stale sensor input, no
+    product yet, ...) it re-sends the cached one instead of nothing. That is
+    a `_snapshot`-side build-failure diagnostic (`status.json`'s
+    `authority_gap_reason`), never a heartbeat gap: the wire heartbeat
+    itself never missed a beat.
+    """
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+
+    for _ in range(10):
+        # `_snapshot` re-sends the same cached authority every tick because
+        # a fresh one could not be built (e.g. sensor input stale), exactly
+        # as `authority_heartbeat` decides.
+        publisher.update("authority-v1")
+        now[0] += 1.0
+        publisher.tick()
+
+    assert published == ["authority-v1"] * 10
+    assert logged == []
+
+
+def test_authority_heartbeat_publisher_logs_no_authority_yet_before_any_update(
     bridge_module,
 ):
     Publisher = bridge_module.AuthorityHeartbeatPublisher
@@ -350,20 +378,44 @@ def test_authority_heartbeat_publisher_logs_once_a_gap_outlasts_one_period(
         published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
     )
 
-    publisher.update("authority-v1", "sensor input stale")
-    publisher.tick()  # same instant: not yet a full period since the gap started
-    assert published == ["authority-v1"]
+    # Nothing published yet, and not a full period since construction: no
+    # gap reported prematurely.
+    publisher.tick()
+    assert published == [] and logged == []
+
+    now[0] += 1.5
+    publisher.tick()
+    assert published == []
+    assert logged == ["no authority yet"]
+
+
+def test_authority_heartbeat_publisher_logs_when_the_thread_itself_is_late(
+    bridge_module,
+):
+    """A message was ready the whole time; only the thread's own schedule
+    slipped (GIL/OS contention on the heartbeat thread itself, never the
+    ROS executor `_snapshot` runs on, since the heartbeat thread does not
+    touch it).
+    """
+
+    Publisher = bridge_module.AuthorityHeartbeatPublisher
+    published, logged, now = [], [], [0.0]
+    publisher = Publisher(
+        published.append, period_s=1.0, log=logged.append, clock=lambda: now[0]
+    )
+
+    publisher.update("authority-v1")
+    now[0] += 1.0
+    publisher.tick()
     assert logged == []
 
-    now[0] += 1.0
+    # `run()` should have ticked at now=2.0; it does not until now=2.5, a
+    # missed schedule slot attributable only to the thread itself, since a
+    # message was cached and ready the entire time.
+    now[0] += 1.5
     publisher.tick()
-    assert logged == ["sensor input stale"]
-
-    # The gap clears: no more logging, even though ticking continues.
-    publisher.update("authority-v1", "")
-    now[0] += 1.0
-    publisher.tick()
-    assert logged == ["sensor input stale"]
+    assert published == ["authority-v1"] * 2
+    assert logged == ["the thread was late"]
 
 
 def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
@@ -391,14 +443,14 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
 
     message, cache = heartbeat(good, None, **kwargs0)
-    publisher.update(message, "")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == good
 
     # The build is momentarily gated (e.g. sensor stale): the cache is
     # resent verbatim, never silently dropped.
     message, cache = heartbeat(None, cache, **kwargs0)
-    publisher.update(message, "sensor input stale")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == good
 
@@ -411,7 +463,7 @@ def test_authority_heartbeat_publisher_reset_replaces_the_cached_authority(
     )
     message, cache = heartbeat(None, cache, **kwargs1)
     assert message["state"] == "resetting" and cache is None
-    publisher.update(message, "no graph revision yet")
+    publisher.update(message)
     publisher.tick()
     assert published[-1] == message
     assert published[-1] != good
