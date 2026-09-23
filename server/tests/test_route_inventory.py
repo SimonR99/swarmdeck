@@ -44,7 +44,6 @@ HEAD /openapi.json
 HEAD /redoc
 POST /api/autonomy/replicas
 POST /api/autonomy/replicas/components/live/{session_id}/goal
-POST /api/fleet/{robot_id}/discard
 POST /api/map/reset
 POST /api/map/reset/{robot_id}
 POST /api/robot/{robot_id}/body

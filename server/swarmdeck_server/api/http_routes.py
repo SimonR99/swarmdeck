@@ -54,13 +54,6 @@ async def delete_fleet_robot(robot_id: str) -> dict[str, Any]:
     return await handler(robot_id)
 
 
-@router.post("/api/fleet/{robot_id}/discard")
-async def post_discard_fleet_robot(robot_id: str) -> dict[str, Any]:
-    from .control_routes import delete_fleet_robot as handler
-
-    return await handler(robot_id)
-
-
 @router.post("/api/robot/{robot_id}/drive")
 async def post_robot_drive(robot_id: str, request: Request) -> Any:
     from .teleop_routes import post_robot_drive as handler

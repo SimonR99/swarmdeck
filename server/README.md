@@ -20,3 +20,5 @@ not create independent fleet instances: this remains one fleet per process.
 - Adapter `camera_interest` messages are no longer emitted. GUI
   `switch_camera` messages remain accepted and logged for existing dashboards,
   but camera selection has no server-to-adapter side effect.
+- `POST /api/fleet/{robot_id}/discard` is removed. Use the existing
+  `DELETE /api/fleet/{robot_id}` route (as the dashboard already does).
