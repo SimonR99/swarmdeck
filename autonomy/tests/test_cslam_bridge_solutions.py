@@ -217,6 +217,40 @@ def test_write_text_if_changed_skips_the_write_when_nothing_changed(
     assert last == "b" and path.read_text() == "b"
 
 
+def test_bridge_start_removes_only_stale_unique_temporaries(tmp_path, bridge_module):
+    """A crash between write and rename leaves a uniquely named temporary
+    that no later writer reuses; the next bridge start deletes it, and
+    never a temporary another process may still rename.
+    """
+    import os
+
+    from autonomy.cslam import (
+        STALE_TEMPORARY_AGE_S,
+        remove_stale_unique_temporaries,
+        write_unique_temporary,
+    )
+
+    names = bridge_module.BRIDGE_WRITTEN_FILES
+    assert set(names) == {"snapshot.json", "status.json", "graph_solution.json"}
+    stale = [write_unique_temporary(tmp_path / name, "{}") for name in names]
+    fresh = write_unique_temporary(tmp_path / "status.json", "{}")
+    unrelated = tmp_path / ".status.json.tmp"
+    other_file = write_unique_temporary(tmp_path / "worker.json", "{}")
+    (tmp_path / "mola").mkdir()
+    nested = write_unique_temporary(tmp_path / "mola" / "status.json", "{}")
+    unrelated.write_text("{}")
+    now = fresh.stat().st_mtime
+    old = now - STALE_TEMPORARY_AGE_S - 1.0
+    for path in (*stale, unrelated, other_file, nested):
+        os.utime(path, (old, old))
+
+    removed = remove_stale_unique_temporaries(tmp_path, names, now=now)
+
+    assert sorted(removed) == sorted(stale)
+    assert not any(path.exists() for path in stale)
+    assert all(path.exists() for path in (fresh, unrelated, other_file, nested))
+
+
 def _authority(mission_id, run_id, epoch, revision):
     return {
         "robot_id": "robot_0",

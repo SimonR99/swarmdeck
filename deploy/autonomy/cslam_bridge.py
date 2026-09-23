@@ -73,6 +73,7 @@ from autonomy.cslam import (
     CslamMapper,
     pose_matrix,
     publish_snapshot_if_new,
+    remove_stale_unique_temporaries,
     write_unique_temporary,
 )
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
@@ -101,6 +102,9 @@ MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 AUTHORITY_SENSOR_TTL_S = 3.0
+# The peer-root files the bridge writes through `write_unique_temporary`;
+# a start deletes their temporaries that a crashed bridge left behind.
+BRIDGE_WRITTEN_FILES = ("snapshot.json", "status.json", "graph_solution.json")
 # The wire cadence of the map authority heartbeat, independent of
 # `_snapshot`'s own 1 Hz timer: `AuthorityHeartbeatPublisher.run` publishes
 # on this period from its own thread, so a snapshot tick that never runs at
@@ -449,6 +453,7 @@ class Bridge(Node):
         # The peer root: snapshot.json, status.json and graph_solution.json
         # live here, and the MOLA worker publishes its products under mola/.
         self.root = root
+        remove_stale_unique_temporaries(root, BRIDGE_WRITTEN_FILES)
         reset_root = os.environ.get("SWARMDECK_SIM_RESET_DIR", "")
         self.reset_root = Path(reset_root) if reset_root else None
         record = read_map_epoch(root)
