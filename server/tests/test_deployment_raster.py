@@ -477,6 +477,32 @@ def test_pose_only_jitter_inside_tolerance_does_not_rebuild_the_raster(setup):
     assert report["status"] == "unchanged"
 
 
+def test_yaw_tolerance_is_the_translation_tolerance_at_the_map_edge(setup):
+    # A yaw change moves a point by |yaw delta| x its distance from the
+    # rotation centre, so the tolerance is set by the map's extent: a fixed
+    # angle let the far edge of a large map drift by metres.
+    session, refresher = setup["session"], setup["refresher"]
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+    meta = map_routes._optimized[scope_of(session)][0]
+    corners = [
+        (
+            meta.origin_x + dx * meta.width * meta.resolution,
+            meta.origin_y + dy * meta.height * meta.resolution,
+        )
+        for dx in (0, 1)
+        for dy in (0, 1)
+    ]
+    lever = max(math.hypot(x - 10.0, y - 5.0) for x, y in corners)
+    tolerance = deployment_raster.POSE_REBUILD_TRANSLATION_M / lever
+    assert tolerance < 0.01
+
+    transforms = setup["map_service"].transforms
+    transforms["robot_1"] = (10.0, 5.0, 0.0, math.pi / 2 + 0.8 * tolerance)
+    assert refresher.refresh(session, placements(session))["status"] == "unchanged"
+    transforms["robot_1"] = (10.0, 5.0, 0.0, math.pi / 2 + 1.2 * tolerance)
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+
+
 def test_optimized_png_cache_insert_uses_the_optimized_lock(monkeypatch):
     entered = []
 
