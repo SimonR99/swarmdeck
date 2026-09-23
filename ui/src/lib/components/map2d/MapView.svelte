@@ -577,7 +577,7 @@
 
         let angleDelta = curAngle - prevAngle;
         while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
-        while (angleDelta < -Math.PI) angleDelta -= Math.PI * 2;
+        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
 
         const scaleFactor = prevD > 5 ? curD / prevD : 1.0;
 
