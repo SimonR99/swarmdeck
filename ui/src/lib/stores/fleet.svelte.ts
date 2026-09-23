@@ -1,5 +1,6 @@
-import type { RobotState, Capability } from '$lib/types/protocol';
+import type { RobotState, Capability, RobotConnectionSettings } from '$lib/types/protocol';
 import { settings, DEFAULT_ROBOT_COLORS, colorForRobot } from './settings.svelte';
+import { mergeRobotState } from './robotStateMerge';
 
 /** Identity colour per robot. Named hardware robots keep a fixed colour; others use settings or the theme palette. */
 export const ROBOT_COLORS = DEFAULT_ROBOT_COLORS;
@@ -8,8 +9,40 @@ const state = $state({
   robots: {} as Record<string, RobotState>,
   order: [] as string[],
   selected: [] as string[],
-  activeCamera: null as string | null
+  activeCamera: null as string | null,
+  /**
+   * Bumped whenever the roster or a robot's telemetry actually changed. The
+   * derived views below are rebuilt from it instead of on every read: they are
+   * read once per robot per rendered frame, and a fresh array each time makes
+   * change detection by identity impossible.
+   */
+  revision: 0
 });
+
+let robotsView: RobotState[] = [];
+let robotsViewRevision = -1;
+let robotsViewConfigs: RobotConnectionSettings[] | null = null;
+
+let idsView: string[] = [];
+let idsViewSource: string[] | null = null;
+let idsViewConfigs: RobotConnectionSettings[] | null = null;
+
+let selectedView: string[] = [];
+let selectedViewSource: string[] | null = null;
+let selectedViewConfigs: RobotConnectionSettings[] | null = null;
+
+let configIndex = new Map<string, RobotConnectionSettings>();
+let configIndexSource: RobotConnectionSettings[] | null = null;
+
+/** Per-robot connection settings, indexed once per settings broadcast. */
+function configOf(id: string): RobotConnectionSettings | undefined {
+  const configured = settings.value.robots;
+  if (configured !== configIndexSource) {
+    configIndexSource = configured;
+    configIndex = new Map(configured.map((robot) => [robot.id, robot]));
+  }
+  return configIndex.get(id);
+}
 
 function getStoredTargetRobot(): string | null {
   if (typeof window === 'undefined') return null;
@@ -42,13 +75,47 @@ let targetMatched = false;
 
 export const fleet = {
   get robots() {
-    return state.order.map((id) => state.robots[id]).filter((robot) => robot && this.isEnabled(robot.robot_id));
+    const revision = state.revision;
+    const configured = settings.value.robots;
+    if (revision !== robotsViewRevision || configured !== robotsViewConfigs) {
+      robotsViewRevision = revision;
+      robotsViewConfigs = configured;
+      robotsView = state.order
+        .map((id) => state.robots[id])
+        .filter((robot) => robot && this.isEnabled(robot.robot_id));
+    }
+    return robotsView;
+  },
+  /**
+   * Roster only: changes when a robot joins, leaves or is disabled, never when
+   * one moves. Readers that care about membership use this so that telemetry
+   * does not re-run their effects.
+   */
+  get robotIds() {
+    const order = state.order;
+    const configured = settings.value.robots;
+    if (order !== idsViewSource || configured !== idsViewConfigs) {
+      idsViewSource = order;
+      idsViewConfigs = configured;
+      idsView = order.filter((id) => this.isEnabled(id));
+    }
+    return idsView;
+  },
+  get revision() {
+    return state.revision;
   },
   get count() {
     return this.robots.length;
   },
   get selected() {
-    return state.selected.filter((id) => this.isEnabled(id));
+    const source = state.selected;
+    const configured = settings.value.robots;
+    if (source !== selectedViewSource || configured !== selectedViewConfigs) {
+      selectedViewSource = source;
+      selectedViewConfigs = configured;
+      selectedView = source.filter((id) => this.isEnabled(id));
+    }
+    return selectedView;
   },
   get activeCamera() {
     const cam = state.activeCamera;
@@ -63,14 +130,12 @@ export const fleet = {
   },
 
   isEnabled(id: string): boolean {
-    const config = settings.value.robots.find((r) => r.id === id);
-    return config?.enabled !== false;
+    return configOf(id)?.enabled !== false;
   },
 
   colorOf(id: string): string {
-    const config = settings.value.robots.find((r) => r.id === id);
     const i = state.order.indexOf(id);
-    return colorForRobot(id, i < 0 ? 0 : i, config?.color);
+    return colorForRobot(id, i < 0 ? 0 : i, configOf(id)?.color);
   },
 
   indexOf(id: string): number {
@@ -116,7 +181,15 @@ export const fleet = {
       }
       persistTargetRobot(msg.robot_id);
     }
-    state.robots[msg.robot_id] = { ...state.robots[msg.robot_id], ...msg };
+    // A message that repeats what the store already holds is dropped here:
+    // the server sends a keep-alive for robots that have not changed, and a
+    // write would invalidate every reader of the fleet at that cadence.
+    const previous = state.robots[msg.robot_id];
+    const merged = mergeRobotState(previous, msg);
+    if (merged !== previous) {
+      state.robots[msg.robot_id] = merged;
+      state.revision++;
+    }
   },
 
   sync(robots: RobotState[]) {
@@ -131,6 +204,7 @@ export const fleet = {
 
   remove(id: string) {
     delete state.robots[id];
+    state.revision++;
     state.order = state.order.filter((r) => r !== id);
     state.selected = state.selected.filter((r) => r !== id);
     if (state.activeCamera === id) {
@@ -189,5 +263,6 @@ export const fleet = {
     state.order = [];
     state.selected = [];
     state.activeCamera = null;
+    state.revision++;
   }
 };

@@ -18,7 +18,7 @@
 
   function preferredRobotId() {
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) return mapStore.viewRobot;
-    return fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null;
+    return fleet.selected[0] ?? fleet.robotIds[0] ?? null;
   }
 
   function selectionKey(selection: NonNullable<typeof replicaTactical.selection>) {
@@ -97,13 +97,15 @@
 
   // Re-evaluate immediately when the operator changes local robot focus or
   // fleet selection; the ten-second poll is only for catalogue publication.
+  // Only the roster is read, never a pose: reading the robots themselves
+  // re-ran this effect on every `robot_state` message.
   $effect(() => {
     enabled;
     replicaTactical.preference;
     mapStore.viewMode;
     mapStore.viewRobot;
     fleet.selected.join(',');
-    fleet.robots.map((robot) => robot.robot_id).join(',');
+    fleet.robotIds.join(',');
     apply();
   });
 
