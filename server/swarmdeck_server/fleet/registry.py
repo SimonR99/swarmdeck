@@ -405,10 +405,18 @@ class Registry:
         return [r.to_state() for r in self.robots.values()]
 
 
-def _epoch_store():
-    from ..api.autonomy_routes import store
+class _CachedEpochStore:
+    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
+        from ..api.map_routes import cached_map_epoch
 
-    return store()
+        return cached_map_epoch(robot_id, session_id)
+
+
+_cached_epoch_store = _CachedEpochStore()
+
+
+def _epoch_store():
+    return _cached_epoch_store
 
 
 def _command_guard(robot_id):

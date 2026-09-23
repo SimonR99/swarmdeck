@@ -1454,6 +1454,12 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
     elif kind == "robot_state":
         if registry._sinks.get(msg.get("robot_id")) is not ws:
             return False
+        mission = os.environ.get("SWARMDECK_MISSION_ID")
+        robot_id = msg.get("robot_id")
+        if mission and isinstance(robot_id, str):
+            from .map_routes import cached_map_epoch_async
+
+            await cached_map_epoch_async(robot_id, mission)
         robot = registry.update_state(msg)
         if robot is not None:
             await sync_navigation_alert(robot)

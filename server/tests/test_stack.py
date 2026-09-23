@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 import time
 
 import pytest
@@ -196,6 +197,50 @@ def test_state_loop_skips_robot_state_without_gui_clients(monkeypatch):
     monkeypatch.setattr(app_module, "robot_state", should_not_build)
     app_registry.hello({"robot_id": "r0"}, sink=None)
     asyncio.run(state_loop_tick(now=10.0))
+
+
+def test_map_epoch_cache_avoids_repeated_store_reads_and_bounds_entries(monkeypatch):
+    from swarmdeck_server.api import autonomy_routes, map_routes
+
+    class Store:
+        def __init__(self):
+            self.calls = 0
+
+        def map_epoch(self, robot_id, session_id):
+            self.calls += 1
+            return 4
+
+    store = Store()
+    map_routes.clear_map_epoch_cache()
+    monkeypatch.setattr(autonomy_routes, "store", lambda: store)
+
+    assert map_routes.cached_map_epoch("r0", "mission") == 4
+    assert map_routes.cached_map_epoch("r0", "mission") == 4
+    assert store.calls == 1
+    map_routes.remember_map_epoch("r0", "mission", 5)
+    assert map_routes.cached_map_epoch("r0", "mission") == 5
+    assert store.calls == 1
+    for index in range(map_routes._MAP_EPOCH_CACHE_MAX_ENTRIES + 1):
+        map_routes.remember_map_epoch(f"r{index}", "mission", index)
+    assert len(map_routes._map_epoch_cache) <= map_routes._MAP_EPOCH_CACHE_MAX_ENTRIES
+
+
+def test_map_epoch_async_cache_miss_reads_sqlite_off_the_event_loop(monkeypatch):
+    from swarmdeck_server.api import autonomy_routes, map_routes
+
+    event_loop_thread = threading.get_ident()
+    calls = []
+
+    class Store:
+        def map_epoch(self, robot_id, session_id):
+            calls.append(threading.get_ident())
+            return 7
+
+    map_routes.clear_map_epoch_cache()
+    monkeypatch.setattr(autonomy_routes, "store", lambda: Store())
+
+    assert asyncio.run(map_routes.cached_map_epoch_async("r0", "mission")) == 7
+    assert calls and calls[0] != event_loop_thread
 
 
 def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):

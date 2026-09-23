@@ -91,13 +91,21 @@ async def manifest(robot_id: str, session_id: str):
 async def publish(request: Request):
     try:
         envelope = json.loads(await bounded_body(request, MAX_MANIFEST_BYTES))
-        from .map_routes import retire_robot_epoch, robot_epoch_lock
+        from .map_routes import (
+            cached_map_epoch_async,
+            remember_map_epoch,
+            retire_robot_epoch,
+            robot_epoch_lock,
+        )
 
         async with robot_epoch_lock(envelope["robot_id"]):
-            previous_epoch = await asyncio.to_thread(
-                store().map_epoch, envelope["robot_id"], envelope["session_id"]
+            previous_epoch = await cached_map_epoch_async(
+                envelope["robot_id"], envelope["session_id"]
             )
             changed = await asyncio.to_thread(store().publish, envelope)
+            remember_map_epoch(
+                envelope["robot_id"], envelope["session_id"], envelope["map_epoch"]
+            )
             if (
                 changed
                 and previous_epoch is not None

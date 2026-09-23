@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 import numpy as np
@@ -32,6 +33,9 @@ _server_scopes: set[str] = set()
 _optimized_seq: dict[str, int] = {}
 _raster_generation = 0
 _robot_epoch_locks: dict[str, asyncio.Lock] = {}
+_MAP_EPOCH_CACHE_MAX_ENTRIES = 256
+_map_epoch_cache: OrderedDict[tuple[int, str, str], int | None] = OrderedDict()
+_map_epoch_cache_lock = threading.Lock()
 
 
 def robot_epoch_lock(robot_id: str) -> asyncio.Lock:
@@ -41,6 +45,65 @@ def robot_epoch_lock(robot_id: str) -> asyncio.Lock:
 def raster_generation() -> int:
     with _optimized_lock:
         return _raster_generation
+
+
+def _map_epoch_cache_key(robot_id: str, session_id: str) -> tuple[int, str, str]:
+    from .autonomy_routes import store
+
+    return (id(store()), robot_id, session_id)
+
+
+def _cached_map_epoch(key: tuple[int, str, str]) -> int | None:
+    with _map_epoch_cache_lock:
+        if key not in _map_epoch_cache:
+            raise KeyError
+        value = _map_epoch_cache[key]
+        _map_epoch_cache.move_to_end(key)
+        return value
+
+
+def _remember_map_epoch_key(key: tuple[int, str, str], epoch: int | None) -> None:
+    with _map_epoch_cache_lock:
+        _map_epoch_cache[key] = epoch
+        _map_epoch_cache.move_to_end(key)
+        while len(_map_epoch_cache) > _MAP_EPOCH_CACHE_MAX_ENTRIES:
+            _map_epoch_cache.popitem(last=False)
+
+
+def cached_map_epoch(robot_id: str, session_id: str) -> int | None:
+    from .autonomy_routes import store
+
+    key = _map_epoch_cache_key(robot_id, session_id)
+    try:
+        return _cached_map_epoch(key)
+    except KeyError:
+        pass
+    value = store().map_epoch(robot_id, session_id)
+    _remember_map_epoch_key(key, value)
+    return value
+
+
+async def cached_map_epoch_async(robot_id: str, session_id: str) -> int | None:
+    from .autonomy_routes import store
+
+    replica_store = store()
+    key = (id(replica_store), robot_id, session_id)
+    try:
+        return _cached_map_epoch(key)
+    except KeyError:
+        pass
+    value = await asyncio.to_thread(replica_store.map_epoch, robot_id, session_id)
+    _remember_map_epoch_key(key, value)
+    return value
+
+
+def remember_map_epoch(robot_id: str, session_id: str, epoch: int | None) -> None:
+    _remember_map_epoch_key(_map_epoch_cache_key(robot_id, session_id), epoch)
+
+
+def clear_map_epoch_cache() -> None:
+    with _map_epoch_cache_lock:
+        _map_epoch_cache.clear()
 
 
 def is_deployment_scope(scope: str) -> bool:
@@ -137,7 +200,7 @@ def robot_command_error(robot_id: str) -> str | None:
             "failed",
         }:
             return status.get("error") or "robot map reset is in progress"
-    floor = store().map_epoch(robot_id, mission)
+    floor = cached_map_epoch(robot_id, mission)
     if floor is None:
         return "robot mapping authority is missing or stale"
     robot = registry.robots.get(robot_id)
@@ -223,7 +286,7 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
             advanced: list[int] = []
 
             def reserve():
-                current = store().map_epoch(robot_id, mission)
+                current = cached_map_epoch(robot_id, mission)
                 peer = registry.robots[robot_id].peer_slam or {}
                 epoch = (
                     max(
@@ -233,6 +296,7 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
                     + 1
                 )
                 store().reserve_map_epoch(robot_id, mission, epoch)
+                remember_map_epoch(robot_id, mission, epoch)
                 advanced.append(epoch)
                 return epoch
 
