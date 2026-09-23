@@ -64,6 +64,10 @@ class MeshWorld:
     viewer_far: str
     viewer_flashlight: bool = False
     robot_floodlights: bool = False
+    # Scatter the detection targets over the floor the fleet can reach from
+    # its start (walkable.py) instead of using `target_placements`: one in the
+    # far end of the network, none near the start.
+    scatter_targets: bool = False
 
     def assets_dir(self, custom_path: Path | str | None = None) -> Path:
         candidates: list[Path] = []
@@ -187,7 +191,7 @@ SUBT_FINALS = MeshWorld(
     shutter=0.04,
     iso=400.0,
     ground_material_prefix=None,
-    # Targets go on the entrance level; the tunnel ceiling there is at 3.5 m.
+    # Only used for fixed placements; scattered targets carry their floor height.
     ground_below_z=1.0,
     # Two columns in the staging hangar, lined up with the gate at y = 0 and
     # facing the tunnel (+x). robot_0 is at the head of the group, which is
@@ -198,26 +202,15 @@ SUBT_FINALS = MeshWorld(
         "robot_2": {"x": -16.5, "y": 1.0, "z": 0.15, "yaw": 0.0},
         "robot_3": {"x": -16.5, "y": -1.0, "z": 0.15, "yaw": 0.0},
     },
-    # Along the walls of the first tunnel tile (0.7 m off each wall, leaving
-    # 3.8 m clear down the middle) and in the back corners of the hangar.
-    target_placements=(
-        (-5.0, 1.9, -1.57),
-        (-2.0, -1.9, 1.57),
-        (1.0, 1.9, -1.57),
-        (4.0, -1.9, 1.57),
-        (7.0, 1.9, -1.57),
-        (10.0, -1.9, 1.57),
-        (13.0, 1.9, -1.57),
-        (16.0, -2.2, 1.57),
-        (-18.5, 4.3, 0.0),
-        (-18.5, -4.3, 0.0),
-    ),
+    # Scattered through the whole tunnel network instead (scatter_targets).
+    target_placements=(),
     # In the hangar behind the fleet, looking through the gate into the tunnel.
     viewer_position="-19,0,2.2",
     viewer_look_at="-8,0,0.8",
     viewer_far="300",
     viewer_flashlight=True,
     robot_floodlights=True,
+    scatter_targets=True,
 )
 
 MESH_WORLDS: dict[str, MeshWorld] = {w.name: w for w in (BISTRO, SUBT_FINALS)}

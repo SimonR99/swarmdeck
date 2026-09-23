@@ -144,21 +144,26 @@ class MeshSurface:
         self.lo = self.triangles.min(axis=1)
         self.hi = self.triangles.max(axis=1)
 
-    def _restricted(self, x_min, x_max, y_min, y_max):
+    def _restricted(self, x_min, x_max, y_min, y_max, z_min=None, z_max=None):
         """A view over the triangles whose xy box meets the given box, so a
-        footprint's samples do not each scan a million-triangle world."""
+        footprint's samples do not each scan a million-triangle world, and,
+        given a height band, only those reaching into it."""
         keep = (
             (self.hi[:, 0] >= x_min)
             & (self.lo[:, 0] <= x_max)
             & (self.hi[:, 1] >= y_min)
             & (self.lo[:, 1] <= y_max)
         )
+        if z_min is not None:
+            keep &= self.hi[:, 2] >= z_min
+        if z_max is not None:
+            keep &= self.lo[:, 2] <= z_max
         sub = MeshSurface.__new__(MeshSurface)
         sub.triangles = self.triangles[keep]
         sub.den = self.den[keep]
         sub.lo = self.lo[keep]
         sub.hi = self.hi[keep]
-        sub.below = self.below
+        sub.below = self.below if z_max is None else z_max
         return sub
 
     def height(self, x, y):
@@ -185,7 +190,14 @@ class MeshSurface:
             raise ValueError(f"No ground below target at ({x:g}, {y:g})")
         return float(heights[hits].max())
 
-    def place(self, model, x, y, yaw):
+    def place(self, model, x, y, yaw, near_z=None):
+        """The z that stands `model` on the ground at (x, y), rotated by yaw.
+
+        `near_z` is the floor height when it is known (walkable.py): only
+        surfaces from half a metre below it to 0.3 m above count, so a target
+        on a lower level of a multi-level world stands on that level's floor,
+        not on the ceiling of the level below or the floor of the one above.
+        """
         vertices = np.concatenate(list(GlbGeometry(model).triangles())).reshape(-1, 3)
         lo, hi = vertices.min(axis=0), vertices.max(axis=0)
         # Sample the rotated footprint at <=5 cm spacing, including its edges.
@@ -193,7 +205,8 @@ class MeshSurface:
         ys = np.linspace(lo[1], hi[1], max(2, math.ceil((hi[1] - lo[1]) / 0.05) + 1))
         co, si = math.cos(yaw), math.sin(yaw)
         reach = math.hypot(max(abs(lo[0]), abs(hi[0])), max(abs(lo[1]), abs(hi[1])))
-        local = self._restricted(x - reach, x + reach, y - reach, y + reach)
+        band = (None, None) if near_z is None else (near_z - 0.5, near_z + 0.3)
+        local = self._restricted(x - reach, x + reach, y - reach, y + reach, *band)
         ground = max(
             local.height(x + co * a - si * b, y + si * a + co * b)
             for a in xs

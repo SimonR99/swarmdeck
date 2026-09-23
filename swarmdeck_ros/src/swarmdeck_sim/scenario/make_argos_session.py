@@ -275,6 +275,43 @@ def controller_block(
     return lines
 
 
+# Scattered targets (MeshWorld.scatter_targets): how far from the fleet's start
+# they have to be along the floor, and how far apart from each other.
+SCATTER_MIN_DISTANCE_M = 25.0
+SCATTER_SPACING_M = 15.0
+
+
+def scattered_targets(
+    surface, start: dict, seed: int, count: int
+) -> tuple[list[tuple[float, float, float]], list[float]]:
+    """(x, y, yaw) and floor height of `count` targets over the reachable floor.
+
+    Seeded, so a scenario keeps its layout; the first is in the far end of
+    the network, and none is within SCATTER_MIN_DISTANCE_M of the start.
+    """
+    import random
+
+    from walkable import reachable_floor, scatter
+
+    floor = reachable_floor(
+        surface.triangles,
+        (float(start["x"]), float(start["y"]), float(start.get("z", 0.0))),
+    )
+    rng = random.Random(seed)
+    picks = scatter(
+        floor,
+        count,
+        rng,
+        min_distance=SCATTER_MIN_DISTANCE_M,
+        spacing=SCATTER_SPACING_M,
+    )
+    placements = [
+        (float(floor.x[n]), float(floor.y[n]), rng.uniform(-math.pi, math.pi))
+        for n in picks
+    ]
+    return placements, [float(floor.z[n]) for n in picks]
+
+
 def generate_argos_xml(
     config_path: Path,
     robot_count: int | None = None,
@@ -380,6 +417,7 @@ def generate_argos_xml(
 
     # Props need a +90-degree roll; Jolt must not also convert Y-up internally.
     # Set y_up=false on every mesh below to preserve identical world transforms.
+    surface = None
     if world is not None:
         assets = world.assets_dir(world_dir)
         visual_glb = (assets / world.visual_glb).resolve()
@@ -396,6 +434,21 @@ def generate_argos_xml(
             ]
         )
         placements = list(world.target_placements[:targets]) if targets > 0 else []
+        if world.scatter_targets and targets > 0:
+            from mesh_surface import MeshSurface
+
+            surface = MeshSurface(
+                collision_glb,
+                material_prefix=world.ground_material_prefix,
+                z_offset=world.z_offset,
+                below=world.ground_below_z,
+            )
+            placements, target_floor = scattered_targets(
+                surface,
+                starts.get(robot_ids[0]) or world.default_start_poses[robot_ids[0]],
+                seed,
+                targets,
+            )
     else:
         # 26 m of building plus clearance; nothing in the world reaches 6 m.
         lines.extend(
@@ -422,20 +475,22 @@ def generate_argos_xml(
     if world is not None and placements:
         from mesh_surface import MeshSurface
 
-        surface = MeshSurface(
-            collision_glb,
-            material_prefix=world.ground_material_prefix,
-            z_offset=world.z_offset,
-            below=world.ground_below_z,
-        )
+        if surface is None:
+            surface = MeshSurface(
+                collision_glb,
+                material_prefix=world.ground_material_prefix,
+                z_offset=world.z_offset,
+                below=world.ground_below_z,
+            )
+        floors = target_floor if world.scatter_targets else [None] * len(placements)
         # Default relative prop paths refer to generated runtime copies. Use
         # their checked-in originals when generating outside that directory.
         models = Path(props_dir)
         if props_dir == "props" and not models.is_dir():
             models = REPO / "argos/assets/props"
         target_z = [
-            surface.place(models / f"{name}.glb", x, y, yaw)
-            for (x, y, yaw), name in zip(placements, classes)
+            surface.place(models / f"{name}.glb", x, y, yaw, near_z=floor)
+            for (x, y, yaw), name, floor in zip(placements, classes, floors)
         ]
     if placements:
         lines.append("")

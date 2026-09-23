@@ -804,13 +804,22 @@ def test_subt_robots_carry_forward_floodlights(subt_tree):
         assert z > 0.2
 
 
-def test_subt_targets_stand_on_the_tunnel_floor_not_the_ceiling(subt_tree):
-    """The first tunnel tile has its floor at z = 0 and its ceiling 3.5 m up;
-    a placement that took the highest surface would hang every target from
-    the roof."""
+def test_subt_targets_are_scattered_through_the_tunnels(subt_tree):
+    """Targets spread over the whole reachable network, seeded by the
+    scenario: the first (a duck) at the far end, none by the entrance, none
+    near another, each on its own level's floor rather than a ceiling."""
     props = subt_tree.findall("./media/photorealism/scenery/prop")
     targets = [p for p in props if "finals_prize_round_world_01" not in p.get("model")]
     assert len(targets) == 10
-    for prop in targets:
-        z = float(prop.get("position").split(",")[2])
-        assert -0.02 < z < 0.25, prop.get("model")
+    positions = [tuple(map(float, p.get("position").split(","))) for p in targets]
+    start = (-14.5, 1.0)
+    assert Path(targets[0].get("model")).stem == "rubber_duck"
+    # The network reaches x = 411 m; its far end is hundreds of metres away.
+    assert math.dist(positions[0][:2], start) > 300.0
+    for i, (x, y, z) in enumerate(positions):
+        assert math.dist((x, y), start) > mas.SCATTER_MIN_DISTANCE_M / 2
+        for other in positions[i + 1 :]:
+            assert math.dist((x, y, z), other) >= mas.SCATTER_SPACING_M
+    # Several levels: the tunnels descend from the hangar floor at z = 0.
+    assert len({round(z) for _, _, z in positions}) > 1
+    assert all(-16.0 < z < 1.5 for _, _, z in positions)
