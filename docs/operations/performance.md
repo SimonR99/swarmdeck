@@ -259,3 +259,38 @@ botman's deployment load at idle (`docker stats`, % of one core):
   replacement index must be cache-friendly and chosen by its botman numbers.
 - **The Orin's GPU is about 6x below the RTX 4070 in FP32 and 2.5x in FP16.**
   That rules it out for running the simulation, not for onboard inference.
+
+## 2026-09-23T15:40 - tuf, SubT, exploring (4 robots): MGG A/B, flat cell index
+
+Same stack (`0bb7f5a`); only the MGG image changes: `46e3e8e` (binary-search
+cell lookup) against `bb45403` (flat open-addressed cell index). Each run
+follows a simulation reset and explores for 180 s; runs alternate
+baseline, index, baseline, index. The real-time factor was 1.00 in every run,
+and the graph sizes match (about 1,500 vertices, 26-27k edges).
+
+| MGG | Cycles | Wall median (max) ms | Lattice median ms | Gain median ms | mgg CPU % |
+|---|---:|---:|---:|---:|---:|
+| `46e3e8e` run 1 | 48 | 726 (1075) | 534 | 143 | 118 |
+| `bb45403` run 1 | 52 | 200 (305) | 100 | 56 | 101 |
+| `46e3e8e` run 2 | 60 | 674 (1050) | 466 | 134 | 114 |
+| `bb45403` run 2 | 63 | 224 (366) | 115 | 64 | 87 |
+
+- Plan cycles are 3.2x faster, the lattice build 4.6x (the plan's target was
+  2x), the gain 2.3x. MGG uses less CPU while running more cycles.
+
+### botman, `cell_index_bench` (MGG `ros2/src/mgg_map_octomap/bench`), deployment running
+
+Jetson AGX Orin, `-O3`, g++ 11.4, the `main` deployment running (load
+average ~4.8, two minutes after boot). Two runs, ns per query:
+
+| Cells | Binary search | Flat index | Speed-up |
+|---|---:|---:|---:|
+| 250k | 350-363 | 147-152 | 2.3-2.5x |
+| 1M | 706-712 | 161 | 4.4x |
+| 4M | 1122-1126 | 170 | 6.6x |
+
+- The flat index is 40.8 bytes per input cell against 24 for the sorted
+  vectors.
+- Scaling tuf's new plan cycle (~0.21 s) by the botman/tuf CPU factor
+  measured earlier (2.3-3.6x) puts the onboard cycle at about 0.5-0.8 s,
+  inside the 1 s target. This is an estimate until MGG runs on botman.
