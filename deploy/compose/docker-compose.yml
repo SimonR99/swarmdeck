@@ -433,6 +433,8 @@ services:
       SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
       SWARMDECK_SERVER_URL: http://server:8080
+      SWARMDECK_MISSION_GC_KEEP_RECENT: "${SWARMDECK_MISSION_GC_KEEP_RECENT:-3}"
+      SWARMDECK_MISSION_GC_DRY_RUN: "${SWARMDECK_MISSION_GC_DRY_RUN:-false}"
     volumes:
       - ../../autonomy:/app/autonomy:ro
       - ../autonomy:/app/deploy/autonomy:ro

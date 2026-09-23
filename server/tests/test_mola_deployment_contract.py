@@ -152,3 +152,19 @@ def test_launcher_smoke_uses_real_config_and_bounded_shutdown():
     assert "SWARMDECK_MOLA_COMPONENT" in script
     assert "signal.SIGINT" in script
     assert "process.kill()" in script
+
+
+def test_every_peer_launch_receives_the_mission_gc_settings():
+    # peer.launch.py reads these; a setting the compose file does not pass
+    # is silently ignored and GC deletes with its defaults.
+    expected = {
+        "SWARMDECK_MISSION_GC_KEEP_RECENT": "${SWARMDECK_MISSION_GC_KEEP_RECENT:-3}",
+        "SWARMDECK_MISSION_GC_DRY_RUN": "${SWARMDECK_MISSION_GC_DRY_RUN:-false}",
+    }
+    services = [_peer_service("peer_mapping")] + [
+        _mapping_service(f"peer{index}") for index in range(4)
+    ]
+    for service in services:
+        env = service["environment"]
+        for key, value in expected.items():
+            assert env[key] == value
