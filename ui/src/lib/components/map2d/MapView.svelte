@@ -1,6 +1,5 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { rebaseViewport } from './mapViewport';
   import { CanvasViewport, type CanvasView } from './canvasViewport';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
@@ -57,8 +56,7 @@
     drawReviewedObjects,
     drawRobots,
     drawScaleBar,
-    hitTestReviewedObject,
-    type MapInfo
+    hitTestReviewedObject
   } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
@@ -116,7 +114,6 @@
   }
   const pointers = new Map<number, { x: number; y: number }>();
   let dragged = false;
-  let lastRenderedInfo: MapInfo | null = null;
 
   const viewport = new CanvasViewport(view);
   const { screenOf, gridOf } = viewport;
@@ -298,9 +295,7 @@
 
     const info = mapStore.info;
     const grid = mapStore.canvas;
-    if (!view.initialised && info && fleet.count) {
-      view.initialised = true;
-      lastRenderedInfo = info;
+    if (viewport.adoptRaster(info, fleet.count > 0)) {
       fitMap();
       // A local map belongs to one robot. Centre it on that robot when the
       // async map load completes, even if the operator had panned the prior
@@ -308,13 +303,6 @@
       if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
         centreOnFleet();
       }
-    } else if (view.initialised && lastRenderedInfo && info) {
-      if (lastRenderedInfo !== info) {
-        Object.assign(view, rebaseViewport(view, lastRenderedInfo, info));
-      }
-      lastRenderedInfo = info;
-    } else if (info) {
-      lastRenderedInfo = info;
     }
     if (follow) centreOnFleet();
 
@@ -469,8 +457,7 @@
       // Only the cached raster placement is stale; the recorded history is in
       // the world frame and belongs to the robot, not to the view.
       trailCache.clear();
-      lastRenderedInfo = null;
-      view.initialised = false;
+      viewport.forgetRaster();
     });
   });
 

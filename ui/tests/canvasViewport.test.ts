@@ -144,3 +144,64 @@ test('panning moves the view by the pointer delta', () => {
   assert.equal(viewport.view.tx, 45);
   assert.equal(viewport.view.ty, -28);
 });
+
+/** MapView.svelte's draw-time raster tracking as it stood. */
+function legacyTracker(view: View) {
+  let last: typeof raster | null = null;
+  return {
+    adopt(info: typeof raster | null, fleetCount: number): boolean {
+      if (!view.initialised && info && fleetCount) {
+        view.initialised = true;
+        last = info;
+        return true;
+      } else if (view.initialised && last && info) {
+        if (last !== info) {
+          const pixelsPerMetre = view.scale / last.resolution;
+          const dx = (last.origin.x - info.origin.x) * pixelsPerMetre;
+          const dy = (info.height * info.resolution - last.height * last.resolution
+            + info.origin.y - last.origin.y) * pixelsPerMetre;
+          const c = Math.cos(view.rotation), s = Math.sin(view.rotation);
+          view.scale = pixelsPerMetre * info.resolution;
+          view.tx -= dx * c - dy * s;
+          view.ty -= dx * s + dy * c;
+        }
+        last = info;
+      } else if (info) {
+        last = info;
+      }
+      return false;
+    },
+    forget() {
+      last = null;
+      view.initialised = false;
+    }
+  };
+}
+
+const raster = { resolution: 0.1, width: 100, height: 80, origin: { x: -2, y: -3 } };
+
+test('the viewport initialises once for the first raster with robots and rebases later ones', () => {
+  const sequence: [typeof raster | null, number, 'forget'?][] = [
+    [null, 1],
+    [raster, 0],
+    [{ ...raster, height: 90 }, 0],
+    [{ ...raster, height: 90 }, 2],
+    [{ ...raster, height: 120, origin: { x: -2, y: -6 } }, 2],
+    [{ ...raster, resolution: 0.05, height: 240, width: 200 }, 2],
+    [null, 2, 'forget'],
+    [raster, 2],
+    [{ ...raster, width: 300 }, 2]
+  ];
+  const expected = { ...start(), initialised: false };
+  const legacy = legacyTracker(expected);
+  const viewport = new CanvasViewport({ ...start(), initialised: false });
+  for (const [info, count, forget] of sequence) {
+    if (forget) {
+      legacy.forget();
+      viewport.forgetRaster();
+    }
+    assert.equal(viewport.adoptRaster(info, count > 0), legacy.adopt(info, count));
+    assert.equal(viewport.view.initialised, expected.initialised);
+    close(viewport.view, expected);
+  }
+});

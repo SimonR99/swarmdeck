@@ -1,4 +1,13 @@
 import type { ScreenPoint } from './mapLayers.ts';
+import { rebaseViewport } from './mapViewport.ts';
+
+/** What the viewport needs to know about the raster it shows. */
+export interface ViewportRaster {
+  resolution: number;
+  width: number;
+  height: number;
+  origin: { x: number; y: number };
+}
 
 /** The 2D canvas's pan, zoom and rotation, in screen px per raster cell. */
 export interface CanvasView {
@@ -34,9 +43,37 @@ function wrapAngle(angle: number): number {
  */
 export class CanvasViewport {
   readonly view: CanvasView;
+  private shownRaster: ViewportRaster | null = null;
 
   constructor(view: CanvasView) {
     this.view = view;
+  }
+
+  /**
+   * Follow the raster being drawn. Returns true when the view has to be
+   * initialised for it (the first raster once robots are known, and the first
+   * after `forgetRaster`): the caller then fits and centres it. A later raster
+   * that grew or changed resolution is rebased so the world stays put.
+   */
+  adoptRaster(raster: ViewportRaster | null, canInitialise: boolean): boolean {
+    if (!this.view.initialised && raster && canInitialise) {
+      this.view.initialised = true;
+      this.shownRaster = raster;
+      return true;
+    }
+    if (this.view.initialised && this.shownRaster && raster) {
+      if (this.shownRaster !== raster) Object.assign(this.view, rebaseViewport(this.view, this.shownRaster, raster));
+      this.shownRaster = raster;
+    } else if (raster) {
+      this.shownRaster = raster;
+    }
+    return false;
+  }
+
+  /** Start over with the next raster, as for a different map view. */
+  forgetRaster() {
+    this.shownRaster = null;
+    this.view.initialised = false;
   }
 
   /** Screen px of a raster cell coordinate. */
