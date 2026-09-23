@@ -20,6 +20,7 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
+  import { settings } from '$lib/stores/settings.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
@@ -44,6 +45,7 @@
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
   import { MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
+  import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -831,35 +833,29 @@
     if (renderMode === 'gaussians') void fetchGaussians();
   }
 
-  // Everything the drawn frame is built from. Reading it here is what turns a
-  // store or prop change into exactly one redraw, instead of the scene being
-  // redrawn continuously in case one of them had changed.
+  // Everything the drawn frame is built from, listed and explained in
+  // sceneInputs.ts. Reading it here is what turns a store or prop change into
+  // exactly one redraw, instead of the scene being redrawn continuously in
+  // case one of them had changed.
   $effect(() => {
-    void fleet.sceneRevision;
-    void fleet.selected;
-    void trailStore.revision;
-    void mapStore.revision;
-    void mapStore.viewMode;
-    void mapStore.viewRobot;
-    void mapStore.slamGraphs;
-    void review.proposals;
-    void review.entities;
-    void review.selected;
-    void review.focused;
-    void liveReplica;
-    void replicaCloud;
-    void tacticalReplica;
-    void follow;
-    void showGrid;
-    void showTrails;
-    void showLabels;
-    void showSensors;
-    void showPlans;
-    void showNetwork;
-    void quality;
-    void renderMode;
-    void colorMode;
-    void pointSize;
+    void sceneDrawInputs(
+      { fleet, settings, trails: trailStore, mapStore, review, replicaTactical },
+      {
+        liveReplica,
+        replicaCloud,
+        follow,
+        showGrid,
+        showTrails,
+        showLabels,
+        showSensors,
+        showPlans,
+        showNetwork,
+        quality,
+        renderMode,
+        colorMode,
+        pointSize
+      }
+    );
     if (mounted && active) untrack(() => requestRender(true));
   });
 
