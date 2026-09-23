@@ -470,3 +470,29 @@ drift, RTX 4070), real-time factor 1.00 throughout:
   shows lost peer reservations and "controller patience exceeded".
 - **Not measured yet:** dashboard browser CPU (`--browser`), sim-container idle
   target (29 % against < 60 %: met), server idle target (1-2 %: met).
+
+## 2026-09-23T18:30 - dashboard, old (`9a647b3`) against new (`daff383`, merged as `263dd92`), fleet parked
+
+Production builds of both versions, served with `vite preview` on the
+workstation against tuf's live backend (tunnelled), measured in headless
+Chromium with SwiftShader, which makes each frame far more expensive than a
+GPU would. CPU is the launched browser's process tree from `/proc`
+(`profile_stack.py --browser`); frames are WebGL frames drawn per second.
+Two alternating runs each, 15 s idle, then three mouse-drag pans.
+
+| View | Build | Idle frames/s | Idle CPU % | Pan frames/s | Pan CPU % |
+|---|---|---:|---:|---:|---:|
+| 3D | old | 24.1 / 24.0 (30 with the fleet moving) | 1130 / 1129 | 25.9 / 26.8 | 1212 / 1230 |
+| 3D | new | 0 / 0 | 35 / 35 | 9.5 / 9.6 | 251 / 254 |
+| 2D | old | - | 1458 / 1478 | - | - |
+| 2D | new | - | 81 / 81 (56 in a later run) | - | - |
+
+- A parked fleet no longer redraws the maps. Keep-alives that change only
+  clocks and float noise are ignored, and the replica poll redraws only on
+  visible change. The 3D map draws only while something moves or the pointer
+  pans.
+- The last ~400 % was the browser re-blurring the panels over the map every
+  display frame (`backdrop-blur`); the panels are now opaque, without blur.
+- The plan's target, the dashboard tab under 25 % CPU at idle, was set for
+  Firefox with a GPU. It needs a check in a real browser, which SwiftShader
+  cannot stand in for.
