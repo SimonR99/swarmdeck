@@ -464,6 +464,13 @@ def _robot_state_signature(message: dict[str, Any]) -> str:
         for key, value in message.items()
         if key not in {"t_mono", "t_wall", "t_sess", "unattended_s"}
     }
+    if isinstance(stable.get("live_mapping"), dict):
+        # The 1 Hz keep-alive refreshes this clock without triggering fan-out.
+        stable["live_mapping"] = {
+            key: value
+            for key, value in stable["live_mapping"].items()
+            if key != "authority_age_s"
+        }
     return json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 

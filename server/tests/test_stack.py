@@ -210,6 +210,26 @@ def test_state_loop_sends_changes_and_one_hz_keepalive(monkeypatch):
     assert [message["pose"]["x"] for message in sent] == [0.0, 1.0, 1.0]
 
 
+def test_state_loop_refreshes_authority_age_only_on_keepalive(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+
+    sent = []
+
+    async def capture(message):
+        sent.append(message)
+
+    monkeypatch.setattr(app_module, "broadcast", capture)
+    app_module._gui_clients.add(object())
+    robot = app_registry.hello({"robot_id": "r0"}, sink=None)
+    robot.live_mapping = {"authority_age_s": 0.18}
+    asyncio.run(state_loop_tick(now=10.0))
+    robot.live_mapping = {"authority_age_s": 0.99}
+    asyncio.run(state_loop_tick(now=10.2))
+    assert len(sent) == 1
+    asyncio.run(state_loop_tick(now=11.0))
+    assert [msg["live_mapping"]["authority_age_s"] for msg in sent] == [0.18, 0.99]
+
+
 def test_state_loop_skips_robot_state_without_gui_clients(monkeypatch):
     from swarmdeck_server.api import app as app_module
 
