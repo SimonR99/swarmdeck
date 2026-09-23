@@ -463,6 +463,14 @@ def test_routes_list_and_serve_the_deployment_scope(setup):
         assert cells[0, 0] == -1
 
 
+def test_pose_only_jitter_inside_tolerance_does_not_rebuild_the_raster(setup):
+    session, refresher = setup["session"], setup["refresher"]
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+    setup["map_service"].transforms["robot_1"] = (10.01, 5.0, 0.0, math.pi / 2)
+    report = refresher.refresh(session, placements(session))
+    assert report["status"] == "unchanged"
+
+
 def test_rebuilt_raster_advances_its_sequence(setup):
     """A rebuild keeps the scope's geometry; only ``seq`` tells the UI to refetch."""
     from swarmdeck_server.api.app import app
