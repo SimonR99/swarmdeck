@@ -29,6 +29,14 @@ Each report header now includes the short git commit (`--commit SHA` to
 override; default is auto-detected from the script's own repo). Use this to
 correlate each dated entry with the code it measured.
 
+`--browser [--browser-url URL] [--browser-idle-s N]` measures browser
+main-thread CPU via headless Chromium + Playwright CDP. Opens the dashboard
+at URL (default `http://localhost:5173`), records CDP
+`TaskDuration`/`ScriptDuration` over an idle window and then over synthetic
+mouse-drag panning events. Requires `node` ≥ 18 and the Playwright package
+(pre-installed via `npx playwright` on the workstation and tuf). Prints a
+clear message and continues without crashing if no browser is available.
+
 ## 2026-09-23 - workstation, SubT, 4 robots, drift odometry, DRI (iGPU), mostly idle
 
 Baseline for the plan, from manual runs before the harness existed and the

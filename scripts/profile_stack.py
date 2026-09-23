@@ -6,6 +6,7 @@ Run on the host that runs the stack, while it runs:
     scripts/profile_stack.py                 # 30 s window, no profiles
     scripts/profile_stack.py --profiles      # plus py-spy of the Python hot spots
     scripts/profile_stack.py --window 60 --label "after lattice cache"
+    scripts/profile_stack.py --browser       # browser main-thread CPU (item 6)
 
 It reports what the clean-up plan (docs/superpowers/plans/
 2026-09-23-cleanup-optimization.md) is measured by:
@@ -15,11 +16,13 @@ It reports what the clean-up plan (docs/superpowers/plans/
 - MGG plan cycles: wall time and its lattice ("grid") and gain parts, from
   the planner's own log lines within the window;
 - GUI WebSocket traffic: messages and bytes per second by type;
+- optionally, browser main-thread CPU at idle and while panning (--browser);
 - optionally, py-spy profiles of the Python processes, taken from a
   throwaway sidecar container that joins each container's PID namespace,
   so nothing in the stack is modified.
 
-Only docker and python3 are needed on the host.
+Only docker and python3 are needed on the host. The --browser flag also needs
+node (for Playwright) or a local Chromium binary; it degrades gracefully.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import argparse
 import collections
 import datetime as dt
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -55,6 +59,13 @@ PLAN_LINE = re.compile(
     r"(\d+) vertices, (\d+) edges.*?; (\d+) ms \(global (\d+), grid (\d+), "
     r"gain (\d+), select (\d+)\)"
 )
+
+# Path to Playwright's bundled Chromium (populated by `npx playwright install`)
+_PLAYWRIGHT_CHROMIUM = (
+    Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
+)
+# Path to Playwright's Node modules (from npx cache)
+_PLAYWRIGHT_MODULES = Path.home() / ".npm/_npx/e41f203b7505f1fb/node_modules"
 
 
 def sh(args, **kwargs) -> subprocess.CompletedProcess:
@@ -360,6 +371,150 @@ def perf_mgg(seconds: int) -> str:
     return (result.stdout + result.stderr).strip()
 
 
+# -------------------------------------------------------------- browser CPU
+
+
+_BROWSER_JS = r"""
+const pwPath = process.env.PW_MODULES;
+let pw;
+try { pw = require(pwPath + '/playwright'); } catch(e) {
+  try { pw = require(pwPath + '/playwright-core'); } catch(e2) {
+    console.log(JSON.stringify({error: 'playwright not found: ' + e2.message}));
+    process.exit(0);
+  }
+}
+const { chromium } = pw;
+const URL   = process.env.DASH_URL;
+const IDLE  = parseFloat(process.env.IDLE_S  || '5');
+const PANS  = parseInt(  process.env.PANS     || '3');
+
+function metric(arr, name) {
+  const m = arr.find(x => x.name === name);
+  return m ? m.value : 0;
+}
+
+(async () => {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    });
+    const ctx  = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const page = await ctx.newPage();
+    const cdp  = await ctx.newCDPSession(page);
+    await cdp.send('Performance.enable');
+
+    // Navigate and settle; tolerate a stack that is not running
+    try { await page.goto(URL, { waitUntil: 'networkidle', timeout: 20000 }); }
+    catch(_) {}
+    await new Promise(r => setTimeout(r, 2000));
+
+    // -- idle phase --
+    const r0 = (await cdp.send('Performance.getMetrics')).metrics;
+    await new Promise(r => setTimeout(r, IDLE * 1000));
+    const r1 = (await cdp.send('Performance.getMetrics')).metrics;
+    const idle_wall   = metric(r1, 'Timestamp') - metric(r0, 'Timestamp');
+    const idle_task   = metric(r1, 'TaskDuration')   - metric(r0, 'TaskDuration');
+    const idle_script = metric(r1, 'ScriptDuration')  - metric(r0, 'ScriptDuration');
+
+    // -- panning phase: synthetic mouse drags across the viewport centre --
+    const vp  = page.viewportSize();
+    const cx  = vp ? vp.width  / 2 : 640;
+    const cy  = vp ? vp.height / 2 : 360;
+    const r2  = (await cdp.send('Performance.getMetrics')).metrics;
+    for (let i = 0; i < PANS; i++) {
+      await page.mouse.move(cx - 100, cy);
+      await page.mouse.down();
+      for (let dx = 0; dx <= 200; dx += 20) {
+        await page.mouse.move(cx - 100 + dx, cy + Math.sin(dx * 0.05) * 30);
+        await new Promise(r => setTimeout(r, 40));
+      }
+      await page.mouse.up();
+      await new Promise(r => setTimeout(r, 600));
+    }
+    const r3  = (await cdp.send('Performance.getMetrics')).metrics;
+    const pan_wall   = metric(r3, 'Timestamp') - metric(r2, 'Timestamp');
+    const pan_task   = metric(r3, 'TaskDuration')   - metric(r2, 'TaskDuration');
+    const pan_script = metric(r3, 'ScriptDuration')  - metric(r2, 'ScriptDuration');
+
+    console.log(JSON.stringify({
+      idle_cpu_pct:    idle_wall > 0 ? 100 * idle_task   / idle_wall : null,
+      idle_script_pct: idle_wall > 0 ? 100 * idle_script / idle_wall : null,
+      idle_wall_s: idle_wall,
+      pan_cpu_pct:    pan_wall > 0 ? 100 * pan_task   / pan_wall : null,
+      pan_script_pct: pan_wall > 0 ? 100 * pan_script / pan_wall : null,
+      pan_wall_s: pan_wall,
+    }));
+  } catch (e) {
+    console.log(JSON.stringify({ error: String(e) }));
+  } finally {
+    if (browser) await browser.close();
+  }
+})();
+"""
+
+
+def _find_playwright_modules() -> Path | None:
+    """Return path to a node_modules directory that contains playwright."""
+    if (_PLAYWRIGHT_MODULES / "playwright").exists():
+        return _PLAYWRIGHT_MODULES
+    # fall back: search npx cache
+    npx_cache = Path.home() / ".npm/_npx"
+    if npx_cache.is_dir():
+        for entry in sorted(npx_cache.iterdir()):
+            candidate = entry / "node_modules"
+            if (candidate / "playwright").exists() or (
+                candidate / "playwright-core"
+            ).exists():
+                return candidate
+    return None
+
+
+def browser_cpu(
+    url: str,
+    idle_s: float = 5.0,
+    pans: int = 3,
+) -> dict:
+    """Measure browser renderer-thread CPU at idle and while panning via CDP.
+
+    Uses Playwright (found in the npx cache) to drive a headless Chromium.
+    Falls back gracefully with an ``error`` key when no browser is available.
+
+    Metric: CDP ``Performance.getMetrics`` ``TaskDuration`` /
+    ``ScriptDuration`` deltas divided by the ``Timestamp`` delta (seconds).
+    CPU % = TaskDuration_delta / Timestamp_delta * 100.  The Timestamp clock
+    is monotonic within the renderer process (seconds since process start);
+    it is not correlated with wall time, but the ratio is accurate.
+    """
+    pw_modules = _find_playwright_modules()
+    if pw_modules is None:
+        return {"error": "playwright node modules not found (run: npx playwright install)"}
+    node = next(
+        (Path(p) for p in ("/usr/bin/node", "/usr/local/bin/node") if Path(p).exists()),
+        None,
+    )
+    if node is None:
+        return {"error": "node not found"}
+    env = {
+        **os.environ,
+        "PW_MODULES": str(pw_modules),
+        "DASH_URL": url,
+        "IDLE_S": str(idle_s),
+        "PANS": str(pans),
+    }
+    timeout = idle_s + pans * 3 + 90
+    result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
+    for line in reversed((result.stdout + "\n" + result.stderr).splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                pass
+    return {"error": (result.stderr or result.stdout).strip()[-300:]}
+
+
 # ------------------------------------------------------------------ git
 
 
@@ -457,6 +612,26 @@ def report(args) -> str:
             lines += [f"- {share:.0f}% `{frame}`" for share, frame in frames] or [
                 "- no samples"
             ]
+
+    if getattr(args, "browser", False):
+        burl = getattr(args, "browser_url", "http://localhost:5173")
+        lines += ["", "### Browser main-thread CPU (CDP Performance.getMetrics)"]
+        bcpu = browser_cpu(burl, idle_s=getattr(args, "browser_idle_s", 5.0))
+        if "error" in bcpu:
+            lines.append(f"- browser measurement unavailable: {bcpu['error']}")
+        else:
+            lines.append(
+                f"- **idle**: task {bcpu.get('idle_cpu_pct', '?'):.1f} % CPU, "
+                f"script {bcpu.get('idle_script_pct', '?'):.1f} % "
+                f"(over {bcpu.get('idle_wall_s', 0):.1f} s)"
+            )
+            lines.append(
+                f"- **panning**: task {bcpu.get('pan_cpu_pct', '?'):.1f} % CPU, "
+                f"script {bcpu.get('pan_script_pct', '?'):.1f} % "
+                f"(over {bcpu.get('pan_wall_s', 0):.1f} s)"
+            )
+            lines.append(f"  URL: {burl}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -483,6 +658,22 @@ def main() -> int:
         default="",
         metavar="SHA",
         help="git commit recorded in the header (default: auto-detected from this repo)",
+    )
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="measure browser main-thread CPU via headless Chromium + Playwright CDP",
+    )
+    parser.add_argument(
+        "--browser-url",
+        default="http://localhost:5173",
+        help="dashboard URL for --browser (default: http://localhost:5173)",
+    )
+    parser.add_argument(
+        "--browser-idle-s",
+        type=float,
+        default=5.0,
+        help="idle measurement window for --browser in seconds (default: 5)",
     )
     args = parser.parse_args()
     text = report(args)
