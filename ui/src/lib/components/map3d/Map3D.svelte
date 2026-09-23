@@ -743,7 +743,9 @@
       now: timestamp,
       hidden: document.hidden,
       moving: timestamp < movingUntil,
-      decorating: scene.robotManager.animating,
+      // A robot held through a gap in its source frame needs frames to keep
+      // coming, or its grace period never expires and it is drawn for ever.
+      decorating: scene.robotManager.animating || scene.robotManager.retaining,
       fps: QUALITY[quality].fps
     });
     if (decision.render || decision.again) rafId = requestAnimationFrame(tick);

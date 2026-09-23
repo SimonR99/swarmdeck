@@ -23,6 +23,12 @@ export class Robot3DManager {
    * being drawn for it. It is the only marker here that animates on its own.
    */
   public animating = false;
+  /**
+   * A robot is being held through a short gap in the source frame. Its grace
+   * period is measured on the render clock, so frames have to keep coming for
+   * it to expire.
+   */
+  public retaining = false;
   private entries = new Map<string, Robot3DEntry>();
   private presence = new RobotPresenceTracker(3);
 
@@ -106,6 +112,8 @@ export class Robot3DManager {
         this.entries.delete(id);
       }
     }
+    const present = new Set(robots.map((robot) => robot.robot_id));
+    this.retaining = [...this.entries.keys()].some((id) => !present.has(id));
   }
 
   private createRobot3D(robot: MapRobot): Robot3DEntry {
@@ -345,5 +353,6 @@ export class Robot3DManager {
     this.entries.clear();
     this.presence.clear();
     this.animating = false;
+    this.retaining = false;
   }
 }
