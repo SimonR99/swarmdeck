@@ -43,7 +43,10 @@ LOCAL_MODEL     ?= qwen3.5:9b-q4_K_M
 
 # Compose definitions
 export SSH_AUTH_SOCK_REAL ?= $(shell readlink -f $${SSH_AUTH_SOCK:-/dev/null} 2>/dev/null || echo "/dev/null")
-COMPOSE       ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
+# Compose interpolates every service, even for `down`, and SWARMDECK_MISSION_ID
+# is required. Reuse the mission epoch scripts/sim-up keeps, when there is one.
+SIM_ENV_FILE  ?= sessions/simulation-reset/deployment.env
+COMPOSE       ?= docker compose -p $(COMPOSE_PROJECT) $(if $(wildcard $(SIM_ENV_FILE)),--env-file $(SIM_ENV_FILE)) -f deploy/compose/docker-compose.yml
 GPU_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
 DRI_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
 ZENOH_COMPOSE ?= -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
