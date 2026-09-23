@@ -13,6 +13,7 @@
 #include <regex>
 #include <sstream>
 #include <tuple>
+#include <unordered_set>
 #include <unistd.h>
 
 namespace swarmdeck_mapping
@@ -39,6 +40,39 @@ bool commonPosesAgree(
     const auto found = previous.find(submap.external_id);
     if (found != previous.end() && found->second != submap.T_component_submap)
       return false;
+  }
+  return true;
+}
+bool appendOnly(
+    const ParsedComponentSnapshot& next, const NativeGeometrySnapshot& prior)
+{
+  if (next.submaps.size() < prior.keyframes.size()) return false;
+  std::unordered_map<std::string, const ParsedSubmap*> by_id;
+  std::unordered_map<std::string, Matrix4> poses;
+  for (const auto& submap : next.submaps) by_id.emplace(submap.external_id, &submap);
+  for (const auto& pose : prior.submap_poses) poses.emplace(pose.external_id, pose.T_component_submap);
+  for (const auto& keyframe : prior.keyframes)
+  {
+    const auto found = by_id.find(keyframe.external_id);
+    const auto old_pose = poses.find(keyframe.external_id);
+    if (found == by_id.end() || old_pose == poses.end()) return false;
+    const auto& submap = *found->second;
+    if (submap.geometry_revision != keyframe.geometry_revision ||
+        submap.T_component_submap != old_pose->second ||
+        submap.chunks.size() != keyframe.chunk_fingerprints.size())
+      return false;
+    if (submap.observed_at_ns != keyframe.observed_at_ns ||
+        submap.ray_evidence_qualified != keyframe.ray_evidence_qualified ||
+        submap.sensor_origins_local.size() != keyframe.sensor_origins_local.size())
+      return false;
+    for (std::size_t i = 0; i < submap.sensor_origins_local.size(); ++i)
+    {
+      const auto& a = submap.sensor_origins_local[i];
+      const auto& b = keyframe.sensor_origins_local[i];
+      if (a.x != b.x || a.y != b.y || a.z != b.z) return false;
+    }
+    for (std::size_t i = 0; i < submap.chunks.size(); ++i)
+      if (submap.chunks[i].fingerprint() != keyframe.chunk_fingerprints[i]) return false;
   }
   return true;
 }
@@ -220,8 +254,11 @@ try
   std::lock_guard<std::mutex> publication_lock(publication_mutex_);
   std::unique_lock<std::mutex> operation_lock(operation_mutex_);
   std::shared_ptr<MolaSubmapBridge> provider;
+  std::shared_ptr<NativePlannerAccumulator> previous_planner;
+  std::shared_ptr<NativePlannerAccumulator> planner_state;
   std::optional<NativeGeometrySnapshot> prior;
   std::size_t old_points = 0;
+  std::size_t old_units = 0;
   std::size_t resident_points = 0;
   {
     std::lock_guard<std::mutex> registry_lock(mutex_);
@@ -234,6 +271,8 @@ try
     else
     {
       provider = found->second.provider;
+      previous_planner = found->second.planner;
+      old_units = found->second.resident_units;
       old_points = found->second.point_count;
       prior = provider->currentSnapshot();
     }
@@ -276,13 +315,18 @@ try
   if (mode == ApplyMode::PoseOnly &&
       parsed.identity.native_geometry_digest != prior->identity.native_geometry_digest)
     throw RuntimeError(RuntimeErrorCode::Conflict, "pose-only request changed native geometry identity");
+  const auto incremental_prior =
+      prior && prior->compaction_resolution_m > 0 && appendOnly(parsed, *prior)
+          ? &*prior
+          : nullptr;
+  const auto reported_mode = mode;
+  // Compaction merges coincident geometry across frames. A real correction
+  // must recover the raw source, not move a lossy representative alone.
+  if (mode == ApplyMode::PoseOnly && prior->compaction_resolution_m > 0 &&
+      !incremental_prior)
+    mode = ApplyMode::Replace;
 
-  const auto candidate_points =
-      mode == ApplyMode::Replace ? parsed.declared_point_count : old_points;
-  // Bound the temporary copy/build as well as the post-commit resident set.
-  if (candidate_points > limits_.max_resident_points -
-                             std::min(limits_.max_resident_points, resident_points))
-    throw RuntimeError(RuntimeErrorCode::ResourceLimit, "candidate map exceeds resident point limit");
+  std::size_t candidate_points = mode == ApplyMode::Replace ? 0 : old_points;
 
   const bool resident = static_cast<bool>(provider);
   if (!provider) provider = std::make_shared<MolaSubmapBridge>();
@@ -301,7 +345,41 @@ try
         std::shared_ptr<const NativePlannerGrid> planner;
         try
         {
-          planner = buildNativePlannerGrid(candidate, plannerGridLimits());
+          std::unordered_set<std::string> previous_ids;
+          if (incremental_prior && previous_planner)
+            for (const auto& frame : incremental_prior->keyframes)
+              previous_ids.insert(frame.external_id);
+          bool reuse = incremental_prior && previous_planner;
+          for (const auto& frame : parsed.submaps)
+            if (!previous_ids.count(frame.external_id) && reuse &&
+                frame.observed_at_ns < previous_planner->newestStamp())
+              reuse = false;
+          planner_state = reuse
+              ? std::make_shared<NativePlannerAccumulator>(*previous_planner)
+              : std::make_shared<NativePlannerAccumulator>(plannerGridLimits());
+          std::vector<const ParsedSubmap*> pending;
+          for (const auto& frame : parsed.submaps)
+            if (!reuse || !previous_ids.count(frame.external_id))
+              pending.push_back(&frame);
+          // Endpoints precede rays so later endpoint observations fence clearing.
+          for (const auto* frame : pending)
+            planner_state->endpoints(loadRawSubmap(
+                *frame, request.chunks_dir, limits_.max_points_per_map));
+          const auto ray_budget = pending.empty() ? 0 :
+              plannerGridLimits().max_ray_steps / pending.size();
+          for (const auto* frame : pending)
+            planner_state->rays(loadRawSubmap(
+                *frame, request.chunks_dir, limits_.max_points_per_map), ray_budget);
+          const auto candidate_units = candidate.geometry_map->point_count() +
+                                       planner_state->residentUnits();
+          if (candidate_units > limits_.max_resident_points -
+                                    std::min(limits_.max_resident_points, resident_points))
+            throw std::runtime_error("candidate evidence exceeds resident budget");
+          planner = planner_state->snapshot(candidate.graph_version, candidate.identity);
+        }
+        catch (const std::length_error& error)
+        {
+          throw RuntimeError(RuntimeErrorCode::ResourceLimit, error.what());
         }
         catch (const std::invalid_argument& error)
         {
@@ -337,7 +415,13 @@ try
       std::vector<SubmapInput> geometry;
       try
       {
-        geometry = loadGeometry(parsed, request.chunks_dir, limits_.max_points_per_map);
+        geometry = loadGeometry(
+            parsed, request.chunks_dir, limits_.max_points_per_map,
+            incremental_prior);
+      }
+      catch (const std::length_error& error)
+      {
+        throw RuntimeError(RuntimeErrorCode::ResourceLimit, error.what());
       }
       catch (const std::invalid_argument&)
       {
@@ -347,6 +431,12 @@ try
       {
         throw RuntimeError(RuntimeErrorCode::Io, error.what());
       }
+      for (const auto& submap : geometry)
+        candidate_points += submap.points_local.size();
+      provider->setCompactionResolution(0.05);
+      if (candidate_points > limits_.max_resident_points -
+                                 std::min(limits_.max_resident_points, resident_points))
+        throw RuntimeError(RuntimeErrorCode::ResourceLimit, "candidate map exceeds resident point limit");
       apply_result = provider->replaceGeometrySnapshot(
           geometry, parsed.graph_version, parsed.canonical_metadata_json,
           parsed.identity, writer, false);
@@ -372,11 +462,18 @@ try
   }
   {
     std::lock_guard<std::mutex> registry_lock(mutex_);
+    const auto units = candidate_points +
+                       (planner_state ? planner_state->residentUnits() : 0);
     if (!resident)
-      contexts_.emplace(request.map_id, Context{provider, candidate_points});
+      contexts_.emplace(request.map_id, Context{provider, planner_state, candidate_points, units});
     else
-      contexts_.at(request.map_id).point_count = candidate_points;
-    resident_points_ = resident_points_ - old_points + candidate_points;
+    {
+      auto& context = contexts_.at(request.map_id);
+      context.point_count = candidate_points;
+      context.planner = planner_state;
+      context.resident_units = units;
+    }
+    resident_points_ = resident_points_ - old_units + units;
   }
   operation_lock.unlock();
   if (apply_result == MolaSubmapBridge::ApplyResult::Applied)
@@ -385,10 +482,10 @@ try
   return ApplyReport{
       request.request_id,
       request.map_id,
-      mode,
+      reported_mode,
       apply_result == MolaSubmapBridge::ApplyResult::Duplicate
           ? "duplicate"
-          : (mode == ApplyMode::Replace ? "replaced" : "corrected"),
+          : (reported_mode == ApplyMode::Replace ? "replaced" : "corrected"),
       *current,
       parsed.submaps.size(),
       current->geometry_map->point_count(),
@@ -426,7 +523,7 @@ bool PersistentMolaRuntime::release(const std::string& map_id)
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = contexts_.find(map_id);
   if (found == contexts_.end()) return false;
-  resident_points_ -= found->second.point_count;
+  resident_points_ -= found->second.resident_units;
   contexts_.erase(found);
   return true;
 }

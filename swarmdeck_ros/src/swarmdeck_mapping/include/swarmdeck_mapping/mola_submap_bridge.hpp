@@ -33,6 +33,8 @@ struct SubmapInput
   std::vector<PointXYZ> sensor_origins_local;
   std::uint64_t observed_at_ns{};
   bool ray_evidence_qualified{};
+  std::uint64_t geometry_revision{};
+  std::vector<std::string> chunk_fingerprints;
 };
 
 struct PoseUpdate
@@ -68,13 +70,15 @@ struct NativeKeyframeSnapshot
   std::string external_id;
   mola::KeyframePointCloudMap::KeyFrameID keyframe_id{};
   std::shared_ptr<const mrpt::maps::CSimplePointsMap> points_local;
-  std::vector<PointXYZ> sensor_origins_local;
   std::uint64_t observed_at_ns{};
+  std::vector<PointXYZ> sensor_origins_local;
+  // Source geometry identity for append-only native reuse.
+  std::uint64_t geometry_revision{};
   // True only when the source explicitly proves one origin applies to all
   // first returns and those returns are deskewed. Legacy metadata is false.
   bool ray_evidence_qualified{};
+  std::vector<std::string> chunk_fingerprints;
 };
-
 /**
  * One atomically captured native point-geometry publication.
  *
@@ -90,6 +94,9 @@ struct NativeGeometrySnapshot
   std::string canonical_metadata_json;
   std::vector<PoseUpdate> submap_poses;
   std::vector<NativeKeyframeSnapshot> keyframes;
+  // Nonzero when geometry was bounded by deterministic voxel compaction.
+  // This is native provenance, not part of the wire snapshot identity.
+  double compaction_resolution_m{};
 };
 
 /**
@@ -128,6 +135,7 @@ class MolaSubmapBridge final : public mola::MapSourceBase
       const std::string& canonical_metadata_json,
       const SnapshotIdentity& identity = {}, const BeforeCommit& before_commit = {},
       bool require_complete_membership = false, bool publish_update = true);
+  void setCompactionResolution(double resolution_m);
 
   [[nodiscard]] std::shared_ptr<const mola::KeyframePointCloudMap> currentMap() const;
   [[nodiscard]] std::optional<NativeGeometrySnapshot> currentSnapshot() const;
@@ -145,6 +153,7 @@ class MolaSubmapBridge final : public mola::MapSourceBase
   mutable std::mutex mutex_;
   std::shared_ptr<mola::KeyframePointCloudMap> map_;
   std::unordered_map<std::string, mola::KeyframePointCloudMap::KeyFrameID> ids_;
+  double compaction_resolution_m_{};
   std::optional<SolutionVersion> version_;
   SnapshotIdentity identity_;
   std::string metadata_json_;

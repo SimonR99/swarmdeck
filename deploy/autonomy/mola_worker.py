@@ -83,20 +83,14 @@ except ModuleNotFoundError:  # Imported as deploy.autonomy.mola_worker in tests.
     )
 
 SCHEMA = "swarmdeck.autonomy.v1"
-MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024 * 1024
-# The one point budget of a component. The native runtime derives its
-# snapshot loader, planner grid build and SDMGRID1 product limits from this
-# number (``swarmdeck_mapping/point_budget.hpp``, ``kMaxPointsPerMap``), and
-# the product's readers cap the point count independently:
-# ``autonomy/mola_mapping.py`` (``MAX_POINTS``) and MGG's ``MolaMap``
-# (``map.mola.max_voxels``, clamped to 2,000,000, bounds ``surface_count``).
-# Raising it past a reader's cap makes that reader reject every product. At
-# 4,096 endpoints per keyframe the budget holds 488 keyframes; a component
-# that outgrows it keeps its last product and reports the failure in
-# ``mola/worker.json`` (see ``WORKER_STATUS_VERSION``).
+# Shared native materialized-point limit, not the sum of historical captures.
+# Metric geometry and planner surface extrema are compacted independently;
+# original qualified rays feed retained planner evidence. MGG bounds materialized
+# samples through map.mola.max_voxels and verifies raw source counts separately.
 DEFAULT_MAX_POINTS_PER_MAP = 2_000_000
-# A replacement holds a component's old and new geometry at once.
+# A replacement holds old and new metric geometry and planner evidence at once.
 DEFAULT_MAX_RESIDENT_POINTS = 4 * DEFAULT_MAX_POINTS_PER_MAP
 DEFAULT_MAX_MAPS = 256
 DEFAULT_PARALLEL_PEERS = 4

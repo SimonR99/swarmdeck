@@ -22,6 +22,7 @@ from autonomy.contracts import (
 )
 from autonomy.replication import (
     MAX_CHUNK_BYTES,
+    MAX_CHUNK_REFS,
     canonical,
     chunk_hash,
     identity,
@@ -31,7 +32,7 @@ from autonomy.replication import (
 MAX_ENVELOPES = 128
 MAX_SUBMAPS = 16_384
 MAX_SOURCE_SUBMAPS = 65_536
-MAX_CHUNKS = 4_096
+MAX_CHUNKS = MAX_CHUNK_REFS
 XYZ_ENCODING = "application/vnd.swarmdeck.xyz-f32.v1"
 XYZRGBA_ENCODING = "application/vnd.swarmdeck.xyzrgba-f32-u8.v1"
 
@@ -205,6 +206,7 @@ def _submap_value(submap: SubmapRevision, declared: dict[str, int]) -> dict:
         "resolution_m": submap.resolution_m,
         "replaces_geometry_revision": submap.replaces_geometry_revision,
         "observed_at_ns": submap.observed_at_ns,
+        "sensor_origins": submap.sensor_origins,
         "chunks": [_chunk_value(chunk) for chunk in submap.chunks],
     }
 

@@ -89,6 +89,7 @@ struct NativePlannerGrid
   double ray_angular_resolution_rad{};
   double ray_step_fraction{};
   std::size_t point_count{};
+  std::size_t source_point_count{};
   std::size_t ray_steps{};
   std::size_t qualified_ray_keyframes{};
   // Endpoints withheld from `occupied` and `surfaces` because later qualified
@@ -98,6 +99,24 @@ struct NativePlannerGrid
   std::vector<PlannerVoxel> occupied;
   std::vector<PlannerVoxel> free;
   std::vector<PlannerSurfaceSample> surfaces;
+};
+
+/** Incremental evidence from original measured endpoints, independent of metric compaction. */
+class NativePlannerAccumulator
+{
+ public:
+  explicit NativePlannerAccumulator(const PlannerGridLimits& limits);
+  NativePlannerAccumulator(const NativePlannerAccumulator& other);
+  ~NativePlannerAccumulator();
+  void endpoints(const SubmapInput& frame);
+  void rays(const SubmapInput& frame, std::size_t work_budget);
+  [[nodiscard]] std::uint64_t newestStamp() const;
+  [[nodiscard]] std::size_t residentUnits() const;
+  [[nodiscard]] std::shared_ptr<const NativePlannerGrid> snapshot(
+      const SolutionVersion& version, const SnapshotIdentity& identity) const;
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 struct PlannerGridArtifact

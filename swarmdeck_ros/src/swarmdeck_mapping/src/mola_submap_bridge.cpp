@@ -62,11 +62,14 @@ NativeGeometrySnapshot makeSnapshot(
     const SolutionVersion& version, const SnapshotIdentity& identity,
     const std::string& metadata,
     const std::unordered_map<std::string, Matrix4>& poses,
-    const std::unordered_map<std::string, NativeKeyframeSnapshot>& keyframes)
+    const std::unordered_map<std::string, NativeKeyframeSnapshot>& keyframes,
+    const double compaction_resolution_m)
 {
-  return NativeGeometrySnapshot{
+  auto result = NativeGeometrySnapshot{
       map, version, identity, metadata, sortedPoses(poses),
       sortedKeyframes(keyframes)};
+  result.compaction_resolution_m = compaction_resolution_m;
+  return result;
 }
 }  // namespace
 
@@ -166,8 +169,10 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
     next_keyframes.emplace(
         submap.external_id,
         NativeKeyframeSnapshot{
-            submap.external_id, *internal_id, cloud, submap.sensor_origins_local,
-            submap.observed_at_ns, submap.ray_evidence_qualified});
+            submap.external_id, *internal_id, cloud, submap.observed_at_ns,
+            submap.sensor_origins_local, submap.geometry_revision,
+            submap.ray_evidence_qualified,
+            submap.chunk_fingerprints});
   }
 
   bool duplicate = false;
@@ -205,7 +210,7 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
     if (before_commit)
       before_commit(makeSnapshot(
           candidate, version, identity, canonical_metadata_json,
-          candidate_poses, candidate_keyframes));
+          candidate_poses, candidate_keyframes, compaction_resolution_m_));
     if (!duplicate)
     {
       map_ = next_map;
@@ -251,7 +256,8 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
           throw std::invalid_argument("conflicting MOLA manifest identity");
         if (before_commit)
           before_commit(makeSnapshot(
-              map_, version, identity, canonical_metadata_json, poses_, keyframes_));
+              map_, version, identity, canonical_metadata_json, poses_, keyframes_,
+              compaction_resolution_m_));
         identity_ = identity;
         metadata_json_ = canonical_metadata_json;
         return ApplyResult::Duplicate;
@@ -280,7 +286,7 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
     if (before_commit)
       before_commit(makeSnapshot(
           current, version, identity, canonical_metadata_json, candidate_poses,
-          keyframes_));
+          keyframes_, compaction_resolution_m_));
     map_ = current;
     poses_ = std::move(candidate_poses);
     version_ = version;
@@ -290,6 +296,14 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
   if (publish_update)
     publish(current, version, canonical_metadata_json, identity.reference_frame);
   return ApplyResult::Applied;
+}
+
+void MolaSubmapBridge::setCompactionResolution(const double resolution_m)
+{
+  if (!(std::isfinite(resolution_m) && resolution_m >= 0))
+    throw std::invalid_argument("invalid geometry compaction resolution");
+  std::lock_guard<std::mutex> lock(mutex_);
+  compaction_resolution_m_ = resolution_m;
 }
 
 std::shared_ptr<const mola::KeyframePointCloudMap> MolaSubmapBridge::currentMap() const
@@ -302,7 +316,9 @@ std::optional<NativeGeometrySnapshot> MolaSubmapBridge::currentSnapshot() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!version_) return std::nullopt;
-  return makeSnapshot(map_, *version_, identity_, metadata_json_, poses_, keyframes_);
+  return makeSnapshot(
+      map_, *version_, identity_, metadata_json_, poses_, keyframes_,
+      compaction_resolution_m_);
 }
 
 void MolaSubmapBridge::publishSnapshot(const NativeGeometrySnapshot& snapshot)

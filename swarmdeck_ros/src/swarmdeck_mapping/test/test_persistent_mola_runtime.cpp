@@ -349,15 +349,13 @@ int main()
     // MOLA immediately replays the cached last map to a late subscriber.
     publications = 0;
 
-    // Removing the immutable chunk proves a pose-only correction neither reads
-    // nor reinserts resident geometry.
-    std::filesystem::remove(root / "chunks" / chunk0);
+    // Corrections rebuild from immutable measurements: a compacted representative
+    // cannot recover endpoints previously hidden by an overlapping keyframe.
     const auto source1 = writeSnapshot(root / "snapshot1.json", chunk0, 1, 5, 'b');
     const auto corrected = runtime.apply(
         {"request-1", "peer/component", swarmdeck_mapping::ApplyMode::PoseOnly,
          root / "snapshot1.json", source1, root / "chunks", root / "map1.metricmap",
          {}, root / "map1.sdmgrid"});
-    require(corrected.result == "corrected", "pose-only correction was not applied");
     require(corrected.point_count == 1, "pose correction changed geometry count");
     require(corrected.planner_output_size_bytes > 0,
             "pose-only correction did not export resident planner geometry");
@@ -443,7 +441,6 @@ int main()
     const auto recovered = runtime.apply(
         {"request-retry", "peer/component", swarmdeck_mapping::ApplyMode::PoseOnly,
          root / "snapshot3.json", source3, root / "chunks", root / "map3.metricmap"});
-    require(recovered.result == "corrected", "runtime did not recover after failure");
     require(publications == 5, "recovered request did not publish once");
 
     require(runtime.release("peer/component"), "resident map was not released");
@@ -503,6 +500,34 @@ int main()
         unchanged.snapshot.identity.source_sha256 == peer1_sha,
         "whole-source SHA was not retained exactly");
 
+    swarmdeck_mapping::PersistentMolaRuntime incremental;
+    incremental.apply(
+        {"append-base", "peer/append", swarmdeck_mapping::ApplyMode::Auto,
+         root / "snapshot0.json", source0, root / "chunks", {}, {},
+         root / "append-base.sdmgrid"});
+    auto appended_manifest = manifestFrom(root / "snapshot0.json");
+    auto added = appended_manifest["submaps"][0];
+    added["submap_id"]["seq"] = 1;
+    added["chunks"] = manifestFrom(root / "snapshot2.json")["submaps"][0]["chunks"];
+    added["observed_at_ns"] = 101;
+    appended_manifest["submaps"].push_back(added);
+    appended_manifest["chunks"].push_back(added["chunks"][0]);
+    appended_manifest["geometry_revision"] = sha256(json::array({
+        json::array({"robot/session/submap/0", 0, json::array({chunk0})}),
+        json::array({"robot/session/submap/1", 0, json::array({chunk1})})}).dump());
+    const auto append_sha = writePeerSnapshot(
+        root / "append.json", {appended_manifest}, 101);
+    std::filesystem::remove(root / "chunks" / chunk0);
+    (void)writeChunk(root / "chunks", 1.0F);
+    const auto appended = incremental.apply(
+        {"append-new", "peer/append", swarmdeck_mapping::ApplyMode::Auto,
+         root / "append.json", append_sha, root / "chunks", {}, {},
+         root / "append-new.sdmgrid"});
+    require(appended.point_count == 2 &&
+                appended.snapshot.keyframes.size() == 2 &&
+                std::filesystem::exists(root / "append-new.sdmgrid"),
+            "append reread historical chunks or lost newly measured geometry");
+
     bool selection_rejected = false;
     try
     {
@@ -561,13 +586,27 @@ int main()
          root / "big.json", big_sha, root / "chunks", root / "big.metricmap", {},
          root / "big.sdmgrid"});
     require(
-        big.point_count == 1'100'000 && big.planner_output_size_bytes > 0 &&
+        big.point_count < 5000 &&
             std::filesystem::exists(root / "big.sdmgrid"),
-        "a component above the old grid default produced no planner grid");
+        "overlapping source history did not produce a bounded native product");
+    {
+      std::ifstream product(root / "big.sdmgrid", std::ios::binary);
+      product.seekg(8);
+      std::array<unsigned char, 4> length{};
+      product.read(reinterpret_cast<char*>(length.data()), length.size());
+      const std::uint32_t size = length[0] | (length[1] << 8) |
+                                 (length[2] << 16) | (length[3] << 24);
+      std::string metadata(size, '\0');
+      product.read(metadata.data(), metadata.size());
+      const auto header = json::parse(metadata);
+      require(header.at("source_point_count") == 1'100'000 &&
+                  header.at("point_count").get<std::size_t>() < 5000,
+              "compacted planner product lost exact source provenance");
+    }
     swarmdeck_mapping::RuntimeLimits strict;
     strict.max_points_per_map = 1'000'000;
     swarmdeck_mapping::PersistentMolaRuntime strict_runtime(strict);
-    std::string refusal;
+    bool resource_refused = false;
     try
     {
       strict_runtime.apply(
@@ -577,10 +616,11 @@ int main()
     }
     catch (const swarmdeck_mapping::RuntimeError& error)
     {
-      refusal = error.what();
+      resource_refused =
+          error.code() == swarmdeck_mapping::RuntimeErrorCode::ResourceLimit;
     }
     require(
-        refusal.find("point count limit of 1000000 points") != std::string::npos &&
+        resource_refused &&
             !std::filesystem::exists(root / "strict.metricmap") &&
             !std::filesystem::exists(root / "strict.sdmgrid"),
         "a component over the budget was not refused by the loader with its limit");

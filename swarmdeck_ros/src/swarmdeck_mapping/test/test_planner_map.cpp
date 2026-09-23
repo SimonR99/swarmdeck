@@ -602,7 +602,7 @@ int main()
   require(bytes.substr(0, 8) == "SDMGRID1", "planner grid magic is invalid");
   const auto metadata_size = readU32(bytes, 8);
   const auto metadata = nlohmann::json::parse(bytes.substr(12, metadata_size));
-  require(metadata.at("schema") == "swarmdeck.mola_planner_grid.v1",
+  require(metadata.at("schema") == "swarmdeck.mola_planner_grid.v2",
           "planner grid schema is invalid");
   require(metadata.at("free_count") == 0, "explicit empty free count is absent");
   require(metadata.at("qualified_ray_keyframes") == 0,
@@ -616,8 +616,7 @@ int main()
       "exported surface and retired counts do not cover the point count");
   require(first.size_bytes == bytes.size(), "reported planner byte size is wrong");
 
-  // SDMGRID1 carries the retirement so every reader can still cross-check
-  // point_count against the manifest chunks.
+  // SDMGRID1 carries materialized retirement and independent raw provenance.
   (void)writeNativePlannerGrid(*retired, root / "retired.sdmgrid");
   std::ifstream retired_input(root / "retired.sdmgrid", std::ios::binary);
   const std::string retired_bytes(
@@ -645,6 +644,34 @@ int main()
   require(
       contract_rejected,
       "planner export accepted surface and retired counts below point_count");
+  // Historical overlap must not consume the materialized endpoint budget.
+  PlannerGridLimits compact_limits;
+  compact_limits.max_points = 8;
+  NativePlannerAccumulator compact(compact_limits);
+  for (int i = 0; i < 1000; ++i)
+    compact.endpoints(capture("overlap", {{0.91F, 0.01F, 0.01F}}, 1, false));
+  auto compact_grid = compact.snapshot(version(1, 'a'), identity('a'));
+  require(compact_grid->source_point_count == 1000 &&
+              compact_grid->surfaces.size() == 1 &&
+              contains(compact_grid->occupied, {4, 0, 0}),
+          "overlapping history did not compact to its observed surface");
+  for (std::uint64_t stamp = 2; stamp <= 4; ++stamp)
+  {
+    auto later = capture("clear", {{2.11F, 0.01F, 0.01F}}, stamp, true);
+    compact.endpoints(later);
+    compact.rays(later, 1000);
+  }
+  compact_grid = compact.snapshot(version(2, 'b'), identity('b'));
+  require(!contains(compact_grid->occupied, {4, 0, 0}) &&
+              contains(compact_grid->free, {4, 0, 0}) &&
+              compact_grid->retired_count == 1,
+          "compaction lost original later ray clearing evidence");
+  compact.endpoints(capture("return", {{0.91F, 0.01F, 0.01F}}, 5, false));
+  compact_grid = compact.snapshot(version(3, 'c'), identity('c'));
+  require(contains(compact_grid->occupied, {4, 0, 0}) &&
+              !contains(compact_grid->free, {4, 0, 0}),
+          "new endpoint did not reconfirm a retired obstacle");
+  (void)writeNativePlannerGrid(*compact_grid, root / "compact.sdmgrid");
   std::filesystem::remove_all(root);
   return 0;
 }

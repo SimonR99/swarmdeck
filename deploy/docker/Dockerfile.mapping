@@ -74,8 +74,7 @@ RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py
 # Drive ``swarmdeck-mola-import --serve`` through one persistent JSONL process.
 # The script has per-read deadlines and the outer timeout bounds image build
 # time if the native process hangs before ready or response.
-# Create this fixture in the same layer: overlayfs cannot rename a directory
-# inherited from an earlier layer when the smoke hides its geometry chunks.
+# Create this fixture in the same layer so the smoke owns every input and output.
 RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/protocol-fixture \
     && source /opt/ros/jazzy/setup.bash \
     && timeout 45s python3 /usr/local/bin/mola-jsonl-smoke.py --root /tmp/protocol-fixture

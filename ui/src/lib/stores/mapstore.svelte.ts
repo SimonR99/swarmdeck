@@ -146,14 +146,15 @@ function clearNetworkLayer(robotId: string | null = null) {
 
 /**
  * The raster on show: a robot's own map (`robot:<id>`, its component in its
- * own frame) in local mode, the fleet map otherwise. Local falls back to the
- * fleet map until the server has rasterized that robot's component.
+ * own frame) in local mode, the fleet map otherwise. A local view never falls
+ * back to a fleet raster: showing the global product under a local label is
+ * worse than waiting for the selected robot's own publication.
  */
-function shownScope() {
+function shownScope(): OptimizedScope | undefined {
   if (state.viewMode === 'local' && state.viewRobot) {
-    const own = robotOptimizedScope(state.viewRobot);
-    const entry = state.optimizedScopes.find((scope) => scope.scope === own);
-    if (entry) return entry;
+    return state.optimizedScopes.find(
+      (scope) => scope.scope === robotOptimizedScope(state.viewRobot!)
+    );
   }
   return selectGlobalOptimizedScope(state.optimizedScopes);
 }
@@ -190,7 +191,7 @@ export const mapStore = {
     const shown = state.optimizedScopes.find((entry) => entry.scope === state.globalOptimizedScope);
     if (state.viewMode === 'local' && state.viewRobot) {
       const own = shown?.scope === robotOptimizedScope(state.viewRobot);
-      return `${state.viewRobot.replace(/^robot_/, 'R')} · ${own ? 'own map' : 'fleet map (own map pending)'}`;
+      return `${state.viewRobot.replace(/^robot_/, 'R')} · ${own ? 'own map' : 'own map pending'}`;
     }
     return `Deployment map · ${shown?.robots.length ?? 0} robots`;
   },
@@ -276,7 +277,10 @@ export const mapStore = {
       const response = await fetch('/api/map/optimized', { cache: 'no-store' });
       if (!response.ok) return;
       const body = (await response.json()) as { maps?: OptimizedScope[] };
-      state.optimizedScopes = (body.maps ?? []).filter((entry) => !entry.scope.startsWith('robot:'));
+      // Keep per-robot rasters in the catalogue: local mode resolves the
+      // selected robot to `robot:<id>`. Global ranking deliberately ignores
+      // these scopes, so retaining them cannot contaminate fleet selection.
+      state.optimizedScopes = body.maps ?? [];
       state.revision++;
     } catch (error) {
       console.warn('[swarmdeck] optimized map index failed', error);
@@ -318,8 +322,15 @@ export const mapStore = {
       const previous = state.globalOptimizedScope;
       await this.loadOptimizedScopes();
       const next = shownScope();
-      const seqChanged = next !== undefined && next.seq !== undefined && next.seq !== state.seq;
-      if (next?.scope !== previous || seqChanged || !state.ready) await this.loadGlobalOptimized();
+      if (!next) {
+        if (state.ready) {
+          clearGrid();
+          state.revision++;
+        }
+        return;
+      }
+      const seqChanged = next.seq !== undefined && next.seq !== state.seq;
+      if (next.scope !== previous || seqChanged || !state.ready) await this.loadGlobalOptimized();
     } finally {
       globalRefreshInFlight = false;
     }
@@ -343,18 +354,20 @@ export const mapStore = {
     state.viewMode = preference === 'local' || (preference === 'auto' && robotId !== null) ? 'local' : 'global';
     state.viewRobot = state.viewMode === 'local' ? robotId : null;
     loadGeneration++;
+    clearGrid();
     state.revision++;
     await this.loadOptimizedScopes();
     await this.loadGlobalOptimized();
   },
-
   async selectRobotView(robotId: string | null, force = false) {
     const mode = robotId && state.viewPreference === 'local' ? 'local' : 'global';
-    const changed = state.viewMode !== mode || state.viewRobot !== (mode === 'local' ? robotId : null);
+    const nextRobot = mode === 'local' ? robotId : null;
+    const changed = state.viewMode !== mode || state.viewRobot !== nextRobot;
     state.viewMode = mode;
-    state.viewRobot = mode === 'local' ? robotId : null;
+    state.viewRobot = nextRobot;
     if (changed || force || !state.ready) {
       loadGeneration++;
+      clearGrid();
       await this.loadOptimizedScopes();
       await this.loadGlobalOptimized();
     }

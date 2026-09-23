@@ -6,8 +6,9 @@ The transport envelope is deliberately independent of a mapper's internal types.
 
 from __future__ import annotations
 
-import hashlib
+from copy import deepcopy
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 import os
@@ -23,13 +24,25 @@ from uuid import UUID
 from .map_epochs import robot_run_id
 
 MAX_CHUNK_BYTES = 8 * 1024 * 1024
-MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_CHUNK_REFS = 65_536
+MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _ROBOT = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 
 
 class RevisionConflict(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        resync: bool = False,
+        base_revision: int | None = None,
+        current_revision: int | None = None,
+    ):
+        super().__init__(message)
+        self.resync = resync
+        self.base_revision = base_revision
+        self.current_revision = current_revision
 
 
 class MissingChunks(ValueError):
@@ -507,6 +520,209 @@ class ReplicaStore:
             )
             return True
 
+    @staticmethod
+    def _submap_key(value):
+        if not isinstance(value, dict):
+            raise ValueError("submap must be an object")
+        key = value.get("submap_id")
+        if not isinstance(key, dict):
+            raise ValueError("submap_id must be an object")
+        try:
+            result = (
+                key["robot_id"],
+                key["session_id"],
+                key["seq"],
+            )
+        except KeyError as exc:
+            raise ValueError("submap_id is incomplete") from exc
+        if (
+            not isinstance(result[0], str)
+            or not isinstance(result[1], str)
+            or type(result[2]) is not int
+        ):
+            raise ValueError("submap_id is invalid")
+        return result
+
+    @classmethod
+    def _manifest_key(cls, value):
+        if not isinstance(value, dict):
+            raise ValueError("manifest must be an object")
+        revision = value.get("graph_revision")
+        if not isinstance(revision, dict) or not isinstance(
+            revision.get("component_id"), str
+        ):
+            raise ValueError("manifest graph_revision is required")
+        return revision["component_id"]
+
+    def _expand_delta(self, delta: dict) -> dict:
+        cls = type(self)
+        if delta.get("version") != 2 or delta.get("kind") != "delta":
+            raise ValueError("Invalid replica delta")
+        robot, session = delta.get("robot_id"), delta.get("session_id")
+        identity(robot, session)
+        base = delta.get("base_revision")
+        revision = delta.get("revision")
+        if (
+            type(base) is not int
+            or base < 0
+            or type(revision) is not int
+            or revision <= base
+        ):
+            raise ValueError("Invalid replica delta revision")
+        previous = self.get(robot, session)
+        if previous is None:
+            raise RevisionConflict(
+                "Delta base is unavailable; full replica resync required",
+                resync=True,
+                base_revision=base,
+                current_revision=None,
+            )
+        current_revision = previous.get("revision")
+        if current_revision != base:
+            raise RevisionConflict(
+                "Delta base revision is not current; full replica resync required",
+                resync=True,
+                base_revision=base,
+                current_revision=current_revision,
+            )
+        previous_snapshot = previous.get("snapshot")
+        patch = delta.get("snapshot_delta")
+        if not isinstance(previous_snapshot, dict) or not isinstance(patch, dict):
+            raise ValueError("Invalid replica delta snapshot")
+        if patch.get("schema") != previous_snapshot.get("schema"):
+            raise ValueError("Replica delta schema mismatch")
+        snapshot_id = patch.get("snapshot_id")
+        generated_at_ns = patch.get("generated_at_ns")
+        if (
+            not isinstance(snapshot_id, str)
+            or not _HASH.fullmatch(snapshot_id)
+            or type(generated_at_ns) is not int
+            or generated_at_ns < 0
+        ):
+            raise ValueError("Invalid replica delta snapshot identity")
+        components = patch.get("components")
+        removed_components = patch.get("removed_components", [])
+        if not isinstance(components, list) or not isinstance(removed_components, list):
+            raise ValueError("Invalid replica delta components")
+        manifests = {
+            cls._manifest_key(manifest): dict(manifest)
+            for manifest in previous_snapshot.get("manifests", [])
+        }
+        if len(manifests) != len(previous_snapshot.get("manifests", [])):
+            raise ValueError("Replica snapshot repeats a component")
+        removed = set()
+        for component in removed_components:
+            if not isinstance(component, str) or component in removed:
+                raise ValueError("Invalid removed component")
+            removed.add(component)
+            manifests.pop(component, None)
+        changed = set()
+        for component in components:
+            if not isinstance(component, dict):
+                raise ValueError("Replica component delta must be an object")
+            component_id = component.get("component_id")
+            metadata = component.get("manifest")
+            if (
+                not isinstance(component_id, str)
+                or component_id in changed
+                or component_id in removed
+                or not isinstance(metadata, dict)
+            ):
+                raise ValueError("Invalid replica component delta")
+            if component_id != cls._manifest_key(metadata):
+                raise ValueError("Replica component delta identity mismatch")
+            changed.add(component_id)
+            manifest = dict(metadata)
+            prior = manifests.get(component_id)
+            prior_submaps = (
+                {cls._submap_key(item): dict(item) for item in prior.get("submaps", [])}
+                if prior is not None
+                else {}
+            )
+            upserts = component.get("upsert_submaps", [])
+            removed_submaps = component.get("removed_submaps", [])
+            pose_updates = component.get("pose_updates", [])
+            if (
+                not isinstance(upserts, list)
+                or not isinstance(removed_submaps, list)
+                or not isinstance(pose_updates, list)
+            ):
+                raise ValueError("Invalid replica submap delta")
+            removed_keys = set()
+            for item in removed_submaps:
+                key = cls._submap_key({"submap_id": item})
+                if key in removed_keys:
+                    raise ValueError("Replica delta repeats a removed submap")
+                removed_keys.add(key)
+                prior_submaps.pop(key, None)
+            for item in upserts:
+                key = cls._submap_key(item)
+                if key in removed_keys:
+                    raise ValueError("Replica delta both removes and upserts a submap")
+                prior_submaps[key] = dict(item)
+            for target in prior_submaps.values():
+                target["pose_revision"] = metadata["graph_revision"]
+            pose_keys = set()
+            for item in pose_updates:
+                if not isinstance(item, dict):
+                    raise ValueError("Replica pose update must be an object")
+                key = cls._submap_key({"submap_id": item.get("submap_id")})
+                if key in pose_keys or key in removed_keys:
+                    raise ValueError("Replica delta repeats a pose update")
+                pose_keys.add(key)
+                target = prior_submaps.get(key)
+                if target is None:
+                    raise ValueError("Replica pose update names an unknown submap")
+                if "T_component_submap" not in item or "pose_revision" not in item:
+                    raise ValueError("Replica pose update is incomplete")
+                target["T_component_submap"] = item["T_component_submap"]
+                target["pose_revision"] = item["pose_revision"]
+            manifest["submaps"] = sorted(
+                prior_submaps.values(),
+                key=lambda item: "/".join(map(str, cls._submap_key(item))),
+            )
+            chunks = {
+                chunk["sha256"]: chunk
+                for submap in manifest["submaps"]
+                for chunk in submap.get("chunks", [])
+            }
+            manifest["chunks"] = [chunks[key] for key in sorted(chunks)]
+            manifests[component_id] = manifest
+        ordered = sorted(
+            manifests.values(),
+            key=lambda item: (
+                item["graph_revision"]["component_id"],
+                item["graph_revision"]["epoch"],
+                item["graph_revision"]["revision"],
+            ),
+        )
+        canonical_manifests = [
+            {"schema": previous_snapshot["schema"], **manifest} for manifest in ordered
+        ]
+        if hashlib.sha256(canonical(canonical_manifests)).hexdigest() != snapshot_id:
+            raise ValueError("Replica delta snapshot_id does not match reconstruction")
+        full = dict(delta)
+        full["version"] = 1
+        full.pop("kind", None)
+        full.pop("base_revision", None)
+        full.pop("snapshot_delta", None)
+        full["snapshot"] = {
+            "schema": previous_snapshot["schema"],
+            "snapshot_id": snapshot_id,
+            "generated_at_ns": generated_at_ns,
+            "manifests": ordered,
+        }
+        chunk_table = {
+            chunk["sha256"]: {
+                "sha256": chunk["sha256"],
+                "size": chunk["size_bytes"],
+            }
+            for manifest in ordered
+            for chunk in manifest.get("chunks", [])
+        }
+        full["chunks"] = [chunk_table[key] for key in sorted(chunk_table)]
+        return full
+
     def read_chunk(self, digest: str) -> bytes:
         chunk_hash(digest)
         return (self.chunks / digest).read_bytes()
@@ -514,6 +730,10 @@ class ReplicaStore:
     def publish(self, envelope: dict) -> bool:
         if not isinstance(envelope, dict):
             raise ValueError("Manifest must be an object")
+        delta_base = None
+        if envelope.get("kind") == "delta":
+            delta_base = envelope.get("base_revision")
+            envelope = self._expand_delta(envelope)
         robot, session = envelope["robot_id"], envelope["session_id"]
         identity(robot, session)
         epochs = envelope_epochs(envelope)
@@ -524,7 +744,7 @@ class ReplicaStore:
             or type(revision) is not int
             or revision < 0
             or not isinstance(chunks, list)
-            or len(chunks) > 4096
+            or len(chunks) > MAX_CHUNK_REFS
             or not isinstance(envelope.get("snapshot"), dict)
         ):
             raise ValueError("Invalid replica manifest")
@@ -543,14 +763,26 @@ class ReplicaStore:
         if len(body) > MAX_MANIFEST_BYTES:
             raise ValueError("Manifest too large")
         with self._write():
+            previous = self.get(robot, session)
+            if delta_base is not None and (
+                previous is None or previous["revision"] != delta_base
+            ):
+                raise RevisionConflict(
+                    "Delta base revision is not current; full replica resync required",
+                    resync=True,
+                    base_revision=delta_base,
+                    current_revision=(
+                        None if previous is None else previous["revision"]
+                    ),
+                )
             self._advance_epoch(robot, session, envelope["map_epoch"])
+            previous = self.get(robot, session)
             for owner in envelope["participant_robot_ids"]:
                 current = self.map_epoch(owner, session)
                 if current is not None and epochs[owner] < current:
                     raise RevisionConflict(
                         "Snapshot references a stale robot map epoch"
                     )
-            previous = self.get(robot, session)
             if previous:
                 if revision < previous["revision"]:
                     raise RevisionConflict("Stale replica revision")
@@ -629,7 +861,7 @@ class ReplicaStore:
                 sizes = self.db.execute(
                     "SELECT length(body) FROM manifests" + where + " LIMIT 129", args
                 ).fetchall()
-                if len(sizes) > 128 or sum(row[0] for row in sizes) > 32 * 1024**2:
+                if len(sizes) > 128 or sum(row[0] for row in sizes) > 64 * 1024**2:
                     raise OverflowError(
                         "Replica catalogue exceeds its metadata budget; select a mission"
                     )
@@ -671,6 +903,7 @@ class ReplicaClient:
     def __init__(self, server_url: str, *, timeout_s: float = 5):
         self.url = server_url.rstrip("/") + "/api/autonomy"
         self.timeout_s = timeout_s
+        self._last_envelope = None
 
     def _request(self, path, method="GET", body=None):
         req = request.Request(
@@ -687,35 +920,183 @@ class ReplicaClient:
         )
         return request.urlopen(req, timeout=self.timeout_s)
 
+    @staticmethod
+    def _delta(previous: dict, current: dict) -> dict | None:
+        if (
+            previous.get("robot_id") != current.get("robot_id")
+            or previous.get("session_id") != current.get("session_id")
+            or previous.get("map_epoch") != current.get("map_epoch")
+            or previous.get("run_id") != current.get("run_id")
+            or previous.get("revision", -1) >= current.get("revision", 0)
+        ):
+            return None
+        old_snapshot = previous.get("snapshot")
+        new_snapshot = current.get("snapshot")
+        if (
+            not isinstance(old_snapshot, dict)
+            or not isinstance(new_snapshot, dict)
+            or not isinstance(old_snapshot.get("manifests"), list)
+            or not isinstance(new_snapshot.get("manifests"), list)
+            or not isinstance(new_snapshot.get("schema"), str)
+            or not isinstance(new_snapshot.get("snapshot_id"), str)
+            or not _HASH.fullmatch(new_snapshot["snapshot_id"])
+        ):
+            return None
+        old_manifests = {
+            item["graph_revision"]["component_id"]: item
+            for item in old_snapshot["manifests"]
+        }
+        new_manifests = {
+            item["graph_revision"]["component_id"]: item
+            for item in new_snapshot["manifests"]
+        }
+        components = []
+        for component_id, manifest in new_manifests.items():
+            # Noncanonical full-envelope order is preserved via bootstrap.
+            if (
+                manifest.get("submaps", [])
+                != sorted(
+                    manifest.get("submaps", []),
+                    key=lambda item: "/".join(map(str, ReplicaStore._submap_key(item))),
+                )
+                or manifest.get("chunks", [])
+                != sorted(manifest.get("chunks", []), key=lambda item: item["sha256"])
+                or any(
+                    item.get("pose_revision") != manifest["graph_revision"]
+                    for item in manifest.get("submaps", [])
+                )
+            ):
+                return None
+            prior = old_manifests.get(component_id)
+            old_submaps = (
+                {
+                    ReplicaStore._submap_key(item): item
+                    for item in prior.get("submaps", [])
+                }
+                if prior is not None
+                else {}
+            )
+            upserts, poses = [], []
+            for item in manifest.get("submaps", []):
+                key = ReplicaStore._submap_key(item)
+                before = old_submaps.pop(key, None)
+                if before is None:
+                    upserts.append(item)
+                    continue
+                before_geometry = dict(before)
+                after_geometry = dict(item)
+                for value in (before_geometry, after_geometry):
+                    value.pop("T_component_submap", None)
+                    value.pop("pose_revision", None)
+                if before_geometry != after_geometry:
+                    upserts.append(item)
+                elif before.get("T_component_submap") != item.get("T_component_submap"):
+                    poses.append(
+                        {
+                            "submap_id": item["submap_id"],
+                            "T_component_submap": item["T_component_submap"],
+                            "pose_revision": item["pose_revision"],
+                        }
+                    )
+            metadata = {
+                key: value
+                for key, value in manifest.items()
+                if key not in {"submaps", "chunks"}
+            }
+            prior_metadata = (
+                {
+                    key: value
+                    for key, value in prior.items()
+                    if key not in {"submaps", "chunks"}
+                }
+                if prior is not None
+                else None
+            )
+            removed = [item["submap_id"] for item in old_submaps.values()]
+            if (
+                prior is None
+                or metadata != prior_metadata
+                or upserts
+                or poses
+                or removed
+            ):
+                components.append(
+                    {
+                        "component_id": component_id,
+                        "manifest": metadata,
+                        "upsert_submaps": upserts,
+                        "pose_updates": poses,
+                        "removed_submaps": removed,
+                    }
+                )
+        removed_components = sorted(set(old_manifests) - set(new_manifests))
+        old_chunks = {
+            item["sha256"]
+            for manifest in old_manifests.values()
+            for item in manifest.get("chunks", [])
+        }
+        new_chunks = {
+            item["sha256"]: item
+            for manifest in new_manifests.values()
+            for item in manifest.get("chunks", [])
+        }
+        delta = dict(current)
+        delta["version"] = 2
+        delta["kind"] = "delta"
+        delta["base_revision"] = previous["revision"]
+        delta.pop("snapshot", None)
+        delta["snapshot_delta"] = {
+            "schema": new_snapshot["schema"],
+            "snapshot_id": new_snapshot["snapshot_id"],
+            "generated_at_ns": new_snapshot["generated_at_ns"],
+            "components": components,
+            "removed_components": removed_components,
+        }
+        delta["chunks"] = [
+            item
+            for digest, item in sorted(new_chunks.items())
+            if digest not in old_chunks
+        ]
+        return delta
+
+    def _publish(self, wire: dict, full: dict, read_chunk) -> dict | None:
+        body = canonical(wire)
+        uploaded = 0
+        while True:
+            try:
+                with self._request("/replicas", "POST", body) as reply:
+                    result = json.load(reply)
+                return {**result, "uploaded_bytes": uploaded}
+            except error.HTTPError as exc:
+                if exc.code != 409:
+                    raise
+                response = json.loads(exc.read(MAX_MANIFEST_BYTES + 1))
+                missing = response.get("missing")
+                if not isinstance(missing, list):
+                    if wire is not full:
+                        return None
+                    raise
+                declared = {item["sha256"]: item["size"] for item in full["chunks"]}
+                if len(missing) > len(declared) or any(
+                    digest not in declared for digest in missing
+                ):
+                    raise ValueError("Receiver requested undeclared geometry")
+                for digest in missing:
+                    chunk_hash(digest)
+                    data = read_chunk(digest)
+                    if len(data) != declared[digest]:
+                        raise ValueError("Local chunk no longer matches its manifest")
+                    with self._request("/chunks/" + digest, "PUT", data):
+                        uploaded += len(data)
+
     def sync(self, envelope: dict, read_chunk) -> dict:
         identity(envelope["robot_id"], envelope["session_id"])
-        body = canonical(envelope)
-        # One manifest negotiation replaces N HEAD requests on every update.
-        # The receiver's durable store remains the acknowledgement after
-        # either process restarts or loses its transient cache.
-        try:
-            with self._request("/replicas", "POST", body) as reply:
-                return {**json.load(reply), "uploaded_bytes": 0}
-        except error.HTTPError as exc:
-            if exc.code != 409:
-                raise
-            response = json.loads(exc.read(MAX_MANIFEST_BYTES + 1))
-            missing = response.get("missing")
-            if not isinstance(missing, list):
-                raise
-        declared = {item["sha256"]: item["size"] for item in envelope["chunks"]}
-        if len(missing) > len(declared) or any(
-            digest not in declared for digest in missing
-        ):
-            raise ValueError("Receiver requested undeclared geometry")
-        uploaded = 0
-        for digest in missing:
-            chunk_hash(digest)
-            data = read_chunk(digest)
-            if len(data) != declared[digest]:
-                raise ValueError("Local chunk no longer matches its manifest")
-            with self._request("/chunks/" + digest, "PUT", data):
-                uploaded += len(data)
-        with self._request("/replicas", "POST", body) as reply:
-            result = json.load(reply)
-        return {**result, "uploaded_bytes": uploaded}
+        previous = getattr(self, "_last_envelope", None)
+        wire = envelope
+        if previous is not None:
+            wire = self._delta(previous, envelope) or envelope
+        result = self._publish(wire, envelope, read_chunk)
+        if result is None:
+            result = self._publish(envelope, envelope, read_chunk)
+        self._last_envelope = deepcopy(envelope)
+        return result

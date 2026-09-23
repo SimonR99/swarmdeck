@@ -28,6 +28,29 @@ Catalogue `available` means that this metadata and geometry publication is
 coherent. It does not mean that every point will be rendered: the browser keeps
 the existing 300,000-point tactical budget and may sample immutable chunks.
 
+## Incremental transport and raster storage
+
+Robot-to-server replication bootstraps with a full v1 envelope, then sends v2
+revision-based deltas: changed component metadata, inserted/replaced/deleted
+submaps, and actual pose changes. Revision-only pose stamps do not resend every
+submap. Immutable XYZ chunks remain content-addressed and transfer only when
+missing. A missing or stale delta base returns `409` with `resync: true`; the
+publisher recovers with a full envelope. The server checks the base again at
+commit and exposes only a fully reconstructed, chunk-complete publication.
+
+The server raster retains aggregate height histograms and swept-free cells.
+Appends integrate only new submaps; corrections and removals rebuild the scope.
+Historical raw-point count is no longer the raster admission limit. Heights
+start in 1 mm bins and coarsen by powers of two only when a cell exceeds 512
+populated bins, preserving counts and all height bands. Represented cells and
+histogram bins remain bounded. A large cold rebuild can still be expensive.
+
+Local 2D maps use `robot:<selected robot>` and contain only that robot's owned
+submaps, even in a merged component. Missing local scopes remain pending; the UI
+never substitutes a global map and clears the prior canvas when changing scope.
+Browser catalogue responses and changed raster PNGs are still full products;
+this is not a raster-tile delta protocol.
+
 ## HTTP interface
 
 List components for all sessions:
@@ -129,7 +152,7 @@ captured by the legacy `/api/autonomy/replicas/{robot_id}/{session_id}` route.
 The implementation does not reread or rebuild XYZ chunks in the provider; it
 uses committed peer metadata and the browser's existing chunk cache. Catalogue
 assembly is cached by each publisher's revision; it does not reload point data.
-Reads are bounded to 128 sources and 32 MiB of metadata; select a mission when
+Reads are bounded to 128 sources and 64 MiB of metadata; select a mission when
 the all-mission catalogue exceeds that budget.
 
 ## Qualification boundaries

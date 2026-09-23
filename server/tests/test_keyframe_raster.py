@@ -144,6 +144,7 @@ def test_composite_points_are_placed_by_each_submap_transform():
             "submaps": [
                 {
                     "T_component_submap": rotation + [[0.0, 0.0, 0.0, 1.0]],
+                    "sensor_origins": [[0.0, 0.0, 1.0]],
                     "chunks": [{"sha256": "a", "encoding": "xyz", "point_count": 1}],
                 },
                 {
@@ -174,7 +175,7 @@ def test_composite_points_are_placed_by_each_submap_transform():
         "declared": 3,
     }
     # One origin and row span per keyframe that contributed points.
-    assert stats["origins"].tolist() == [[10.0, 20.0, 2.0], [0.0, 0.0, 0.0]]
+    assert stats["origins"].tolist() == [[10.0, 20.0, 3.0], [0.0, 0.0, 0.0]]
     assert stats["spans"].tolist() == [[0, 1], [1, 2]]
     assert reads == ["a", "b", "gone"]
 
@@ -184,23 +185,20 @@ def test_composite_points_are_placed_by_each_submap_transform():
     assert reads == []
 
 
-def test_composite_levels_each_robot_floor_before_rasterizing():
-    # Two robots cover the same 1 m square of flat road. Each odometry frame
-    # starts at its own base link and drifts in z as it travels, so in the
-    # composite one floor sits 0.4 m under the other. Unlevelled, the higher
-    # floor is inside the obstacle band of every shared cell and the road
-    # rasterizes occupied (measured on Bistro: 42% of known cells against
-    # 10% for any single robot).
+def test_composite_preserves_transformed_vertical_offsets_and_flat_bistro_alignment():
+    # A deployment transform supplies the stable vertical datum. Composite
+    # assembly must preserve each transformed Z; it must not re-level a source
+    # from the scene's changing height statistics.
     floor = np.array(
         [[x * 0.1, y * 0.1, 0.0] for x in range(10) for y in range(10)],
         dtype=np.float32,
     )
 
-    def lift(dz):
+    def placement(x, z):
         return [
-            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, x],
             [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, dz],
+            [0.0, 0.0, 1.0, z],
             [0.0, 0.0, 0.0, 1.0],
         ]
 
@@ -209,25 +207,103 @@ def test_composite_levels_each_robot_floor_before_rasterizing():
             "submaps": [
                 {
                     "submap_id": "robot_0/run/submap/0",
-                    "T_component_submap": lift(-0.3),
+                    "T_component_submap": placement(0.0, -0.3),
                     "chunks": [{"sha256": "a", "encoding": "xyz", "point_count": 100}],
                 },
                 {
                     "submap_id": "robot_3/run/submap/0",
-                    "T_component_submap": lift(-0.7),
+                    "T_component_submap": placement(2.0, -0.7),
                     "chunks": [{"sha256": "b", "encoding": "xyz", "point_count": 100}],
                 },
             ]
         }
     }
-    points, _stats = kr.composite_world_points(
-        view, lambda chunk: floor, max_points=200
+    points, stats = kr.composite_world_points(view, lambda chunk: floor, max_points=200)
+    assert np.allclose(points[:100], floor - [0.0, 0.0, 0.3])
+    assert np.allclose(points[100:], floor + [2.0, 0.0, -0.7])
+    assert stats["origins"].tolist() == [[0.0, 0.0, -0.3], [2.0, 0.0, -0.7]]
+
+    # Two surveyed robot starts on one flat Bistro datum remain one flat road;
+    # no source-leveling pass is needed to make the world heights agree.
+    flat_view = {
+        "selected": {
+            "submaps": [
+                {
+                    "submap_id": "robot_0/run/submap/0",
+                    "T_component_submap": placement(0.0, -0.3),
+                    "chunks": [{"sha256": "a", "encoding": "xyz", "point_count": 100}],
+                },
+                {
+                    "submap_id": "robot_3/run/submap/0",
+                    "T_component_submap": placement(2.0, -0.3),
+                    "chunks": [{"sha256": "b", "encoding": "xyz", "point_count": 100}],
+                },
+            ]
+        }
+    }
+    flat, _ = kr.composite_world_points(flat_view, lambda chunk: floor, max_points=200)
+    assert np.allclose(flat[:100, 2], -0.3)
+    assert np.allclose(flat[100:, 2], -0.3)
+    assert kr.rasterize_points(flat, cell_m=0.2).occupied_cells == 0
+
+
+def test_lower_downhill_source_does_not_realign_existing_points_or_rays():
+    def submap(robot, z, sha):
+        return {
+            "submap_id": f"{robot}/run/submap/0",
+            "T_component_submap": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, z],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "sensor_origins": [[0.0, 0.0, 0.5]],
+            "chunks": [{"sha256": sha, "encoding": "xyz", "point_count": 2}],
+        }
+
+    returns = np.array([[2.0, 0.0, 0.0], [2.0, 0.0, 0.5]], dtype=np.float64)
+    lower = np.array([[4.0, 0.0, 0.0], [4.0, 0.0, 0.5]], dtype=np.float64)
+    chunks = {"base": returns, "lower": lower}
+    base_view = {"selected": {"submaps": [submap("robot_0", 0.0, "base")]}}
+    downhill_view = {
+        "selected": {
+            "submaps": [
+                submap("robot_0", 0.0, "base"),
+                submap("robot_1", -4.0, "lower"),
+            ]
+        }
+    }
+
+    def gather(view):
+        return kr.composite_world_points(
+            view, lambda chunk: chunks[chunk["sha256"]], max_points=4
+        )
+
+    base_points, base_stats = gather(base_view)
+    downhill_points, downhill_stats = gather(downhill_view)
+    assert np.array_equal(downhill_points[:2], base_points)
+    assert downhill_stats["origins"].tolist() == [[0.0, 0.0, 0.5], [0.0, 0.0, -3.5]]
+    assert downhill_stats["spans"].tolist() == [[0, 2], [2, 4]]
+
+
+def test_multiple_sensor_origins_keep_points_but_omit_ambiguous_rays():
+    view = {
+        "selected": {
+            "submaps": [
+                {
+                    "T_component_submap": np.eye(4).tolist(),
+                    "sensor_origins": [[0.0, 0.0, 0.5], [0.0, 0.0, 0.6]],
+                    "chunks": [{"sha256": "a", "encoding": "xyz", "point_count": 1}],
+                }
+            ]
+        }
+    }
+    points, stats = kr.composite_world_points(
+        view, lambda _chunk: np.array([[1.0, 2.0, 3.0]]), max_points=1
     )
-    raster = kr.rasterize_points(points, cell_m=0.2)
-    assert raster.occupied_cells == 0
-    assert raster.known_cells > 0
-    stacked = np.concatenate([floor - [0, 0, 0.3], floor - [0, 0, 0.7]])
-    assert kr.rasterize_points(stacked, cell_m=0.2).occupied_cells == raster.known_cells
+    assert points.tolist() == [[1.0, 2.0, 3.0]]
+    assert stats["origins"].shape == (0, 3)
+    assert stats["spans"].shape == (0, 2)
 
 
 def test_keyframe_rays_sweep_free_space_up_to_the_return_and_no_further():

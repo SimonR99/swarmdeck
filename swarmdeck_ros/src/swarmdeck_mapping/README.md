@@ -42,7 +42,7 @@ and produced a nonempty serialized metric map. Arm64 remains a deployment gate.
 component from the canonical Python snapshot, checks every chunk digest, length,
 point count, and finite XYZ value, constructs the MOLA keyframe map, observes the
 `MapSourceBase` publication, and serializes an MRPT metric-map artifact. Inputs
-are bounded to 4 MiB manifests and 8 MiB per geometry chunk.
+are bounded to 64 MiB manifests and 8 MiB per geometry chunk.
 
 `deploy/autonomy/mola_worker.py` is the continuous onboard consumer. It watches
 `/maps/<mission>/<robot>/snapshot.json`, invokes the importer once per component,
@@ -53,10 +53,10 @@ from) followed by `/maps/<mission>/<robot>/mola/index.json`, whose
 `snapshot.json`, which may already be ahead of the product. In addition to the
 MOLA metric map, an
 optional `planner_output_path` produces a deterministic `SDMGRID1` sparse grid
-from the resident keyframe map. The grid carries corrected occupied endpoints,
-observed-free voxels, exact surface-height samples, and the complete source and
-graph identities. Product construction is bounded by point, voxel, ray-step,
-elapsed-time, metadata and artifact-byte limits.
+from original measured endpoints and qualified rays. Metric geometry is compacted
+to 5 cm voxels; planner evidence is retained separately at its 20 cm resolution,
+with exact minimum/maximum surface heights per voxel. Product construction is
+bounded by materialized points, voxels, ray work, metadata and artifact bytes.
 
 Unknown is explicit: a voxel absent from both occupied and free sets is unknown,
 and occupied always wins. Sensor origins alone do not prove free space. Rays are
@@ -85,10 +85,11 @@ noise is 0.03 m); both live in `PlannerGridLimits`
 (`include/swarmdeck_mapping/planner_map.hpp`) and neither is recorded in the
 product.
 
-`SDMGRID1` therefore carries `retired_count` beside `surface_count`, and
-`surface_count + retired_count == point_count` always holds, where `point_count`
-remains the manifest's stored point count that every reader cross-checks against
-the geometry chunks.
+`SDMGRID1` metadata schema `swarmdeck.mola_planner_grid.v2` carries
+`retired_count` beside `surface_count`, and
+`surface_count + retired_count == point_count` counts materialized surface
+extrema. The separate `source_point_count` authenticates the original manifest's
+chunk counts, even when overlapping history exceeds the materialized point budget.
 
 Run it directly in the mapping image:
 
@@ -97,10 +98,11 @@ swarmdeck-mola-worker --maps-root /maps --mission-id "$SWARMDECK_MISSION_ID" \
   --planner-maps --timeout 30 --poll 1
 ```
 
-The persistent runtime reuses resident local point buffers for pose-only
-corrections. Planner export reads those exact immutable buffers and the corrected
-poses from `KeyframePointCloudMap`; it does not reread chunks or run another
-optimizer. Geometry replacement and retraction build a complete candidate grid,
-so old walls and their ray evidence disappear together. Requested metric-map and
-planner artifacts must both succeed in the pre-commit hook before the new native
-snapshot becomes current.
+The persistent runtime reads only newly appended keyframes when membership,
+existing poses, source timestamps, ray qualifications and chunk descriptors are
+unchanged. Metadata-only revisions reuse resident geometry. Actual corrections,
+retractions and out-of-order observations stream original chunks again: merged
+metric representatives cannot recover previously coincident measurements.
+Planner evidence always uses original sensor origins and endpoints, independently
+of metric compaction. Requested metric-map and planner artifacts must both
+succeed before the candidate geometry and evidence become current.

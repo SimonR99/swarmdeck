@@ -9,32 +9,46 @@ Lifecycle: ``deployment_raster_loop`` calls ``tick`` periodically. Registry and
 map-service placements are read on the event loop; catalogue assembly, chunk
 decoding and the numpy raster run in a worker thread. A rebuild happens only
 when the composite snapshot or placement changes, or when the scope is absent.
+An aggregate sparse contribution is cached per scope. Append-only publications
+process only new submaps; a correction or removal streams that scope once and
+replaces its bounded aggregate, so historical per-submap point products are
+never retained.
 Scopes remain valid while the mission is unchanged and are retired on mission
-change or reset.
+or reset.
 
-Budgets: the composite's own submap and source budgets apply, declared points
-are capped before chunks are read, raster cell count is bounded, and decoded
-chunks are cached by hash because chunks are immutable while placements move.
+Budgets: the composite's source/submap catalogue budgets still apply. Raster
+materialisation is bounded by ``MAX_CELLS`` output cells, decoded chunks by the
+LRU byte budget, and each cell's weighted height histogram by a fixed bin cap;
+the raster never retains the lifetime raw point cloud.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Mapping
 
 import numpy as np
 
 from autonomy.mapping import decode_chunk_points
+from ..mapsvc.grid_meta import GridMeta
 from ..mapsvc.keyframe_raster import (
+    DEFAULT_CELL_M,
+    DEFAULT_MARGIN_M,
+    MAX_CELLS,
+    OBSTACLE_MAX_M,
+    OBSTACLE_MIN_M,
+    GROUND_PERCENTILE,
     KeyframeRaster,
     composite_world_points,
-    rasterize_points,
+    swept_free_cells,
 )
 from . import map_routes
 from . import replica_views
@@ -131,27 +145,346 @@ def verified_component(catalogue, session_id: str) -> str | None:
     return None if best is None else best[2]
 
 
+HIST_BIN_M = 0.001
+MAX_HIST_BINS = 512
+
+
+@dataclass
+class _HeightHistogram:
+    bins: dict[int, int]
+    shift: int = 0
+
+    def merge(self, other: "_HeightHistogram") -> None:
+        shift = max(self.shift, other.shift)
+        if shift != self.shift:
+            reduced: dict[int, int] = {}
+            for key, count in self.bins.items():
+                bucket = key >> (shift - self.shift)
+                reduced[bucket] = reduced.get(bucket, 0) + count
+            self.bins = reduced
+            self.shift = shift
+        for key, count in other.bins.items():
+            bucket = key >> (shift - other.shift)
+            self.bins[bucket] = self.bins.get(bucket, 0) + count
+        while len(self.bins) > MAX_HIST_BINS:
+            reduced = {}
+            for key, count in self.bins.items():
+                bucket = key >> 1
+                reduced[bucket] = reduced.get(bucket, 0) + count
+            self.bins = reduced
+            self.shift += 1
+
+
+@dataclass
+class _SubmapContribution:
+    key: str
+    submap_keys: dict[str, str]
+    histograms: dict[int, _HeightHistogram]
+    rays: set[int]
+    low_x: float
+    low_y: float
+    high_x: float
+    high_y: float
+    points: int
+    histogram_bins: int = 0
+
+
 class DeploymentRasterRefresher:
+    """Incremental aggregate cells; corrected/removed submaps rebuild the scope."""
+
     def __init__(
         self,
         *,
         max_points: int = MAX_POINTS,
         cache_bytes: int = CACHE_BYTES,
-        rasterize=rasterize_points,
     ):
         self.max_points = max_points
-        self.rasterize = rasterize
+        self.chunks = _ChunkCache(cache_bytes)
         self.built: tuple[str, str] | None = None
         self.failed: tuple[str, str] | None = None
         # Per-robot rasters, keyed by scope: the snapshot they were built from.
         self.robot_built: dict[str, str] = {}
-        self.chunks = _ChunkCache(cache_bytes)
+        # Aggregate cell histograms bound retained history independently of raw
+        # point count; no per-submap point products remain resident.
+        self.contributions: dict[str, _SubmapContribution] = {}
 
     def reset(self) -> None:
         self.built = None
         self.failed = None
         self.robot_built.clear()
+        self.contributions.clear()
         self.chunks.clear()
+
+    @staticmethod
+    def _declared_points(view: Mapping[str, Any]) -> int:
+        return sum(
+            int(chunk["point_count"])
+            for submap in view["selected"]["submaps"]
+            for chunk in submap["chunks"]
+        )
+
+    @staticmethod
+    def _submap_key(submap: Mapping[str, Any]) -> str:
+        return json.dumps(
+            {
+                key: value
+                for key, value in submap.items()
+                if key not in {"pose_revision", "graph_revision"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _compress_histogram(hist: dict[int, int]) -> _HeightHistogram:
+        result = _HeightHistogram({})
+        result.merge(_HeightHistogram(hist))
+        return result
+
+    def _contribution(
+        self, submap: Mapping[str, Any], key: str
+    ) -> tuple[_SubmapContribution | None, dict[str, Any]]:
+        one = {"selected": {"submaps": [submap]}}
+        points, gathered = composite_world_points(
+            one, self._chunk_points, max_points=self.max_points
+        )
+        if not len(points):
+            return None, gathered
+        cols = np.floor(points[:, 0] / DEFAULT_CELL_M).astype(np.int64)
+        rows = np.floor(points[:, 1] / DEFAULT_CELL_M).astype(np.int64)
+        histograms: dict[int, dict[int, int]] = {}
+        for col, row, z in zip(cols, rows, points[:, 2], strict=True):
+            cell = (int(row) << 32) ^ (int(col) & 0xFFFFFFFF)
+            bins = histograms.setdefault(cell, {})
+            zbin = int(round(float(z) / HIST_BIN_M))
+            bins[zbin] = bins.get(zbin, 0) + 1
+        histograms = {
+            cell: self._compress_histogram(bins) for cell, bins in histograms.items()
+        }
+        low_x = float(points[:, 0].min() - DEFAULT_MARGIN_M)
+        low_y = float(points[:, 1].min() - DEFAULT_MARGIN_M)
+        high_x = float(points[:, 0].max() + DEFAULT_MARGIN_M)
+        high_y = float(points[:, 1].max() + DEFAULT_MARGIN_M)
+        origin_x = math.floor(low_x / DEFAULT_CELL_M) * DEFAULT_CELL_M
+        origin_y = math.floor(low_y / DEFAULT_CELL_M) * DEFAULT_CELL_M
+        width = int(math.ceil((high_x - origin_x) / DEFAULT_CELL_M)) + 1
+        height = int(math.ceil((high_y - origin_y) / DEFAULT_CELL_M)) + 1
+        if width * height > MAX_CELLS:
+            raise ValueError("submap extent exceeds raster cell budget")
+        swept = swept_free_cells(
+            points,
+            gathered["origins"],
+            gathered["spans"],
+            origin_x=origin_x,
+            origin_y=origin_y,
+            cell=DEFAULT_CELL_M,
+            width=width,
+            height=height,
+        )
+        ray_rows, ray_cols = np.nonzero(swept.reshape(height, width))
+        row0 = int(math.floor(origin_y / DEFAULT_CELL_M))
+        col0 = int(math.floor(origin_x / DEFAULT_CELL_M))
+        rays = {
+            ((int(ray_rows[index]) + row0) << 32)
+            ^ ((int(ray_cols[index]) + col0) & 0xFFFFFFFF)
+            for index in range(len(ray_rows))
+        }
+        return (
+            _SubmapContribution(
+                key=key,
+                submap_keys={},
+                histograms=histograms,
+                rays=rays,
+                low_x=origin_x,
+                low_y=origin_y,
+                high_x=origin_x + (width - 1) * DEFAULT_CELL_M,
+                high_y=origin_y + (height - 1) * DEFAULT_CELL_M,
+                points=int(len(points)),
+            ),
+            gathered,
+        )
+
+    @staticmethod
+    def _add_contribution(
+        target: _SubmapContribution, item: _SubmapContribution
+    ) -> None:
+        target.rays.update(item.rays)
+        target.low_x = min(target.low_x, item.low_x)
+        target.low_y = min(target.low_y, item.low_y)
+        target.high_x = max(target.high_x, item.high_x)
+        target.high_y = max(target.high_y, item.high_y)
+        target.points += item.points
+        for cell, bins in item.histograms.items():
+            histogram = target.histograms.setdefault(cell, _HeightHistogram({}))
+            before = len(histogram.bins)
+            histogram.merge(bins)
+            target.histogram_bins += len(histogram.bins) - before
+
+    def _merge_contributions(
+        self, contributions: Mapping[str, _SubmapContribution]
+    ) -> KeyframeRaster:
+        if not contributions:
+            raise ValueError("no finite points to rasterize")
+        low_x = min(item.low_x for item in contributions.values())
+        low_y = min(item.low_y for item in contributions.values())
+        high_x = max(item.high_x for item in contributions.values())
+        high_y = max(item.high_y for item in contributions.values())
+        resolution = DEFAULT_CELL_M
+        coarsened = 0
+        while True:
+            origin_x = math.floor(low_x / resolution) * resolution
+            origin_y = math.floor(low_y / resolution) * resolution
+            width = int(math.ceil((high_x - origin_x) / resolution)) + 1
+            height = int(math.ceil((high_y - origin_y) / resolution)) + 1
+            if width * height <= MAX_CELLS:
+                break
+            resolution *= 2.0
+            coarsened += 1
+            if coarsened > 4:
+                raise ValueError("incremental raster extent exceeds cell budget")
+        merged: dict[int, _HeightHistogram] = {}
+        rays: set[int] = set()
+        for item in contributions.values():
+            rays.update(item.rays)
+            for cell, bins in item.histograms.items():
+                row = int(cell) >> 32
+                col = int(cell) & 0xFFFFFFFF
+                if col >= 1 << 31:
+                    col -= 1 << 32
+                out_col = int(
+                    math.floor(((col + 0.5) * DEFAULT_CELL_M - origin_x) / resolution)
+                )
+                out_row = int(
+                    math.floor(((row + 0.5) * DEFAULT_CELL_M - origin_y) / resolution)
+                )
+                if 0 <= out_col < width and 0 <= out_row < height:
+                    out_cell = (out_row << 32) ^ (out_col & 0xFFFFFFFF)
+                    merged.setdefault(out_cell, _HeightHistogram({})).merge(bins)
+        cells = np.full((height, width), -1, dtype=np.int8)
+        flat = cells.reshape(-1)
+        occupied = np.zeros(width * height, dtype=bool)
+        for cell, bins in merged.items():
+            row = int(cell) >> 32
+            col = int(cell) & 0xFFFFFFFF
+            if col >= 1 << 31:
+                col -= 1 << 32
+            index = row * width + col
+            ordered = sorted(
+                (zbin * (1 << bins.shift), count) for zbin, count in bins.bins.items()
+            )
+            total = sum(count for _zbin, count in ordered)
+            target = GROUND_PERCENTILE / 100.0 * (total - 1)
+            lower, upper = math.floor(target), math.ceil(target)
+            cumulative = 0
+            low_value = high_value = ordered[-1][0]
+            for zbin, count in ordered:
+                if cumulative <= lower < cumulative + count:
+                    low_value = zbin
+                if cumulative <= upper < cumulative + count:
+                    high_value = zbin
+                    break
+                cumulative += count
+            ground = low_value + (high_value - low_value) * (target - lower)
+            has_obstacle = any(
+                ground + OBSTACLE_MIN_M / HIST_BIN_M
+                <= zbin
+                <= ground + OBSTACLE_MAX_M / HIST_BIN_M
+                for zbin, _count in ordered
+            )
+            flat[index] = 100 if has_obstacle else 0
+            occupied[index] = has_obstacle
+        for cell in rays:
+            row = int(cell) >> 32
+            col = int(cell) & 0xFFFFFFFF
+            if col >= 1 << 31:
+                col -= 1 << 32
+            out_col = int(
+                math.floor(((col + 0.5) * DEFAULT_CELL_M - origin_x) / resolution)
+            )
+            out_row = int(
+                math.floor(((row + 0.5) * DEFAULT_CELL_M - origin_y) / resolution)
+            )
+            if 0 <= out_col < width and 0 <= out_row < height:
+                index = out_row * width + out_col
+                if not occupied[index]:
+                    flat[index] = 0
+        return KeyframeRaster(
+            meta=GridMeta(resolution, width, height, origin_x, origin_y),
+            cells=cells,
+            points=sum(item.points for item in contributions.values()),
+            known_cells=int((flat != -1).sum()),
+            occupied_cells=int(occupied.sum()),
+            coarsened=coarsened,
+        )
+
+    def _incremental_raster(
+        self, scope: str, view: Mapping[str, Any]
+    ) -> tuple[KeyframeRaster, dict[str, Any]]:
+        previous = self.contributions.pop(scope, None)
+        current_keys = {
+            str(submap["submap_id"]): self._submap_key(submap)
+            for submap in view["selected"]["submaps"]
+        }
+        append_only = (
+            previous is not None
+            and all(
+                previous.submap_keys.get(submap_id) == key
+                for submap_id, key in current_keys.items()
+                if submap_id in previous.submap_keys
+            )
+            and set(previous.submap_keys).issubset(current_keys)
+        )
+        if append_only:
+            aggregate = previous
+            pending = [
+                submap
+                for submap in view["selected"]["submaps"]
+                if str(submap["submap_id"]) not in previous.submap_keys
+            ]
+        else:
+            aggregate = None
+            pending = list(view["selected"]["submaps"])
+        chunks = missing = rebuilt = 0
+        for submap in pending:
+            submap_id = str(submap["submap_id"])
+            key = current_keys[submap_id]
+            contribution, gathered = self._contribution(submap, key)
+            chunks += gathered["chunks"]
+            missing += gathered["missing_chunks"]
+            if contribution is None:
+                continue
+            if aggregate is None:
+                aggregate = _SubmapContribution(
+                    key="",
+                    submap_keys={},
+                    histograms={},
+                    rays=set(),
+                    low_x=contribution.low_x,
+                    low_y=contribution.low_y,
+                    high_x=contribution.high_x,
+                    high_y=contribution.high_y,
+                    points=0,
+                )
+            self._add_contribution(aggregate, contribution)
+            if (
+                len(aggregate.histograms) > MAX_CELLS
+                or len(aggregate.rays) > MAX_CELLS
+                or aggregate.histogram_bins > self.max_points
+            ):
+                raise ValueError("incremental raster contribution exceeds cell budget")
+            aggregate.submap_keys[submap_id] = key
+            rebuilt += 1
+        if aggregate is None:
+            raise ValueError("no finite points to rasterize")
+        aggregate.submap_keys = current_keys
+        raster = self._merge_contributions({"scope": aggregate})
+        self.contributions[scope] = aggregate
+        return raster, {
+            "chunks": chunks,
+            "missing_chunks": missing,
+            "declared": self._declared_points(view),
+            "rebuilt_submaps": rebuilt,
+        }
 
     # ------------------------------------------------------------ event loop
 
@@ -197,6 +530,7 @@ class DeploymentRasterRefresher:
             if retired:
                 log.info("Retired fleet raster(s) %s", ", ".join(retired))
                 self.chunks.clear()
+                self.contributions.clear()
             self.built = None
             return {"status": "no mission", "retired": retired}
 
@@ -227,6 +561,11 @@ class DeploymentRasterRefresher:
             self.robot_built = {
                 key: value
                 for key, value in self.robot_built.items()
+                if key not in retired
+            }
+            self.contributions = {
+                key: value
+                for key, value in self.contributions.items()
                 if key not in retired
             }
         robot_reports = self.refresh_robots(
@@ -294,18 +633,12 @@ class DeploymentRasterRefresher:
 
         started = time.perf_counter()
         try:
-            points, gathered = composite_world_points(
-                view, self._chunk_points, max_points=self.max_points
-            )
-            raster: KeyframeRaster = self.rasterize(
-                points, rays=(gathered["origins"], gathered["spans"])
-            )
+            raster, gathered = self._incremental_raster(scope, view)
         except (OverflowError, ValueError) as exc:
             return {
                 **self._skip(scope, key, str(exc), retired),
                 "robot_rasters": robot_reports,
             }
-
         published = map_routes.publish_optimized_map(
             scope,
             raster.meta,
@@ -375,18 +708,22 @@ class DeploymentRasterRefresher:
             if not snapshot:
                 reports[robot] = "skipped: no publication identity"
                 continue
+            owned = [
+                submap
+                for submap in view["selected"]["submaps"]
+                if submap["submap_id"].startswith(f"{robot}/")
+            ]
+            view = {**view, "selected": {**view["selected"], "submaps": owned}}
+            snapshot = replica_views.digest(
+                [component, transform, [self._submap_key(submap) for submap in owned]]
+            )
             if self.robot_built.get(scope) == snapshot and map_routes.has_optimized_map(
                 scope
             ):
                 reports[robot] = "unchanged"
                 continue
             try:
-                points, gathered = composite_world_points(
-                    view, self._chunk_points, max_points=self.max_points
-                )
-                raster: KeyframeRaster = self.rasterize(
-                    points, rays=(gathered["origins"], gathered["spans"])
-                )
+                raster, _gathered = self._incremental_raster(scope, view)
             except (OverflowError, ValueError) as exc:
                 reports[robot] = f"skipped: {exc}"
                 continue

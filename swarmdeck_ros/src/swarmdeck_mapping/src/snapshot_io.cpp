@@ -17,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <tuple>
 #include <unordered_set>
 
 namespace swarmdeck_mapping
@@ -202,6 +203,7 @@ ParsedComponentSnapshot parseComponentSnapshot(
     const std::size_t max_submaps, const std::size_t max_chunks,
     const std::size_t max_points, const std::string& selected_component_id)
 {
+  (void)max_points;
   if (!isDigest(expected_source_sha256))
     throw std::invalid_argument("snapshot_sha256 must be lowercase SHA-256");
   const auto bytes = readBounded(snapshot_path, max_snapshot_bytes);
@@ -322,7 +324,8 @@ ParsedComponentSnapshot parseComponentSnapshot(
     if (!chunks.is_array() || chunks.size() > max_chunks - chunk_count)
       throw std::invalid_argument("manifest exceeds chunk count limit");
     ParsedSubmap parsed{
-        id, pose_value, {}, origins, observed_at_ns, ray_evidence_qualified};
+        id, pose_value, {}, submap_geometry, origins, observed_at_ns,
+        ray_evidence_qualified};
     parsed.chunks.reserve(chunks.size());
     json hashes = json::array();
     for (const auto& chunk : chunks)
@@ -330,10 +333,8 @@ ParsedComponentSnapshot parseComponentSnapshot(
       validateChunkObject(chunk);
       const auto size = uintValue(chunk.at("size_bytes"), "chunk size");
       const auto count = uintValue(chunk.at("point_count"), "chunk point count");
-      if (count > max_points - point_count)
-        throw std::invalid_argument(
-            "manifest exceeds point count limit of " + std::to_string(max_points) +
-            " points");
+      if (count > std::numeric_limits<std::size_t>::max() - point_count)
+        throw std::invalid_argument("manifest point count overflows native size");
       point_count += static_cast<std::size_t>(count);
       ++chunk_count;
       const auto digest = chunk.at("sha256").get<std::string>();
@@ -411,44 +412,138 @@ ParsedComponentSnapshot parseComponentSnapshot(
       point_count};
 }
 
-std::vector<SubmapInput> loadGeometry(
-    const ParsedComponentSnapshot& snapshot, const std::filesystem::path& chunks_dir,
+namespace
+{
+struct CompactVoxel
+{
+  std::int64_t x{}, y{}, z{};
+  friend bool operator==(const CompactVoxel& lhs, const CompactVoxel& rhs)
+  {
+    return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+  }
+};
+struct CompactVoxelHash
+{
+  std::size_t operator()(const CompactVoxel& value) const noexcept
+  {
+    const auto mix = [](std::uint64_t x) {
+      x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+      x ^= x >> 27; x *= 0x94d049bb133111ebULL; return x ^ (x >> 31);
+    };
+    return static_cast<std::size_t>(
+        mix(static_cast<std::uint64_t>(value.x)) ^
+        (mix(static_cast<std::uint64_t>(value.y)) << 1) ^
+        (mix(static_cast<std::uint64_t>(value.z)) << 2));
+  }
+};
+struct CompactPoint
+{
+  std::size_t submap{};
+  PointXYZ local;
+  PointXYZ component;
+};
+PointXYZ transformPoint(const Matrix4& m, const PointXYZ& p)
+{
+  return {
+      static_cast<float>(m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3]),
+      static_cast<float>(m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7]),
+      static_cast<float>(m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11])};
+}
+std::int64_t compactCoordinate(const double value, const double resolution)
+{
+  const auto scaled = std::floor(value / resolution);
+  if (!std::isfinite(scaled) ||
+      scaled < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
+      scaled >= -static_cast<double>(std::numeric_limits<std::int64_t>::min()))
+    throw std::runtime_error("compaction coordinate exceeds int64 range");
+  return static_cast<std::int64_t>(scaled);
+}
+}  // namespace
+
+SubmapInput loadRawSubmap(
+    const ParsedSubmap& source, const std::filesystem::path& chunks_dir,
     const std::size_t max_points)
 {
-  if (snapshot.declared_point_count > max_points)
-    throw std::invalid_argument(
-        "snapshot exceeds point count limit: " +
-        std::to_string(snapshot.declared_point_count) + " points, limit " +
-        std::to_string(max_points));
-  std::vector<SubmapInput> result;
-  result.reserve(snapshot.submaps.size());
-  std::size_t loaded = 0;
-  for (const auto& source : snapshot.submaps)
+  SubmapInput result{source.external_id, {}, source.T_component_submap,
+                     source.sensor_origins_local, source.observed_at_ns,
+                     source.ray_evidence_qualified, source.geometry_revision, {}};
+  for (const auto& chunk : source.chunks)
   {
-    SubmapInput target{
-        source.external_id, {}, source.T_component_submap,
-        source.sensor_origins_local, source.observed_at_ns,
-        source.ray_evidence_qualified};
-    target.points_local.reserve(
-        std::accumulate(source.chunks.begin(), source.chunks.end(), std::size_t{0},
-                        [](const std::size_t value, const ChunkDescriptor& chunk) {
-                          return value + chunk.point_count;
-                        }));
-    for (const auto& chunk : source.chunks)
-    {
-      if (chunk.point_count > max_points - loaded)
-        throw std::invalid_argument("loaded geometry exceeds point count limit");
-      auto points = readXyzChunk(
-          chunks_dir, chunk.sha256, chunk.size_bytes, chunk.point_count);
-      loaded += points.size();
-      target.points_local.insert(
-          target.points_local.end(), points.begin(), points.end());
-    }
-    result.emplace_back(std::move(target));
+    if (chunk.point_count > max_points - result.points_local.size())
+      throw std::length_error("raw submap exceeds per-frame point budget");
+    auto points = readXyzChunk(
+        chunks_dir, chunk.sha256, chunk.size_bytes, chunk.point_count);
+    result.points_local.insert(result.points_local.end(), points.begin(), points.end());
+    result.chunk_fingerprints.push_back(chunk.fingerprint());
   }
   return result;
 }
 
+std::vector<SubmapInput> loadGeometry(
+    const ParsedComponentSnapshot& snapshot, const std::filesystem::path& chunks_dir,
+    const std::size_t max_points,
+    const NativeGeometrySnapshot* prior)
+{
+  if (max_points == 0) throw std::invalid_argument("geometry point budget is zero");
+  constexpr double resolution = 0.05;
+  std::vector<SubmapInput> result;
+  result.reserve(snapshot.submaps.size());
+  std::unordered_map<std::string, const NativeKeyframeSnapshot*> old;
+  if (prior)
+    for (const auto& frame : prior->keyframes) old.emplace(frame.external_id, &frame);
+  std::unordered_map<CompactVoxel, CompactPoint, CompactVoxelHash> cells;
+  cells.reserve(std::min(max_points, snapshot.declared_point_count));
+  for (const auto& source : snapshot.submaps)
+  {
+    const auto index = result.size();
+    result.push_back({source.external_id, {}, source.T_component_submap,
+                      source.sensor_origins_local, source.observed_at_ns,
+                      source.ray_evidence_qualified, source.geometry_revision, {}});
+    for (const auto& chunk : source.chunks)
+      result.back().chunk_fingerprints.push_back(chunk.fingerprint());
+    const auto admit = [&](const PointXYZ& point) {
+      const auto component = transformPoint(source.T_component_submap, point);
+      const CompactVoxel voxel{compactCoordinate(component.x, resolution),
+                               compactCoordinate(component.y, resolution),
+                               compactCoordinate(component.z, resolution)};
+      const auto found = cells.find(voxel);
+      if (found == cells.end())
+      {
+        if (cells.size() >= max_points)
+          throw std::length_error("metric voxel budget exceeded");
+        cells.emplace(voxel, CompactPoint{index, point, component});
+      }
+      else if (std::tie(component.z, component.x, component.y, source.external_id) <
+               std::tie(found->second.component.z, found->second.component.x,
+                        found->second.component.y, result[found->second.submap].external_id))
+        found->second = {index, point, component};
+    };
+    const auto previous = old.find(source.external_id);
+    if (previous != old.end())
+    {
+      const auto& points = previous->second->points_local;
+      for (std::size_t i = 0; i < points->size(); ++i)
+      {
+        PointXYZ point;
+        points->getPointFast(i, point.x, point.y, point.z);
+        admit(point);
+      }
+    }
+    else
+    {
+      const auto raw = loadRawSubmap(source, chunks_dir, max_points);
+      for (const auto& point : raw.points_local) admit(point);
+    }
+  }
+  for (const auto& cell : cells)
+    result[cell.second.submap].points_local.push_back(cell.second.local);
+  for (auto& frame : result)
+    std::sort(frame.points_local.begin(), frame.points_local.end(),
+              [](const PointXYZ& a, const PointXYZ& b) {
+                return std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z);
+              });
+  return result;
+}
 std::vector<PoseUpdate> poseUpdates(const ParsedComponentSnapshot& snapshot)
 {
   std::vector<PoseUpdate> result;

@@ -111,7 +111,16 @@ async def publish(request: Request):
     except MissingChunks as exc:
         return JSONResponse({"error": str(exc), "missing": exc.hashes}, status_code=409)
     except RevisionConflict as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
+        payload = {"error": str(exc)}
+        if getattr(exc, "resync", False):
+            payload.update(
+                {
+                    "resync": True,
+                    "base_revision": exc.base_revision,
+                    "current_revision": exc.current_revision,
+                }
+            )
+        return JSONResponse(payload, status_code=409)
     except OverflowError as exc:
         return JSONResponse({"error": str(exc)}, status_code=413)
     except (ValueError, KeyError, TypeError) as exc:

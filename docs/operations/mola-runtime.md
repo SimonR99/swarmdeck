@@ -54,23 +54,23 @@ Readers (the indexed map server's provider and MGG's `MolaMap`) read
 `index.json` and `source.json`, require the digest and snapshot identity to
 agree, treat a disagreeing pair as mid-replacement and retry, and never read
 `snapshot.json`. Unchanged component artifacts are reused after checking their
-size and SHA-256. Pose-only revisions reuse resident keyframe geometry;
-replacement and retraction build a coherent new map. Published map objects
-remain immutable.
+size and SHA-256. Append-only updates decode only new keyframes. Actual pose
+corrections, removals and out-of-order observations rebuild from immutable source
+chunks; metadata-only revisions reuse resident geometry. Published maps remain immutable.
 
 The subprocess protocol has a versioned ready event, correlated requests,
 explicit `replace` and `pose_only` modes, and checked revision/artifact responses.
 Timeout, process death, and malformed output invalidate resident state. A later
-request can rebuild from immutable chunks. There is no silent fallback to the
-Removing a component releases its resident context.
+request can rebuild from immutable chunks. Removing a component releases its
+resident context.
 
 | Limit | Default |
 | --- | --- |
-| Snapshot JSON | 4 MiB |
+| Snapshot JSON | 64 MiB |
 | JSONL request / response | 64 KiB each |
-| Submaps / chunks per component | 4,096 / 16,384 |
-| Points per component (loader, planner grid build and SDMGRID1 product alike) | 2,000,000 |
-| Runtime points, including a replacement candidate (per peer runtime) | 8,000,000 |
+| Submaps / chunk references per component | 16,384 / 65,536 |
+| Materialized metric points / planner surface extrema | 2,000,000 each |
+| Runtime geometry and evidence units, including a replacement candidate | 8,000,000 |
 | Resident component contexts (per peer runtime) | 256 |
 | Standalone native serialized artifact | 1 GiB |
 | Deployment native artifact / publication limit | 256 MiB |
@@ -83,20 +83,26 @@ it is not a filesystem quota. The worker forwards its point, context and output
 limits to the native process and checks the advertised effective limits. Worker
 and native CLI resource flags can override their defaults.
 
-The point budget is one number. `kMaxPointsPerMap`
-(`swarmdeck_mapping/point_budget.hpp`) is the default of the worker's
-`--max-points-per-map` (`DEFAULT_MAX_POINTS_PER_MAP`), and the runtime derives
-its snapshot loader, its planner grid build (`PlannerGridLimits::max_points`,
-through `plannerGridLimits()`) and its SDMGRID1 writer from that one value.
-Until 2026-09-19 the grid build carried its own 1,000,000 default, so a
-component between 1,000,000 and 2,000,000 points loaded and then failed every
-planner build (see the known-issues row). The product's readers cap the point
-count on their own and must move with the budget: `autonomy/mola_mapping.py`
-(`MAX_POINTS`, 2,000,000) and MGG's `MolaMap`, whose `map.mola.max_voxels`
-(clamped to 2,000,000 in `planner_node.cpp`) also bounds `surface_count`. A
-product above a reader's cap is rejected by that reader, which for MGG means
-no map at all rather than a stale one. `autonomy/tests/test_mapping_worker.py`
-pins the worker, header and reader values to each other.
+`kMaxPointsPerMap` (`swarmdeck_mapping/point_budget.hpp`) defaults to
+2,000,000. It bounds materialized metric points, planner surface extrema and a
+single decoded source keyframe, not the sum of historical observations.
+Metric geometry keeps a deterministic measured representative in each 5 cm
+voxel. The planner separately consumes original endpoints and qualified sensor
+rays, retaining exact minimum/maximum heights per occupied 20 cm voxel, timestamp
+and clearing evidence, and observed-free voxels. It does not cast rays from the
+compacted metric representatives.
+
+Append-only updates retain this evidence and process new keyframes. Corrections,
+removals and older observations rebuild it: all endpoints first, then a bounded
+subset of original rays. Omitted rays establish no free space. The resident
+budget includes metric points, occupied/free evidence records and surface
+extrema; it is a record budget, not a byte-exact process memory limit.
+
+The `SDMGRID1` binary layout now carries metadata schema
+`swarmdeck.mola_planner_grid.v2`. `source_point_count` must equal the original
+manifest chunk count; `point_count` counts materialized extrema and is bounded
+independently. MGG validates both. Deploy the mapping worker/native importer and
+MGG reader together; the old v1 reader deliberately rejects v2 products.
 
 A component that outgrows the budget keeps its last product. The worker then
 writes `<peer>/mola/worker.json` after every attempt (`version`,

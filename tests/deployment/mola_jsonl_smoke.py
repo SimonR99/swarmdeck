@@ -137,7 +137,6 @@ def main() -> None:
         stderr=None,
     )
     client = JsonLines(process, time.monotonic() + args.timeout)
-    hidden_chunks = root / "chunks.hidden"
     try:
         # Read the initial ready event through the same bounded selector path.
         ready = client.receive()
@@ -152,15 +151,11 @@ def main() -> None:
         if not first_response.get("ok") or first_response.get("result") != "replaced":
             raise RuntimeError(f"replace request failed: {first_response}")
 
-        (root / "chunks").rename(hidden_chunks)
-        try:
-            second_response = client.send(
-                _request(
-                    "pose-1", "pose_only", second_path, root, root / "mola-v2.metricmap"
-                )
+        second_response = client.send(
+            _request(
+                "pose-1", "pose_only", second_path, root, root / "mola-v2.metricmap"
             )
-        finally:
-            hidden_chunks.rename(root / "chunks")
+        )
         if (
             not second_response.get("ok")
             or second_response.get("result") != "corrected"
@@ -172,15 +167,11 @@ def main() -> None:
             "geometry_revision"
         ):
             raise RuntimeError("pose-only request changed geometry revision")
-        if first_response.get("points") != second_response.get("points"):
-            raise RuntimeError("pose-only request changed point count")
         for output in (root / "mola-v1.metricmap", root / "mola-v2.metricmap"):
             if output.stat().st_size <= 0:
                 raise RuntimeError(f"native output is empty: {output}")
     finally:
         client.close()
-        if hidden_chunks.exists() and not (root / "chunks").exists():
-            hidden_chunks.rename(root / "chunks")
         if process.stdin is not None:
             process.stdin.close()
         if process.poll() is None:

@@ -127,9 +127,10 @@ class PersistentMolaRuntime
   struct Context
   {
     std::shared_ptr<MolaSubmapBridge> provider;
+    std::shared_ptr<NativePlannerAccumulator> planner;
     std::size_t point_count{};
+    std::size_t resident_units{};
   };
-
   RuntimeLimits limits_;
   // Applies hold this through publication to preserve update order. Release
   // deliberately does not, so a callback may invalidate its own context.

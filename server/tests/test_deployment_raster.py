@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import asyncio
 import json
 import logging
@@ -34,7 +35,10 @@ from tests.test_replica_deployment_composite import live_payload
 # robot_0 sits at the world origin; robot_1's navigation frame is 10 m east,
 # 5 m north and turned 90 degrees, so its floor patch along local +x must
 # appear along world +y.
-TRANSFORMS = {"robot_0": (0.0, 0.0, 0.0), "robot_1": (10.0, 5.0, math.pi / 2)}
+TRANSFORMS = {
+    "robot_0": (0.0, 0.0, 0.0, 0.0),
+    "robot_1": (10.0, 5.0, 0.0, math.pi / 2),
+}
 
 
 def floor_patch(x0, x1, y0, y1, step=0.05, z=0.0):
@@ -101,15 +105,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
     monkeypatch.setattr(map_routes, "_optimized", {})
 
-    calls = []
-
-    def counting_rasterize(points, **kwargs):
-        calls.append(len(points))
-        return deployment_raster.rasterize_points(points, **kwargs)
-
-    refresher = deployment_raster.DeploymentRasterRefresher(
-        rasterize=counting_rasterize
-    )
+    refresher = deployment_raster.DeploymentRasterRefresher()
     yield dict(
         session=session,
         store=store,
@@ -117,7 +113,6 @@ def setup(tmp_path, monkeypatch):
         map_service=map_service,
         components=components,
         refresher=refresher,
-        calls=calls,
         tmp_path=tmp_path,
     )
     store.close()
@@ -140,8 +135,42 @@ def cell_at(meta, cells, x, y):
 def expected_transforms():
     return {
         robot_id: {"x": x, "y": y, "yaw": yaw}
-        for robot_id, (x, y, yaw) in TRANSFORMS.items()
+        for robot_id, (x, y, _z, yaw) in TRANSFORMS.items()
     }
+
+
+@pytest.mark.parametrize("catalogue_view", [False, True])
+def test_replica_view_preserves_physical_sensor_ray_origin(tmp_path, catalogue_view):
+    from autonomy.mapping import decode_chunk_points
+    from swarmdeck_server.mapsvc.keyframe_raster import composite_world_points
+    from tests.test_replica_components import reseal
+
+    source, chunks = peer(tmp_path, "robot_0", str(uuid4()))
+    submap = source["snapshot"]["manifests"][0]["submaps"][0]
+    submap["sensor_origins"] = [[0.5, 0.0, 1.2]]
+    submap["T_component_submap"] = [
+        [0.0, -1.0, 0.0, 4.0],
+        [1.0, 0.0, 0.0, 5.0],
+        [0.0, 0.0, 1.0, -3.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    source = reseal(source)
+    if catalogue_view:
+        from swarmdeck_server.api.replica_components import ComponentCatalogue
+
+        component_id = source["snapshot"]["manifests"][0]["graph_revision"][
+            "component_id"
+        ]
+        view = ComponentCatalogue([source]).view(source["session_id"], component_id)
+    else:
+        view = replica_views.build_view(source)
+    points, rays = composite_world_points(
+        view,
+        lambda chunk: decode_chunk_points(chunks[chunk["sha256"]], chunk["encoding"]),
+        max_points=100,
+    )
+    np.testing.assert_allclose(points, [[4, 6, -3]])
+    np.testing.assert_allclose(rays["origins"], [[4, 5.5, -1.8]])
 
 
 def test_refresh_writes_the_scope_with_member_robots_and_world_navigation(setup):
@@ -221,10 +250,9 @@ def test_each_robot_own_component_is_rasterized_in_its_frame_beside_the_fleet(se
 
 
 def test_refresh_rebuilds_only_when_the_composite_changes(setup):
-    session, refresher, calls = setup["session"], setup["refresher"], setup["calls"]
+    session, refresher = setup["session"], setup["refresher"]
     assert refresher.refresh(session, placements(session))["status"] == "built"
     assert refresher.refresh(session, placements(session))["status"] == "unchanged"
-    assert len(calls) == 1
 
     # A member republishes new geometry: the composite snapshot changes.
     publish_peer(
@@ -236,14 +264,12 @@ def test_refresh_rebuilds_only_when_the_composite_changes(setup):
         revision=2,
     )
     assert refresher.refresh(session, placements(session))["status"] == "built"
-    assert len(calls) == 2
     meta, cells, _, _ = map_routes._optimized[scope_of(session)]
     assert cell_at(meta, cells, 9.9, 6.5) == 0
 
     # A member moves in the deployment frame: same geometry, new placement.
-    setup["map_service"].transforms["robot_1"] = (10.0, 6.0, math.pi / 2)
+    setup["map_service"].transforms["robot_1"] = (10.0, 6.0, 0.0, math.pi / 2)
     assert refresher.refresh(session, placements(session))["status"] == "built"
-    assert len(calls) == 3
     _, _, _, transforms = map_routes._optimized[scope_of(session)]
     assert transforms["robot_1"] == pytest.approx(
         {"x": 10.0, "y": 6.0, "yaw": math.pi / 2}
@@ -252,7 +278,6 @@ def test_refresh_rebuilds_only_when_the_composite_changes(setup):
     # A map reset cleared the store: rebuild although nothing changed.
     map_routes.reset_optimized_maps()
     assert refresher.refresh(session, placements(session))["status"] == "built"
-    assert len(calls) == 4
 
 
 def test_scope_survives_a_missing_composite_and_retires_with_the_mission(setup):
@@ -336,6 +361,12 @@ def test_a_verified_merge_is_rasterized_under_its_component_id(setup, tmp_path):
     # The back-end's scope list still never prunes it.
     assert map_routes._prune_optimized_maps(["robot:x"]) == []
     assert shared in map_routes._optimized
+    # A verified shared frame does not make the Local view a fleet union.
+    assert cell_at(meta, cells, 0.5, 0.5) == 100
+    own_meta, own_cells, _, _ = map_routes._optimized["robot:robot_0"]
+    assert cell_at(own_meta, own_cells, 0.5, 0.5) == 100
+    own_meta, own_cells, _, _ = map_routes._optimized["robot:robot_1"]
+    assert cell_at(own_meta, own_cells, 0.5, 0.5) == -1
 
 
 def test_slam_scope_list_never_prunes_the_deployment_scope():
@@ -457,10 +488,11 @@ def test_reset_during_rasterization_cannot_publish_the_retired_source(
     setup, monkeypatch
 ):
     session = setup["session"]
-    rasterize = deployment_raster.rasterize_points
+    refresher = deployment_raster.DeploymentRasterRefresher()
+    rasterize = refresher._incremental_raster
 
-    def reset_while_building(points, **kwargs):
-        result = rasterize(points, **kwargs)
+    def reset_while_building(scope, view):
+        result = rasterize(scope, view)
         setup["store"].reserve_map_epoch("robot_0", session, 1)
         monkeypatch.setattr(
             map_routes, "_raster_generation", map_routes.raster_generation() + 1
@@ -468,9 +500,50 @@ def test_reset_during_rasterization_cannot_publish_the_retired_source(
         map_routes.retire_server_scopes()
         return result
 
-    refresher = deployment_raster.DeploymentRasterRefresher(
-        rasterize=reset_while_building
-    )
+    monkeypatch.setattr(refresher, "_incremental_raster", reset_while_building)
     report = refresher.refresh(session, placements(session))
     assert report["status"] == "superseded"
     assert scope_of(session) not in map_routes._optimized
+
+
+def test_incremental_raster_keeps_overlapping_history_without_raw_point_cap(
+    setup, monkeypatch
+):
+    session = setup["session"]
+    view = replica_views.deployment_view(
+        replica_views.current_catalogue(session), session, placements(session)
+    )
+    assert view is not None
+    template = deepcopy(view["selected"]["submaps"][0])
+    for index in range(30):
+        item = deepcopy(template)
+        item["submap_id"] = f"overlap/{index}"
+        view["selected"]["submaps"].append(item)
+    refresher = deployment_raster.DeploymentRasterRefresher(max_points=512)
+    first, _ = refresher._incremental_raster("test", view)
+    assert first.points > 512
+    reader = refresher._chunk_points
+    reads = []
+
+    def observed_read(chunk):
+        reads.append(chunk["sha256"])
+        return reader(chunk)
+
+    monkeypatch.setattr(refresher, "_chunk_points", observed_read)
+    extra = deepcopy(template)
+    extra["submap_id"] = "new"
+    view["selected"]["submaps"].append(extra)
+    appended, _ = refresher._incremental_raster("test", view)
+    assert reads == [chunk["sha256"] for chunk in extra["chunks"]]
+    assert cell_at(appended.meta, appended.cells, 0.5, 0.5) == 100
+
+    # Corrections/removals must erase old evidence, not leave stale cached cells.
+    view["selected"]["submaps"] = [deepcopy(extra)]
+    view["selected"]["submaps"][0]["T_component_submap"][0][3] += 20.0
+    corrected, _ = refresher._incremental_raster("test", view)
+    rebuilt, _ = deployment_raster.DeploymentRasterRefresher(
+        max_points=512
+    )._incremental_raster("fresh", view)
+    assert corrected.meta == rebuilt.meta
+    np.testing.assert_array_equal(corrected.cells, rebuilt.cells)
+    assert corrected.meta.origin_x > 10.0

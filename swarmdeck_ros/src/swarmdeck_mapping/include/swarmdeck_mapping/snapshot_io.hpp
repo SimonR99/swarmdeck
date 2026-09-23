@@ -11,9 +11,9 @@
 
 namespace swarmdeck_mapping
 {
-inline constexpr std::size_t kMaxSnapshotBytes = 4 * 1024 * 1024;
-inline constexpr std::size_t kMaxSubmapsPerMap = 4096;
-inline constexpr std::size_t kMaxChunksPerMap = 16384;
+inline constexpr std::size_t kMaxSnapshotBytes = 64 * 1024 * 1024;
+inline constexpr std::size_t kMaxSubmapsPerMap = 16384;
+inline constexpr std::size_t kMaxChunksPerMap = 65536;
 inline constexpr std::size_t kMaxSensorOriginsPerSubmap = 16;
 
 struct ChunkDescriptor
@@ -21,6 +21,10 @@ struct ChunkDescriptor
   std::string sha256;
   std::size_t size_bytes{};
   std::size_t point_count{};
+  std::string fingerprint() const
+  {
+    return sha256 + ":" + std::to_string(size_bytes) + ":" + std::to_string(point_count);
+  }
 };
 
 struct ParsedSubmap
@@ -28,6 +32,7 @@ struct ParsedSubmap
   std::string external_id;
   Matrix4 T_component_submap;
   std::vector<ChunkDescriptor> chunks;
+  std::uint64_t geometry_revision{};
   std::vector<PointXYZ> sensor_origins_local;
   std::uint64_t observed_at_ns{};
   bool ray_evidence_qualified{};
@@ -51,13 +56,15 @@ ParsedComponentSnapshot parseComponentSnapshot(
     std::size_t max_chunks = kMaxChunksPerMap,
     std::size_t max_points = kMaxPointsPerMap,
     const std::string& component_id = {});
-
-/** Load checked chunk payloads only when a geometry replacement is required. */
+/** Load checked chunk payloads and compact overlapping history to max_points. */
 std::vector<SubmapInput> loadGeometry(
     const ParsedComponentSnapshot& snapshot,
     const std::filesystem::path& chunks_dir,
+    std::size_t max_points = kMaxPointsPerMap,
+    const NativeGeometrySnapshot* prior = nullptr);
+SubmapInput loadRawSubmap(
+    const ParsedSubmap& submap, const std::filesystem::path& chunks_dir,
     std::size_t max_points = kMaxPointsPerMap);
-
 std::vector<PoseUpdate> poseUpdates(const ParsedComponentSnapshot& snapshot);
 
 std::string boundedFileSha256(

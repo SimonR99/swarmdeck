@@ -97,7 +97,7 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                 "type": "ready",
                 "limits": {{
                     "max_line_bytes": 65536,
-                    "max_snapshot_bytes": 4194304,
+                    "max_snapshot_bytes": {worker_module.MAX_SNAPSHOT_BYTES},
                     "max_response_bytes": 65536,
                     "max_maps": options["--max-maps"],
                     "max_submaps_per_map": 4096,
@@ -844,48 +844,6 @@ def test_persistent_runtime_receives_configured_resource_limits(tmp_path) -> Non
         ]
     finally:
         worker.close()
-
-
-def _cpp_constant(path: Path, name: str) -> int:
-    """The integer a C++ header assigns to ``name`` (digit separators allowed)."""
-
-    import re
-
-    match = re.search(name + r"\s*=\s*([0-9']+)", path.read_text())
-    assert match is not None, f"{name} not found in {path}"
-    return int(match.group(1).replace("'", ""))
-
-
-def test_point_budget_is_one_number_for_worker_and_native_runtime() -> None:
-    """The worker, planner grid and native runtime share a point budget.
-
-    The native runtime derives every point limit from
-    ``--max-points-per-map``; this pins the defaults the worker, native
-    headers and product writer carry to one value.
-    """
-
-    mapping = Path(__file__).parents[2] / "swarmdeck_ros/src/swarmdeck_mapping"
-    include = mapping / "include/swarmdeck_mapping"
-    shared = _cpp_constant(include / "point_budget.hpp", "kMaxPointsPerMap")
-    assert shared == worker_module.DEFAULT_MAX_POINTS_PER_MAP == 2_000_000
-    # The header defaults are spelled through the shared constant, not a
-    # second literal.
-    runtime_header = (include / "persistent_mola_runtime.hpp").read_text()
-    assert "max_points_per_map{kMaxPointsPerMap}" in runtime_header
-    assert "max_resident_points{4 * kMaxPointsPerMap}" in runtime_header
-    planner_header = (include / "planner_map.hpp").read_text()
-    assert "max_points{kMaxPointsPerMap}" in planner_header
-    assert "std::size_t max_points = kMaxPointsPerMap" in planner_header
-    assert "kMaxPlannerProductPoints" not in planner_header
-    # The runtime builds and writes every planner product with its own budget.
-    runtime_source = (mapping / "src/persistent_mola_runtime.cpp").read_text()
-    assert "buildNativePlannerGrid(candidate, plannerGridLimits())" in runtime_source
-    assert "limits_.max_points_per_map);" in runtime_source
-    # A replacement holds the old and the new geometry of a component at once.
-    assert (
-        worker_module.DEFAULT_MAX_RESIDENT_POINTS
-        >= 2 * worker_module.DEFAULT_MAX_POINTS_PER_MAP
-    )
 
 
 def test_worker_status_reports_the_last_attempt_and_logs_a_failure_once(

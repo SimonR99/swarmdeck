@@ -273,6 +273,193 @@ bool isDigest(const std::string& value)
 }
 }  // namespace
 
+struct NativePlannerAccumulator::Impl
+{
+  struct Evidence
+  {
+    VoxelEvidence visibility;
+    double low{std::numeric_limits<double>::infinity()};
+  };
+  PlannerGridLimits limits;
+  std::unordered_map<PlannerVoxel, Evidence, VoxelHash> occupied;
+  std::unordered_set<PlannerVoxel, VoxelHash> free;
+  std::size_t samples{}, source_points{}, steps{}, qualified{};
+  std::uint64_t newest{};
+
+  static Point3d point(const Matrix4& m, const PointXYZ& p)
+  {
+    Point3d q{m[0]*p.x + m[1]*p.y + m[2]*p.z + m[3],
+              m[4]*p.x + m[5]*p.y + m[6]*p.z + m[7],
+              m[8]*p.x + m[9]*p.y + m[10]*p.z + m[11]};
+    if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z))
+      throw std::invalid_argument("nonfinite planner endpoint");
+    return q;
+  }
+};
+
+NativePlannerAccumulator::NativePlannerAccumulator(const PlannerGridLimits& limits)
+    : impl_(std::make_unique<Impl>())
+{
+  validateLimits(limits);
+  impl_->limits = limits;
+}
+NativePlannerAccumulator::NativePlannerAccumulator(const NativePlannerAccumulator& other)
+    : impl_(std::make_unique<Impl>(*other.impl_))
+{
+  impl_->steps = 0;
+}
+NativePlannerAccumulator::~NativePlannerAccumulator() = default;
+std::size_t NativePlannerAccumulator::residentUnits() const
+{
+  return impl_->occupied.size() + impl_->free.size() + impl_->samples;
+}
+std::uint64_t NativePlannerAccumulator::newestStamp() const { return impl_->newest; }
+
+void NativePlannerAccumulator::endpoints(const SubmapInput& frame)
+{
+  auto& state = *impl_;
+  const auto started = Clock::now();
+  state.newest = std::max(state.newest, frame.observed_at_ns);
+  state.source_points = checkedAdd(state.source_points, frame.points_local.size());
+  std::size_t index = 0;
+  for (const auto& local : frame.points_local)
+  {
+    const auto p = Impl::point(frame.T_component_submap, local);
+    const auto voxel = voxelFor(p, state.limits.resolution_m);
+    auto [it, inserted] = state.occupied.try_emplace(voxel);
+    auto& evidence = it->second;
+    const auto before = inserted ? 0U :
+        (evidence.low == evidence.visibility.highest_endpoint_z ? 1U : 2U);
+    evidence.low = std::min(evidence.low, p.z);
+    evidence.visibility.highest_endpoint_z =
+        std::max(evidence.visibility.highest_endpoint_z, p.z);
+    if (frame.observed_at_ns >= evidence.visibility.newest_endpoint_ns)
+    {
+      evidence.visibility.newest_endpoint_ns = frame.observed_at_ns;
+      evidence.visibility.clearing_traversals = 0;
+    }
+    state.samples += (evidence.low == evidence.visibility.highest_endpoint_z ? 1U : 2U) - before;
+    state.free.erase(voxel);
+    if (state.samples > state.limits.max_points ||
+        state.occupied.size() + state.free.size() > state.limits.max_voxels)
+      throw std::runtime_error("planner materialized evidence budget exceeded");
+    if ((++index & 4095U) == 0) checkTime(started, state.limits);
+  }
+}
+
+void NativePlannerAccumulator::rays(const SubmapInput& frame, std::size_t work_budget)
+{
+  auto& state = *impl_;
+  if (!frame.ray_evidence_qualified || frame.sensor_origins_local.size() != 1) return;
+  ++state.qualified;
+  const auto started = Clock::now();
+  const auto origin = Impl::point(frame.T_component_submap, frame.sensor_origins_local.front());
+  std::unordered_map<AngularBin, RayEndpoint, AngularHash> representatives;
+  for (const auto& local : frame.points_local)
+  {
+    const auto p = Impl::point(frame.T_component_submap, local);
+    const double dx = p.x-origin.x, dy = p.y-origin.y, dz = p.z-origin.z;
+    const auto distance = std::sqrt(dx*dx + dy*dy + dz*dz);
+    if (distance <= state.limits.resolution_m) continue;
+    const AngularBin bin{
+        cellCoordinate(std::atan2(dy, dx), state.limits.ray_angular_resolution_rad),
+        cellCoordinate(std::asin(std::clamp(dz/distance, -1.0, 1.0)),
+                       state.limits.ray_angular_resolution_rad)};
+    auto it = representatives.find(bin);
+    if (it == representatives.end() || distance > it->second.distance ||
+        (distance == it->second.distance &&
+         std::tie(p.x,p.y,p.z) < std::tie(it->second.endpoint.x,it->second.endpoint.y,it->second.endpoint.z)))
+      representatives[bin] = {distance, p};
+  }
+  std::vector<RayCandidate> rays;
+  for (const auto& entry : representatives)
+  {
+    const auto count = std::ceil(entry.second.distance /
+        (state.limits.resolution_m * state.limits.ray_step_fraction));
+    if (!std::isfinite(count) || count > static_cast<double>(work_budget) + 1) continue;
+    rays.push_back({entry.first, entry.second.distance, entry.second.endpoint,
+                   static_cast<std::size_t>(count) - 1});
+  }
+  std::sort(rays.begin(), rays.end(), [](const RayCandidate& a, const RayCandidate& b) {
+    return std::tie(a.additions,a.bin.azimuth,a.bin.elevation) <
+           std::tie(b.additions,b.bin.azimuth,b.bin.elevation);
+  });
+  for (const auto& ray : rays)
+  {
+    if (ray.additions > work_budget ||
+        ray.additions > state.limits.max_ray_steps - state.steps) break;
+    work_budget -= ray.additions;
+    state.steps += ray.additions;
+    PlannerVoxel previous{};
+    bool have_previous = false, counted = false;
+    for (std::size_t step = 1; step <= ray.additions; ++step)
+    {
+      const double t = static_cast<double>(step) / (ray.additions + 1);
+      const Point3d sample{origin.x+(ray.endpoint.x-origin.x)*t,
+                           origin.y+(ray.endpoint.y-origin.y)*t,
+                           origin.z+(ray.endpoint.z-origin.z)*t};
+      const auto voxel = voxelFor(sample, state.limits.resolution_m);
+      if (!have_previous || !(previous == voxel))
+      {
+        previous = voxel; have_previous = true; counted = false;
+      }
+      const auto found = state.occupied.find(voxel);
+      if (found == state.occupied.end())
+      {
+        state.free.insert(voxel);
+        if (state.occupied.size() + state.free.size() > state.limits.max_voxels)
+          throw std::runtime_error("planner materialized voxel budget exceeded");
+      }
+      else
+      {
+        auto& evidence = found->second.visibility;
+        if (!counted && frame.observed_at_ns > evidence.newest_endpoint_ns &&
+            sample.z <= evidence.highest_endpoint_z + state.limits.clearing_height_tolerance_m)
+        {
+          counted = true;
+          if (evidence.clearing_traversals < state.limits.min_clearing_traversals)
+            ++evidence.clearing_traversals;
+        }
+      }
+      if ((step & 4095U) == 0) checkTime(started, state.limits);
+    }
+    checkTime(started, state.limits);
+  }
+}
+
+std::shared_ptr<const NativePlannerGrid> NativePlannerAccumulator::snapshot(
+    const SolutionVersion& version, const SnapshotIdentity& identity) const
+{
+  const auto& state = *impl_;
+  auto result = std::make_shared<NativePlannerGrid>();
+  result->graph_version = version; result->identity = identity;
+  result->source_stamp_ns = state.newest;
+  result->resolution_m = state.limits.resolution_m;
+  result->ray_angular_resolution_rad = state.limits.ray_angular_resolution_rad;
+  result->ray_step_fraction = state.limits.ray_step_fraction;
+  result->point_count = state.samples; result->ray_steps = state.steps;
+  result->source_point_count = state.source_points;
+  result->qualified_ray_keyframes = state.qualified;
+  result->free.assign(state.free.begin(), state.free.end());
+  for (const auto& [voxel, evidence] : state.occupied)
+  {
+    const bool two = evidence.low != evidence.visibility.highest_endpoint_z;
+    if (evidence.visibility.clearing_traversals >= state.limits.min_clearing_traversals)
+    {
+      result->free.push_back(voxel);
+      result->retired_count += two ? 2 : 1;
+      continue;
+    }
+    result->occupied.push_back(voxel);
+    result->surfaces.push_back({voxel.x,voxel.y,evidence.low});
+    if (two) result->surfaces.push_back({voxel.x,voxel.y,evidence.visibility.highest_endpoint_z});
+  }
+  std::sort(result->occupied.begin(), result->occupied.end());
+  std::sort(result->free.begin(), result->free.end());
+  std::sort(result->surfaces.begin(), result->surfaces.end());
+  return result;
+}
+
 std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
     const NativeGeometrySnapshot& snapshot, const PlannerGridLimits& limits)
 {
@@ -561,6 +748,7 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   result->ray_angular_resolution_rad = limits.ray_angular_resolution_rad;
   result->ray_step_fraction = limits.ray_step_fraction;
   result->point_count = point_count;
+  result->source_point_count = point_count;
   result->ray_steps = ray_steps;
   result->qualified_ray_keyframes = qualified_ray_keyframes;
   result->retired_count = retired_count;
@@ -603,9 +791,10 @@ PlannerGridArtifact writeNativePlannerGrid(
       !isDigest(grid.identity.source_snapshot_id) ||
       !isDigest(grid.identity.source_sha256))
     throw std::invalid_argument("planner grid identity is invalid");
-  // `point_count` stays the manifest's stored point count. Every stored point
-  // is either a surface sample or a visibility-retired endpoint.
-  if (grid.retired_count > grid.point_count ||
+  // The source count authenticates all input endpoints; the bounded product
+  // count covers only materialized surface extrema and retired extrema.
+  if (grid.point_count > grid.source_point_count ||
+      grid.retired_count > grid.point_count ||
       grid.surfaces.size() != grid.point_count - grid.retired_count)
     throw std::invalid_argument(
         "planner surface and retired counts do not match point count");
@@ -643,7 +832,7 @@ PlannerGridArtifact writeNativePlannerGrid(
   const auto& version = grid.graph_version;
   const auto& identity = grid.identity;
   const json metadata{
-      {"schema", "swarmdeck.mola_planner_grid.v1"},
+      {"schema", "swarmdeck.mola_planner_grid.v2"},
       {"graph_version",
        {{"component_id", version.component_id},
         {"epoch", version.epoch},
@@ -661,6 +850,7 @@ PlannerGridArtifact writeNativePlannerGrid(
       {"ray_angular_resolution_rad", grid.ray_angular_resolution_rad},
       {"ray_step_fraction", grid.ray_step_fraction},
       {"point_count", grid.point_count},
+      {"source_point_count", grid.source_point_count},
       {"occupied_count", grid.occupied.size()},
       {"free_count", grid.free.size()},
       {"surface_count", grid.surfaces.size()},

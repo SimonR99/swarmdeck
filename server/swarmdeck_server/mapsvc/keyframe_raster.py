@@ -12,15 +12,13 @@ Rule, per cell of ``cell_m`` (0.2 m by default):
 * the cell is OCCUPIED when it holds at least one point between
   ``ground + 0.30 m`` and ``ground + 2.0 m``: walls, furniture, vehicles,
   the things the operator reads as obstacles. The 0.30 m floor of the band
-  keeps out kerb tops (0.12 to 0.19 m on the Bistro street), speed bumps,
-  the road's texture, and the floor's own scatter in a fleet map: the four
-  platforms' floors sit up to 0.18 m apart away from the start once inter-
-  robot closures merge them, and the simulated Spot's floor moves 0.1 to
-  0.2 m with its posture, so at 0.15 m the road itself was drawn occupied
-  (concentric arcs at the start, dark bands along the street; operator
-  screenshot 2026-09-19). The 2.0 m ceiling keeps tree canopies and awnings
-  out. A 0.2 m planter is below the band and drawn free: this raster is a
-  display, the robots plan on their own terrain products;
+  keeps out kerb tops (0.12 to 0.19 m on the Bistro street), speed bumps, and
+  floor scatter. Source heights remain in the surveyed world frame: each
+  source's points and keyframe ray origin share one stable SE(3) placement, and
+  this display raster never estimates a cross-robot vertical offset from scene
+  statistics. The 2.0 m ceiling keeps tree canopies and awnings out. A 0.2 m
+  planter is below the band and drawn free: this raster is a display, the
+  robots plan on their own terrain products;
 * the cell is FREE when it holds points but none in that band, and also when
   a keyframe's rays swept it (``rays``): each replicated keyframe carries a
   4096-point subsample of its scan, so far ground has few returns and a
@@ -316,28 +314,6 @@ def rasterize_points(
     )
 
 
-def level_source_floors(
-    points: np.ndarray, sources: np.ndarray, *, percentile: float = GROUND_PERCENTILE
-) -> np.ndarray:
-    """Shift each source's points so that its own floor sits at z = 0.
-
-    A robot's odometry frame starts at its base link, so every platform
-    carries its floor at a different height (measured on Bistro: Bunker
-    -0.37 m, Scout -0.29 m, Spot -0.66 m). Composed unchanged, a neighbour's
-    floor lands inside the obstacle band wherever coverage overlaps and paints
-    the road occupied. The per-source ground percentile is subtracted; the
-    raster only reads heights relative to each cell's own ground, so a
-    uniform shift per source changes nothing else.
-    """
-    if len(points) == 0:
-        return points
-    levelled = np.array(points, dtype=np.float64, copy=True)
-    for source in np.unique(sources):
-        rows = sources == source
-        levelled[rows, 2] -= np.percentile(levelled[rows, 2], percentile)
-    return levelled
-
-
 def composite_world_points(
     view: Mapping[str, Any],
     chunk_points: Callable[[Mapping[str, Any]], np.ndarray | None],
@@ -349,6 +325,10 @@ def composite_world_points(
     ``view`` is a replica component view whose ``selected["submaps"]`` carry
     ``T_component_submap`` already re-expressed in the target frame (the
     deployment composite does that, so the result is in the world frame).
+    When a submap carries the single ``sensor_origins`` entry guaranteed by the
+    capture contract, that local sensor origin is transformed by the same
+    full SE(3) as its points and used for ray sweeps. Legacy originless
+    fixtures fall back to the submap translation.
     ``chunk_points`` returns one chunk's decoded N x 3 points, or ``None`` when
     the chunk is unavailable (retired between the manifest read and this call).
     The declared point total is checked against ``max_points`` before any chunk
@@ -364,8 +344,6 @@ def composite_world_points(
             f"composite declares {declared} points, above the {max_points} budget"
         )
     parts: list[np.ndarray] = []
-    part_sources: list[np.ndarray] = []
-    source_ids: dict[str, int] = {}
     origins: list[np.ndarray] = []
     spans: list[tuple[int, int]] = []
     chunks = 0
@@ -376,10 +354,21 @@ def composite_world_points(
         if transform.shape != (4, 4):
             raise ValueError("submap transform must be a 4x4 matrix")
         rotation, translation = transform[:3, :3], transform[:3, 3]
-        # Submap ids are ``<robot>/<run>/submap/<seq>`` (KeyframeId.stable_id);
-        # the robot is the source whose floor is levelled.
-        robot = str(submap.get("submap_id", "")).split("/", 1)[0]
-        source = source_ids.setdefault(robot, len(source_ids))
+        sensor_origins = submap.get("sensor_origins") or ()
+        ray_origin: np.ndarray | None = translation
+        if len(sensor_origins) > 1:
+            # A submap can carry several origins for legacy/multi-capture
+            # products, but no point-to-origin association is available here.
+            # Keep all geometry and omit only its unsafe ray sweep.
+            ray_origin = None
+        elif sensor_origins:
+            local_origin = np.asarray(sensor_origins[0], dtype=np.float64)
+            if local_origin.shape != (3,) or not np.isfinite(local_origin).all():
+                raise ValueError("sensor origin must be a finite XYZ triple")
+            # The capture's sensor origin is in the same local frame as the
+            # chunk points. Apply the full submap SE(3), not just its
+            # translation, so free-space rays and returns agree exactly.
+            ray_origin = local_origin @ rotation.T + translation
         first = gathered
         for chunk in submap["chunks"]:
             chunks += 1
@@ -391,14 +380,11 @@ def composite_world_points(
                 parts.append(
                     np.asarray(local, dtype=np.float64) @ rotation.T + translation
                 )
-                part_sources.append(np.full(len(local), source, dtype=np.int32))
                 gathered += len(local)
-        if gathered > first:
-            origins.append(translation)
+        if gathered > first and ray_origin is not None:
+            origins.append(ray_origin)
             spans.append((first, gathered))
     points = np.concatenate(parts) if parts else np.zeros((0, 3), dtype=np.float64)
-    if len(source_ids) > 1:
-        points = level_source_floors(points, np.concatenate(part_sources))
     return points, {
         "chunks": chunks,
         "missing_chunks": missing,

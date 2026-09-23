@@ -2,7 +2,13 @@ import hashlib
 from uuid import uuid4
 
 import pytest
-from autonomy.replication import MissingChunks, ReplicaStore, RevisionConflict
+from autonomy.replication import (
+    MissingChunks,
+    ReplicaClient,
+    ReplicaStore,
+    RevisionConflict,
+    canonical,
+)
 from autonomy.map_epochs import robot_run_id
 
 
@@ -20,6 +26,188 @@ def envelope(session, data=b"points", revision=1, *, map_epoch=0, robot="robot_0
         "chunks": [{"sha256": digest, "size": len(data)}],
         "snapshot": {"frame": "robot_0/map", "graph_revision": revision},
     }
+
+
+def map_envelope(session, revision, submaps, chunks, *, robot="robot_0"):
+    component = {
+        "component_id": "component:robot_0",
+        "epoch": 0,
+        "revision": revision,
+    }
+    submaps = sorted(
+        (dict(item, pose_revision=component) for item in submaps),
+        key=lambda item: "/".join(map(str, ReplicaStore._submap_key(item))),
+    )
+    chunks = sorted(chunks, key=lambda item: item["sha256"])
+    manifest = {
+        "map_id": "onboard",
+        "layer_id": "persistent_geometry",
+        "frame_id": "component_robot_0",
+        "graph_revision": component,
+        "geometry_revision": ("a" if len(submaps) == 1 else "b") * 64,
+        "submaps": list(submaps),
+        "chunks": list(chunks),
+        "tombstones": [],
+    }
+    snapshot = {
+        "schema": "swarmdeck.autonomy.v1",
+        "snapshot_id": hashlib.sha256(
+            canonical([{"schema": "swarmdeck.autonomy.v1", **manifest}])
+        ).hexdigest(),
+        "generated_at_ns": revision,
+        "manifests": [manifest],
+    }
+    return {
+        "version": 1,
+        "robot_id": robot,
+        "session_id": session,
+        "map_epoch": 0,
+        "run_id": robot_run_id(session, robot, 0),
+        "robot_map_epochs": {robot: 0},
+        "participant_robot_ids": [robot],
+        "revision": revision,
+        "solution_order": [revision, 0],
+        "component_id": component["component_id"],
+        "chunks": [
+            {"sha256": chunk["sha256"], "size": chunk["size_bytes"]} for chunk in chunks
+        ],
+        "snapshot": snapshot,
+    }
+
+
+def submap(session, seq, digest, *, x=0.0, revision=1):
+    run = robot_run_id(session, "robot_0", 0)
+    return {
+        "submap_id": {"robot_id": "robot_0", "session_id": run, "seq": seq},
+        "geometry_revision": seq,
+        "pose_revision": {
+            "component_id": "component:robot_0",
+            "epoch": 0,
+            "revision": revision,
+        },
+        "T_component_submap": [
+            [1.0, 0.0, 0.0, x],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        "chunks": [
+            {
+                "sha256": digest,
+                "encoding": "application/vnd.swarmdeck.xyz-f32.v1",
+                "size_bytes": 28,
+                "point_count": 1,
+                "bounds": [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+            }
+        ],
+    }
+
+
+def test_submap_delta_appends_only_new_history_and_negotiates_chunk(tmp_path):
+    session = str(uuid4())
+    first_data, second_data = b"0" * 28, b"1" * 28
+    first_digest = hashlib.sha256(first_data).hexdigest()
+    second_digest = hashlib.sha256(second_data).hexdigest()
+    first = submap(session, 0, first_digest)
+    second = submap(session, 1, second_digest)
+    base = map_envelope(session, 1, [first], first["chunks"])
+    current = map_envelope(
+        session, 2, [first, second], first["chunks"] + second["chunks"]
+    )
+
+    patch = ReplicaClient._delta(base, current)
+    assert patch is not None
+    assert len(patch["snapshot_delta"]["components"][0]["upsert_submaps"]) == 1
+    assert len(canonical(patch)) < len(canonical(current))
+
+    store = ReplicaStore(tmp_path)
+    store.put_chunk(first_digest, first_data)
+    assert store.publish(base)
+    with pytest.raises(MissingChunks):
+        store.publish(patch)
+    assert store.get("robot_0", session) == base
+    store.put_chunk(second_digest, second_data)
+    assert store.publish(patch)
+    assert store.get("robot_0", session) == current
+    store.close()
+
+
+def test_submap_delta_pose_and_removal_reconstruct_exact_snapshot(tmp_path):
+    session = str(uuid4())
+    first_data, second_data = b"0" * 28, b"1" * 28
+    first_digest = hashlib.sha256(first_data).hexdigest()
+    second_digest = hashlib.sha256(second_data).hexdigest()
+    first = submap(session, 0, first_digest)
+    second = submap(session, 1, second_digest)
+    base = map_envelope(session, 1, [first, second], first["chunks"] + second["chunks"])
+    corrected = submap(session, 0, first_digest, x=4.0, revision=2)
+    current = map_envelope(session, 2, [corrected], corrected["chunks"])
+
+    patch = ReplicaClient._delta(base, current)
+    component = patch["snapshot_delta"]["components"][0]
+    assert component["upsert_submaps"] == []
+    assert len(component["pose_updates"]) == 1
+    assert component["removed_submaps"] == [second["submap_id"]]
+
+    store = ReplicaStore(tmp_path)
+    store.put_chunk(first_digest, first_data)
+    store.put_chunk(second_digest, second_data)
+    assert store.publish(base)
+    assert store.publish(patch)
+    assert store.get("robot_0", session) == current
+    store.close()
+
+
+def test_delta_gap_reports_resync_and_full_bootstrap_remains_valid(tmp_path):
+    session = str(uuid4())
+    data = b"0" * 28
+    digest = hashlib.sha256(data).hexdigest()
+    item = submap(session, 0, digest)
+    base = map_envelope(session, 1, [item], item["chunks"])
+    newer = map_envelope(
+        session, 2, [submap(session, 0, digest, x=1.0, revision=2)], item["chunks"]
+    )
+
+    patch = ReplicaClient._delta(base, newer)
+    store = ReplicaStore(tmp_path)
+    store.put_chunk(digest, data)
+    assert store.publish(base)
+    assert store.publish(newer)
+    with pytest.raises(RevisionConflict) as error_info:
+        store.publish(patch)
+    assert error_info.value.resync
+    assert error_info.value.base_revision == 1
+    assert error_info.value.current_revision == 2
+    assert not store.publish(newer)
+    store.close()
+
+
+def test_delta_commit_fence_rechecks_base_after_reconstruction(tmp_path):
+    session = str(uuid4())
+    data = b"0" * 28
+    digest = hashlib.sha256(data).hexdigest()
+    item = submap(session, 0, digest)
+    base = map_envelope(session, 1, [item], item["chunks"])
+    newer = map_envelope(
+        session, 2, [submap(session, 0, digest, x=1.0, revision=2)], item["chunks"]
+    )
+    patch = ReplicaClient._delta(base, newer)
+    store = ReplicaStore(tmp_path)
+    store.put_chunk(digest, data)
+    assert store.publish(base)
+    original_expand = store._expand_delta
+
+    def reconstruct_then_publish(delta):
+        expanded = original_expand(delta)
+        assert store.publish(newer)
+        return expanded
+
+    store._expand_delta = reconstruct_then_publish
+    with pytest.raises(RevisionConflict) as error_info:
+        store.publish(patch)
+    assert error_info.value.resync
+    assert store.get("robot_0", session) == newer
+    store.close()
 
 
 def test_missing_chunks_cannot_replace_visible_snapshot(tmp_path):
@@ -254,3 +442,25 @@ def test_epoch_vector_only_fences_referenced_robots(tmp_path):
         )
     assert store.get("robot_1", session) == source
     store.close()
+
+
+def test_delta_preserves_mapper_lexical_order_without_resending_revision_only_poses(
+    tmp_path,
+):
+    session = str(uuid4())
+    data = b"0" * 28
+    digest = hashlib.sha256(data).hexdigest()
+    history = [submap(session, seq, digest) for seq in range(120)]
+    base = map_envelope(session, 1, history[:-1], history[0]["chunks"])
+    current = map_envelope(session, 2, history, history[0]["chunks"])
+    patch = ReplicaClient._delta(base, current)
+    assert patch is not None
+    assert len(canonical(patch)) < len(canonical(current)) / 10
+    store = ReplicaStore(tmp_path)
+    try:
+        store.put_chunk(digest, data)
+        store.publish(base)
+        store.publish(patch)
+        assert store.get("robot_0", session) == current
+    finally:
+        store.close()
