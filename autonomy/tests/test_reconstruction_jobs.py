@@ -252,7 +252,8 @@ def test_bridge_source_contract_has_dynamic_keyframe_and_atomic_solution_outputs
     assert '"keyframe_id": keyframe.stable_id' in source
     assert "tuple(self.core.poses)" in source
     assert '"solution": solution.canonical_dict()' in source
-    assert "os.replace(temporary, self.graph_solution_file)" in source
+    # Atomic, and fenced by the durable map epoch (`_replace_if_current`).
+    assert "self._replace_if_current(temporary, self.graph_solution_file)" in source
 
 
 def test_pose_snapshot_is_copied_into_job_before_training(tmp_path):

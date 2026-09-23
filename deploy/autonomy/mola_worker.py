@@ -240,6 +240,42 @@ def _read_snapshot(path: Path) -> tuple[bytes, dict[str, object]]:
     return raw, value
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Fields an atomic replacement changes, or None when the file is absent."""
+
+    try:
+        value = path.stat()
+    except OSError:
+        return None
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
+def _stat_matches(path: Path, expected_size: object, maximum: int) -> bool:
+    """True when ``path`` is a file of exactly ``expected_size`` bytes.
+
+    Two callers trust a sha256 they never recompute from `path`'s bytes: a
+    previously published artifact this worker wrote once and never modifies
+    (module docstring), trusting its own recorded sha256; and a component or
+    planner map the persistent native runtime just wrote in this build,
+    trusting the hash it reported for the exact bytes it wrote. Re-hashing a
+    component that may be several megabytes, on every poll that finds
+    nothing else to build, or a second time right after the process that
+    wrote it already hashed it, costs as much as the import itself for a
+    hash that would only ever match; `stat` still catches a missing,
+    truncated or oversized file either way. Local hashing
+    (`_sha256_file`) remains only for the legacy non-persistent runner mode,
+    which has no reported hash to trust.
+    """
+
+    if not isinstance(expected_size, int) or not 0 < expected_size <= maximum:
+        return False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    return size == expected_size
+
+
 def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
     expected_size = path.stat().st_size
     if expected_size <= 0 or expected_size > maximum:
@@ -260,29 +296,41 @@ def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _write_fsynced(path: Path, payload: bytes) -> None:
+    """Create ``path`` holding ``payload``, with its data fsynced."""
+
+    with path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _atomic_bytes(path: Path, payload: bytes) -> None:
     """Replace ``path`` with ``payload`` through a fsynced sibling temporary."""
 
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_fsynced(temporary, payload)
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
 def _atomic_json(path: Path, value: object) -> None:
-    _atomic_bytes(
-        path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-    )
+    _atomic_bytes(path, _json_bytes(value))
 
 
 @dataclass(frozen=True)
@@ -368,6 +416,11 @@ class MolaWorker:
         # Poll bookkeeping, touched only on the thread that calls run_once.
         self._completed: dict[Path, str] = {}
         self._retry_after: dict[Path, float] = {}
+        # snapshot.json's identity (`_file_identity`) the last time it was
+        # actually read and hashed for a completed build. Unchanged between
+        # polls, most of the time while a peer is parked, so the next poll
+        # can skip re-reading and re-hashing the whole file.
+        self._snapshot_identity: dict[Path, tuple[int, int, int, int]] = {}
         # The failure last logged per peer. A failing build is retried every
         # ``retry_s`` and the same message would otherwise repeat on every
         # retry (198 and 216 identical lines per robot on benchbot, mission
@@ -427,12 +480,18 @@ class MolaWorker:
 
     def _artifact_matches(self, mola_root: Path, item: dict[str, object]) -> bool:
         try:
-            size, digest = _sha256_file(
-                mola_root / str(item["path"]), self.max_output_bytes
-            )
-        except (KeyError, OSError, WorkerError):
+            path = mola_root / str(item["path"])
+        except KeyError:
             return False
-        return size == item.get("size_bytes") and digest == item.get("sha256")
+        digest = item.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return False
+        # The published sha256 was already trusted when this artifact was
+        # written (the native runtime's own response, or a prior `stat`
+        # check); it never changes underneath an unmodified file, so
+        # reconfirming reuse only needs to know the file is still there at
+        # its recorded size.
+        return _stat_matches(path, item.get("size_bytes"), self.max_output_bytes)
 
     def _planner_matches(self, mola_root: Path, item: dict[str, object]) -> bool:
         planner = item.get("planner")
@@ -622,13 +681,18 @@ class MolaWorker:
 
         peer_root = Path(peer_root)
         source = peer_root / "snapshot.json"
+        # Read (up to MAX_SNAPSHOT_BYTES) and parsed before map_epoch_lock,
+        # which the bridge's authority heartbeat takes before every send.
+        # Reading it first is still safe: a snapshot read before a new epoch
+        # was claimed names the retired run_id and is rejected below, and the
+        # lifetime is re-checked under the lock again before publication.
+        raw, snapshot = _read_snapshot(source)
+        dependencies = snapshot_epoch_dependencies(snapshot)
         with map_epoch_lock(peer_root):
             lifetime = read_map_epoch(peer_root)
             chunks = (peer_root / "geometry" / "chunks").resolve()
             if not chunks.is_dir():
                 raise WorkerError("geometry/chunks directory is missing")
-            raw, snapshot = _read_snapshot(source)
-            dependencies = snapshot_epoch_dependencies(snapshot)
             assert_map_epoch_dependencies(peer_root, dependencies)
         run_id = None if lifetime is None else lifetime["run_id"]
         if self._peer_runs.get(peer_root) != run_id:
@@ -736,13 +800,21 @@ class MolaWorker:
                         ),
                         self.timeout_s,
                     )
-                size, digest = _sha256_file(output_path, self.max_output_bytes)
-                if response is not None and (
-                    response.get("output_size_bytes") != size
-                    or response.get("output_sha256") != digest
-                ):
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("native artifact does not match its response")
+                if response is not None:
+                    # `_validate_runtime_response` already checked
+                    # `output_size_bytes` and `output_sha256` are well-formed;
+                    # the native runtime computed that hash itself from the
+                    # exact bytes it wrote, so trust it rather than re-reading
+                    # and re-hashing what may be a multi-megabyte artifact
+                    # only to compare against a hash that came from the same
+                    # process in the first place. `stat` still catches a
+                    # truncated, missing or oversized write.
+                    size, digest = response["output_size_bytes"], response["output_sha256"]
+                    if not _stat_matches(output_path, size, self.max_output_bytes):
+                        self._invalidate_runtime(peer_root)
+                        raise WorkerError("native artifact does not match its response")
+                else:
+                    size, digest = _sha256_file(output_path, self.max_output_bytes)
                 final_path = components_root / filename
                 staged.append((output_path, final_path))
                 artifacts.append(
@@ -760,13 +832,18 @@ class MolaWorker:
                 )
                 if planner_path is not None:
                     assert response is not None
-                    planner_size, planner_sha = _sha256_file(
-                        planner_path, self.max_output_bytes
-                    )
+                    # `_validate_runtime_response` does not cover the planner
+                    # fields (only sent when planner_maps is on), so their
+                    # shape is checked here before trusting them the same way.
+                    planner_size = response.get("planner_output_size_bytes")
+                    planner_sha = response.get("planner_output_sha256")
                     if (
-                        type(response.get("planner_output_size_bytes")) is not int
-                        or response["planner_output_size_bytes"] != planner_size
-                        or response.get("planner_output_sha256") != planner_sha
+                        not isinstance(planner_sha, str)
+                        or len(planner_sha) != 64
+                        or any(c not in "0123456789abcdef" for c in planner_sha)
+                        or not _stat_matches(
+                            planner_path, planner_size, self.max_output_bytes
+                        )
                     ):
                         self._invalidate_runtime(peer_root)
                         raise WorkerError(
@@ -782,28 +859,44 @@ class MolaWorker:
                         "source_snapshot_id": snapshot_id,
                     }
 
+            # source.json and index.json are written and fsynced into the
+            # staging directory first; under map_epoch_lock only renames and
+            # one directory fsync remain.
+            _write_fsynced(staging / "source.json", raw)
+            index = {
+                "version": 1,
+                "source_snapshot_id": snapshot_id,
+                "source_sha256": source_sha,
+                "generated_at_ns": time.time_ns(),
+                "artifacts": artifacts,
+            }
+            _write_fsynced(staging / "index.json", _json_bytes(index))
+            refused = None
             with map_epoch_lock(peer_root):
                 if read_map_epoch(peer_root) != lifetime:
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("robot map epoch advanced during native build")
-                try:
-                    assert_map_epoch_dependencies(peer_root, dependencies)
-                except (OSError, ValueError):
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("peer map epoch advanced during native build")
-                for staged_path, final_path in staged:
-                    os.replace(staged_path, final_path)
-                # A newer graph revision may supersede this build, but a new
-                # robot lifetime may never receive an old build's geometry.
-                _atomic_bytes(mola_root / "source.json", raw)
-                index = {
-                    "version": 1,
-                    "source_snapshot_id": snapshot_id,
-                    "source_sha256": source_sha,
-                    "generated_at_ns": time.time_ns(),
-                    "artifacts": artifacts,
-                }
-                _atomic_json(mola_root / "index.json", index)
+                    refused = "robot map epoch advanced during native build"
+                else:
+                    try:
+                        assert_map_epoch_dependencies(peer_root, dependencies)
+                    except (OSError, ValueError):
+                        refused = "peer map epoch advanced during native build"
+                if refused is None:
+                    for staged_path, final_path in staged:
+                        os.replace(staged_path, final_path)
+                    # A newer graph revision may supersede this build, but a
+                    # new robot lifetime may never receive an old build's
+                    # geometry.
+                    os.replace(staging / "source.json", mola_root / "source.json")
+                    # source.json is durable before index.json names it.
+                    _fsync_directory(mola_root)
+                    os.replace(staging / "index.json", mola_root / "index.json")
+            if refused is not None:
+                # Decided under the lock, torn down after it: runtime.close()
+                # may wait on the native process, and the bridge's heartbeat
+                # needs map_epoch_lock.
+                self._invalidate_runtime(peer_root)
+                raise WorkerError(refused)
+            _fsync_directory(mola_root)
             self._prune(
                 components_root,
                 {mola_root / str(item["path"]) for item in artifacts},
@@ -911,9 +1004,23 @@ class MolaWorker:
             self._retry_after.pop(missing_peer, None)
             self._logged_errors.pop(missing_peer, None)
             self._peer_runs.pop(missing_peer, None)
-        due: list[tuple[Path, str]] = []
+            self._snapshot_identity.pop(missing_peer, None)
+        due: list[tuple[Path, str, tuple[int, int, int, int] | None]] = []
         for peer in peers:
             source = peer / "snapshot.json"
+            identity = _file_identity(source)
+            if (
+                identity is not None
+                and identity == self._snapshot_identity.get(peer)
+                and peer in self._completed
+            ):
+                # snapshot.json's size, inode and mtime have not changed
+                # since the last completed build read it: a parked peer's
+                # common case. `os.replace` (the only way this file is
+                # written) always changes its identity, so this is exact,
+                # not a heuristic, and skips reading and hashing the whole
+                # file for nothing.
+                continue
             try:
                 raw = _bounded_file_bytes(source, MAX_SNAPSHOT_BYTES, "snapshot")
                 source_sha = hashlib.sha256(raw).hexdigest()
@@ -923,12 +1030,22 @@ class MolaWorker:
                 self._log_outcome(peer, errors[peer])
                 continue
             if self._completed.get(peer) == source_sha:
+                # Confirmed by actually reading it, not merely by `stat`: safe
+                # to trust `stat` alone the next time this exact identity
+                # recurs.
+                if identity is not None:
+                    self._snapshot_identity[peer] = identity
                 continue
             if now < self._retry_after.get(peer, 0):
                 continue
-            due.append((peer, source_sha))
+            due.append((peer, source_sha, identity))
 
-        def record(peer: Path, source_sha: str, outcome: ProcessResult | str) -> None:
+        def record(
+            peer: Path,
+            source_sha: str,
+            identity: tuple[int, int, int, int] | None,
+            outcome: ProcessResult | str,
+        ) -> None:
             if isinstance(outcome, ProcessResult):
                 # Record the bytes the product was built from, which process_peer
                 # read itself. If snapshot.json moved on meanwhile, the next poll
@@ -937,26 +1054,36 @@ class MolaWorker:
                 self._retry_after.pop(peer, None)
                 self._write_worker_status(peer, outcome.source_sha256, "")
                 self._log_outcome(peer, None)
+                if identity is not None and outcome.source_sha256 == source_sha:
+                    # This poll's `stat` and content agreed with what was
+                    # just published: the next poll may trust that identity
+                    # alone. A snapshot that moved on between this read and
+                    # process_peer's own leaves no identity cached, so the
+                    # next poll reads and hashes for real.
+                    self._snapshot_identity[peer] = identity
+                else:
+                    self._snapshot_identity.pop(peer, None)
             else:
                 errors[peer] = outcome
                 self._retry_after[peer] = now + self.retry_s
                 self._write_worker_status(peer, source_sha, outcome)
                 self._log_outcome(peer, outcome)
+                self._snapshot_identity.pop(peer, None)
 
         if self.parallel_peers == 1 or len(due) < 2:
-            for peer, source_sha in due:
-                record(peer, source_sha, self._attempt(peer))
+            for peer, source_sha, identity in due:
+                record(peer, source_sha, identity, self._attempt(peer))
             return errors
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.parallel_peers, len(due)),
             thread_name_prefix="swarmdeck-mola-build",
         ) as pool:
             futures = [
-                (peer, source_sha, pool.submit(self._attempt, peer))
-                for peer, source_sha in due
+                (peer, source_sha, identity, pool.submit(self._attempt, peer))
+                for peer, source_sha, identity in due
             ]
-            for peer, source_sha, future in futures:
-                record(peer, source_sha, future.result())
+            for peer, source_sha, identity, future in futures:
+                record(peer, source_sha, identity, future.result())
         return errors
 
     def run_forever(self) -> None:

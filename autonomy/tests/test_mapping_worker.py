@@ -215,15 +215,15 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                     "output_size_bytes": len(artifact),
                     "output_sha256": hashlib.sha256(artifact).hexdigest(),
                 }}
-                if {first_failure!r} == "wrong_hash_second" and request_number == 2:
-                    response["output_sha256"] = "0" * 64
+                if {first_failure!r} == "wrong_output_size_second" and request_number == 2:
+                    response["output_size_bytes"] = len(artifact) + 1
                 if "planner_output_path" in request:
                     planner = b"planner|" + artifact
                     Path(request["planner_output_path"]).write_bytes(planner)
                     response["planner_output_size_bytes"] = len(planner)
                     response["planner_output_sha256"] = hashlib.sha256(planner).hexdigest()
-                    if {first_failure!r} == "wrong_planner_hash_second" and request_number == 2:
-                        response["planner_output_sha256"] = "0" * 64
+                    if {first_failure!r} == "wrong_planner_size_second" and request_number == 2:
+                        response["planner_output_size_bytes"] = len(planner) + 1
                 with (root / "applies.log").open("a") as stream:
                     stream.write(json.dumps({{
                         "pid": os.getpid(),
@@ -271,26 +271,31 @@ def sha256(raw: bytes) -> str:
 
 @pytest.fixture
 def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
-    """Record every atomic publication write in order.
+    """Record every publication of source.json and index.json in order.
 
     Each entry is (file name, payload, source.json bytes already on disk when
     this write started), so a test can assert that source.json lands before
-    index.json and holds the built snapshot bytes at that moment.
+    index.json and holds the built snapshot bytes at that moment. The worker
+    stages both files and publishes each with one rename into ``mola/``.
     """
 
     writes: list[tuple[str, bytes, bytes | None]] = []
-    original = worker_module._atomic_bytes
+    original = worker_module.os.replace
 
-    def recording(path: Path, payload: bytes) -> None:
-        # worker.json is the worker's own status, not part of the product.
-        if path.name != "worker.json":
-            source = path.parent / "source.json"
+    def recording(staged, final) -> None:
+        final = Path(final)
+        if final.parent.name == "mola" and final.name in {"source.json", "index.json"}:
+            source = final.parent / "source.json"
             writes.append(
-                (path.name, payload, source.read_bytes() if source.exists() else None)
+                (
+                    final.name,
+                    Path(staged).read_bytes(),
+                    source.read_bytes() if source.exists() else None,
+                )
             )
-        original(path, payload)
+        original(staged, final)
 
-    monkeypatch.setattr(worker_module, "_atomic_bytes", recording)
+    monkeypatch.setattr(worker_module.os, "replace", recording)
     return writes
 
 
@@ -329,11 +334,15 @@ def test_planner_products_reuse_unchanged_components_and_prune_pairs(tmp_path):
 
 
 def test_invalid_planner_product_keeps_previous_generation(tmp_path):
+    """A native response whose claimed planner size disagrees with the file
+    it actually wrote is still rejected: the worker trusts a fresh output's
+    reported hash, but `stat`s its size rather than trusting that blindly.
+    """
     peer = tmp_path / "mission" / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
     worker = MolaWorker(
         tmp_path,
-        importer=fake_runtime(tmp_path, "wrong_planner_hash_second"),
+        importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
         planner_maps=True,
         timeout_s=1,
     )
@@ -367,6 +376,190 @@ def test_enabling_planner_products_upgrades_a_cached_metric_map(tmp_path):
         assert "planner" in value["artifacts"][0]
     finally:
         upgraded.close()
+
+
+def test_run_once_skips_rehashing_an_unchanged_snapshot(tmp_path, monkeypatch) -> None:
+    """snapshot.json is stat'd, not re-read and re-hashed, once its build
+    has been published and its identity (size, inode, mtime) recurs.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        assert worker.run_once() == {}
+        reads = []
+
+        def counting_read(path, *a, **k):
+            if Path(path).name == "snapshot.json":
+                reads.append(path)
+            return bounded_file_bytes(path, *a, **k)
+
+        monkeypatch.setattr(worker_module, "_bounded_file_bytes", counting_read)
+        assert worker.run_once() == {}
+        assert reads == []
+        # A real change is still detected and read.
+        write_snapshot(peer, "a" * 64, [manifest("component:a", 2)])
+        assert worker.run_once() == {}
+        # run_once's own due-check plus process_peer's `_read_snapshot`.
+        assert len(reads) == 2
+    finally:
+        worker.close()
+
+
+def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None:
+    """An unchanged component is reused by `stat`, not by re-hashing its
+    published bytes: the worker wrote them once and never modifies them
+    (module docstring), so a later poll trusts the index's own sha256
+    instead of re-reading a component that may be several megabytes.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    first = manifest("component:a", 0)
+    second = manifest("component:b", 0)
+    write_snapshot(peer, "a" * 64, [first, second])
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        worker.process_peer(peer)
+        index = json.loads((peer / "mola/index.json").read_text())
+        held = index["artifacts"][0]
+        assert held["component_id"] == "component:a"
+        artifact_path = peer / "mola" / held["path"]
+        original = artifact_path.read_bytes()
+        # Corrupt the file's content without changing its size: a real
+        # re-hash would now disagree with the recorded sha256, but the
+        # worker trusts an on-disk file it wrote once and never modifies.
+        artifact_path.write_bytes((b"\x00" * len(original)))
+        write_snapshot(peer, "b" * 64, [first, manifest("component:b", 1)])
+        worker.process_peer(peer)
+        current = json.loads((peer / "mola/index.json").read_text())
+        assert current["artifacts"][0] == held
+        # Reused, not rebuilt: only component:b's manifest triggered a native
+        # request.
+        assert len(runtime_requests(tmp_path)) == 3
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """A component the persistent native runtime just wrote is published by
+    trusting its reported hash, not by re-hashing the file: the process that
+    wrote the bytes already hashed them, in the same request. `stat` still
+    catches a size disagreement (a truncated or wrong write). The planner
+    map branch (`planner_maps=True`) is covered separately below.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    try:
+        result = worker.process_peer(peer)
+        assert result.published
+        index = json.loads((peer / "mola/index.json").read_text())
+        artifact = index["artifacts"][0]
+        artifact_path = peer / "mola" / artifact["path"]
+        # The published sha256 is exactly what the fake runtime reported,
+        # which happens to be correct here; the point is it was never
+        # locally recomputed to get there (`forbidden` never raised above).
+        assert artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_still_rejects_a_size_mismatch_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """Trusting the native runtime's reported hash does not mean trusting an
+    unrelated file: a response whose claimed output size disagrees with what
+    is actually on disk is rejected by `stat` alone, never by hashing.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "wrong_output_size_second"),
+        timeout_s=1,
+    )
+    try:
+        assert worker.process_peer(peer).published
+        second = manifest("component:a", 1)
+        write_snapshot(peer, "b" * 64, [second])
+        with pytest.raises(WorkerError, match="does not match its response"):
+            worker.process_peer(peer)
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_trusts_a_fresh_planner_output_hash_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """The planner map branch of the same trust: with `planner_maps=True`,
+    neither the component nor its `.sdpg` planner map is re-hashed locally;
+    both trust the native runtime's own reported hash, `stat`-checked only
+    for size.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path, importer=fake_runtime(tmp_path), planner_maps=True, timeout_s=1
+    )
+    try:
+        result = worker.process_peer(peer)
+        assert result.published
+        index = json.loads((peer / "mola/index.json").read_text())
+        artifact = index["artifacts"][0]
+        component_path = peer / "mola" / artifact["path"]
+        planner = artifact["planner"]
+        planner_path = peer / "mola" / planner["path"]
+        # Both published hashes are exactly what the fake runtime reported
+        # (`forbidden` never raised above, for either artifact).
+        assert artifact["sha256"] == hashlib.sha256(component_path.read_bytes()).hexdigest()
+        assert planner["sha256"] == hashlib.sha256(planner_path.read_bytes()).hexdigest()
+    finally:
+        worker.close()
+
+
+def test_persistent_mode_still_rejects_a_planner_size_mismatch_without_rehashing(
+    tmp_path, monkeypatch
+) -> None:
+    """The planner map branch of the size-mismatch rejection: `stat` alone,
+    never a hash, still catches a wrong claimed planner output size.
+    """
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+
+    def forbidden(*a, **k):
+        raise AssertionError("_sha256_file must not be called in persistent mode")
+
+    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
+        planner_maps=True,
+        timeout_s=1,
+    )
+    try:
+        assert worker.process_peer(peer).published
+        second = manifest("component:a", 1)
+        write_snapshot(peer, "b" * 64, [second])
+        with pytest.raises(WorkerError, match="planner artifact"):
+            worker.process_peer(peer)
+    finally:
+        worker.close()
 
 
 def test_bounded_read_stops_a_file_that_grows_after_stat() -> None:
@@ -758,12 +951,17 @@ def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -
 
 
 def test_native_artifact_claim_mismatch_keeps_last_complete_index(tmp_path) -> None:
+    """A native response whose claimed output size disagrees with the file it
+    actually wrote is still rejected: the worker trusts a fresh output's
+    reported hash (deploy/autonomy/mola_worker.py `_stat_matches`), but
+    `stat`s its size rather than trusting that blindly too.
+    """
     peer = tmp_path / "mission" / "robot_0"
     first = manifest("component:a", 1)
     write_snapshot(peer, "a" * 64, [first])
     worker = MolaWorker(
         tmp_path,
-        importer=fake_runtime(tmp_path, "wrong_hash_second"),
+        importer=fake_runtime(tmp_path, "wrong_output_size_second"),
         timeout_s=1,
     )
     try:
@@ -1177,3 +1375,101 @@ def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
     assert not (peer / "mola/index.json").exists()
     assert not (peer / "mola/source.json").exists()
     assert (other / "mola/index.json").read_text() == "peer-product"
+
+
+def _map_epoch_lock_is_free(peer: Path) -> bool:
+    """Probe `map_epoch_lock` from a separate open file, without waiting."""
+    import fcntl
+
+    with (peer / "map-epoch.lock").open("a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(stream, fcntl.LOCK_UN)
+        return True
+
+
+def test_process_peer_reads_and_fsyncs_outside_the_map_epoch_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """The bridge's authority heartbeat takes `map_epoch_lock` before every
+    send, so the worker must not hold it across slow I/O: the snapshot read
+    (up to 64 MiB) and the fsync of each published file's data happen
+    before the lock; only renames and a directory fsync happen under it.
+    """
+    import os
+    import stat
+
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    probes: list[tuple[str, bool]] = []
+
+    original_read = worker_module._read_snapshot
+
+    def probing_read(path):
+        probes.append(("read snapshot", _map_epoch_lock_is_free(peer)))
+        return original_read(path)
+
+    original_fsync = os.fsync
+
+    def probing_fsync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            probes.append(("fsync file", _map_epoch_lock_is_free(peer)))
+        return original_fsync(fd)
+
+    monkeypatch.setattr(worker_module, "_read_snapshot", probing_read)
+    monkeypatch.setattr(worker_module.os, "fsync", probing_fsync)
+
+    def successful(command, _timeout):
+        Path(command[3]).write_bytes(b"metric-map-v1")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    assert worker.process_peer(peer).published
+    assert ("read snapshot", True) in probes
+    assert ("fsync file", True) in probes
+    assert all(free for _, free in probes), probes
+
+
+def test_epoch_advance_failure_tears_the_runtime_down_after_releasing_the_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """A build whose robot epoch advanced is refused under map_epoch_lock,
+    but its native runtime (`runtime.close()`, which may wait on the native
+    process) is torn down only after the lock is released, so the bridge's
+    authority heartbeat is never held up by it.
+    """
+    from autonomy.map_epochs import claim_map_epoch, read_map_epoch, write_peer_epochs
+
+    mission = "00000000-0000-0000-0000-000000000002"
+    claim_map_epoch(tmp_path, mission, "robot_0")
+    peer = tmp_path / mission / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    snapshot = json.loads((peer / "snapshot.json").read_text())
+    snapshot.update(
+        run_id=read_map_epoch(peer)["run_id"],
+        mission_id=mission,
+        robot_id="robot_0",
+        robot_map_epoch=0,
+        participant_robot_ids=["robot_0"],
+        robot_map_epochs={"robot_0": 0},
+    )
+    write_peer_epochs(peer, mission, {"robot_0": 0})
+    (peer / "snapshot.json").write_text(json.dumps(snapshot))
+
+    def resetting_import(command, _timeout):
+        Path(command[-1]).write_bytes(b"old native product")
+        claim_map_epoch(tmp_path, mission, "robot_0")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=resetting_import)
+    probes: list[bool] = []
+    original = worker._invalidate_runtime
+
+    def probing_invalidate(peer_root):
+        probes.append(_map_epoch_lock_is_free(peer))
+        original(peer_root)
+
+    monkeypatch.setattr(worker, "_invalidate_runtime", probing_invalidate)
+    with pytest.raises(WorkerError, match="robot map epoch advanced"):
+        worker.process_peer(peer)
+    assert probes and all(probes), probes

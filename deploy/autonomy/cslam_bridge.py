@@ -69,7 +69,12 @@ from autonomy.peer_mask import (
     idle_mask_counters,
     peer_body,
 )
-from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
+from autonomy.cslam import (
+    CslamMapper,
+    pose_matrix,
+    publish_snapshot_if_new,
+    write_unique_temporary,
+)
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.map_epochs import (
     map_epoch_lock,
@@ -96,6 +101,21 @@ MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 AUTHORITY_SENSOR_TTL_S = 3.0
+# The wire cadence of the map authority heartbeat, independent of
+# `_snapshot`'s own 1 Hz timer: `AuthorityHeartbeatPublisher.run` publishes
+# on this period from its own thread, so a snapshot tick that never runs at
+# all (an executor starved by other callbacks) never silences the topic.
+AUTHORITY_HEARTBEAT_PERIOD_S = 1.0
+# The longest a heartbeat send waits for map_epoch_lock. Other holders
+# (claims, the worker's publication renames and directory fsyncs, the peer
+# epoch watermark) can be slow; a send that cannot get the lock in time is
+# skipped ("epoch lock busy"), never blocked behind them.
+AUTHORITY_EPOCH_LOCK_WAIT_S = AUTHORITY_HEARTBEAT_PERIOD_S / 2
+# Bounds Bridge.close()'s wait for the heartbeat thread to exit. Safety does
+# not depend on it: close() fences every heartbeat publish and log first
+# (`_authority_closed`), so a thread still blocked, e.g. on map_epoch_lock,
+# can touch no ROS object once close() returns.
+AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S = AUTHORITY_HEARTBEAT_PERIOD_S + 5.0
 # A parked robot's scans are the same scan. Swarm-SLAM earns keyframes by
 # distance, and by scene change at most once per
 # keyframe_scene_change_min_period_s (cslam_lidar.yaml), so a scan that
@@ -128,12 +148,184 @@ def create_steady_timer(node, period_s, callback):
     return clock, node.create_timer(period_s, callback, clock=clock)
 
 
+def write_text_if_changed(path, text, last, replace=os.replace):
+    """Atomically write ``text`` to ``path`` only when it differs from ``last``.
+
+    Returns the text now on disk, to pass as ``last`` on the next call. A
+    peer's status.json was rewritten every tick whether or not anything in it
+    had changed; most of a parked peer's ticks change nothing.
+    ``replace(temporary, path)`` moves the written temporary into place.
+    """
+
+    if text == last:
+        return last
+    temporary = write_unique_temporary(path, text)
+    replace(temporary, path)
+    return text
+
+
+class MapEpochRetired(Exception):
+    """A newer map epoch was claimed; this bridge's run may write nothing."""
+
+
 def sensor_input_is_fresh(last_sensor_at, now=None):
     """Keep authority liveness tied to real sensor delivery, not ROS time."""
 
     current = time.monotonic() if now is None else float(now)
     age = current - float(last_sensor_at)
     return last_sensor_at > 0.0 and 0.0 <= age < AUTHORITY_SENSOR_TTL_S
+
+
+def authority_is_serializable(authority):
+    try:
+        json.dumps(authority, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch, run_id):
+    """Decide the map-authority message to publish this tick.
+
+    Sensor freshness, TF and the product read gate a *fresh* authority, but
+    they never gate the heartbeat itself: a freshly built ``authority``
+    (``build_authority``'s dict, or None when this tick could not produce
+    one) is published and cached; otherwise the last cached authority is
+    re-sent byte-for-byte so MGG's snapshot never expires from a transient
+    stall. The cache is honoured only while it still names the peer's
+    current mission, run and map epoch, so a real reset (a new run_id) falls
+    through to a ``resetting`` status instead of an authority for a map that
+    no longer exists.
+
+    Returns ``(message, new_cache)``. ``new_cache`` is the dict to keep for
+    the next tick: the fresh authority, the same cached authority when it was
+    re-sent, or None once there is nothing left worth re-sending.
+
+    A ``built`` authority that cannot be serialized for the wire (a NaN) is
+    treated as not built, so it never evicts the last good one.
+    """
+
+    if built is not None and authority_is_serializable(built):
+        return built, built
+    if (
+        cached is not None
+        and cached.get("robot_id") == robot_id
+        and cached.get("mission_id") == mission_id
+        and cached.get("robot_map_epoch") == robot_map_epoch
+        and cached.get("run_id") == run_id
+    ):
+        return cached, cached
+    return (
+        {
+            "robot_id": robot_id,
+            "mission_id": mission_id,
+            "robot_map_epoch": robot_map_epoch,
+            "run_id": run_id,
+            "state": "resetting",
+        },
+        None,
+    )
+
+
+class AuthorityHeartbeatPublisher:
+    """Send the cached map authority on its own schedule and thread.
+
+    `update` (called from `Bridge._snapshot`, on the busy main executor)
+    only replaces the cached message; it never sends. `tick` (called from
+    `run`, on a dedicated thread that never touches the executor) sends
+    whatever is cached. A `_snapshot` tick that takes arbitrarily long, or
+    does not run at all for a while, delays only the next *fresh* authority;
+    the heartbeat keeps firing every `period_s` regardless, which is the fix
+    for MGG's snapshot expiring from an executor stall.
+
+    `send(message)` returns None once it has published `message`, or the
+    reason it did not. `Bridge._send_authority` validates the durable map
+    epoch and publishes as one step under map_epoch_lock, so an authority is
+    never sent for a retired epoch, even when a new epoch is claimed between
+    this tick reading the cache and sending. An exception from `send` (the
+    epoch record unreadable, say) is a reason too: nothing was sent, and the
+    thread keeps running.
+
+    `log(reason)` is called whenever the interval between two completed
+    sends exceeds 1.5 × `period_s`; that interruption of the wire heartbeat
+    is what MGG observes as a gap. (`run` waits a full period after each
+    send, so every interval is a little over one period; only the excess
+    beyond half a period is a real delay.) A completed send is stamped only
+    after `send` returns, so a send that blocks shows up as its own gap,
+    and the reason says whether the send blocked or the tick started late. A
+    `_snapshot` build failure that still leaves a valid cached message to
+    re-send is never a gap (`status.json`'s ``authority_gap_*`` records
+    those). Callers rate-limit repeated reasons themselves.
+    """
+
+    def __init__(self, send, *, period_s, log, clock=time.monotonic):
+        self._send = send
+        self._period_s = period_s
+        self._gap_s = 1.5 * period_s
+        self._log = log
+        self._clock = clock
+        # Guards the cached message against `update`/`invalidate` from the
+        # main executor.
+        self._lock = Lock()
+        self._message = None
+        self._no_message_reason = "no authority yet"
+        # Heartbeat-thread only: the monotonic time of the last completed
+        # send, or None before the first; `_started_at` stands in for it
+        # until then, so a robot that never gets a first authority still
+        # logs "no authority yet" rather than staying silent forever.
+        self._last_sent_at = None
+        self._started_at = clock()
+
+    def update(self, message):
+        """Replace the message the next tick(s) send; never sends."""
+
+        with self._lock:
+            self._message = message
+            self._no_message_reason = "no authority yet"
+
+    def invalidate(self):
+        """Discard the cached message: a durable epoch change retired it.
+
+        Called from `Bridge.snapshot()` when it notices; `send` enforces the
+        same fence on every send whether or not this has run.
+        """
+
+        with self._lock:
+            self._message = None
+            self._no_message_reason = "map epoch retired"
+
+    def tick(self):
+        """Send the cached message, if any, and log an actual send gap."""
+
+        started = self._clock()
+        with self._lock:
+            message = self._message
+            reason = self._no_message_reason
+        last = self._started_at if self._last_sent_at is None else self._last_sent_at
+        if message is not None:
+            try:
+                reason = self._send(message)
+            except Exception as exc:
+                reason = f"send failed ({type(exc).__name__}: {exc})"
+            if reason is None:
+                self._last_sent_at = self._clock()
+                blocked = self._last_sent_at - started
+                if blocked > self._period_s / 2:
+                    reason = f"send blocked {blocked:.1f}s (map epoch lock or DDS)"
+                else:
+                    reason = (
+                        f"heartbeat tick started {started - last:.1f}s "
+                        "after the last send"
+                    )
+        now = self._clock()
+        if now - last > self._gap_s:
+            self._log(f"{now - last:.1f}s between sends: {reason}")
+
+    def run(self, closed):
+        """Tick every `period_s` until `closed` is set (a `threading.Event`)."""
+
+        while not closed.wait(self._period_s):
+            self.tick()
 
 
 def transform_pose(transform):
@@ -449,7 +641,34 @@ class Bridge(Node):
         # frame state could be paired with it.
         self.authority_revision = None
         self.authority_skipped = 0
+        # The last authority actually published (fresh or re-sent), kept so
+        # the heartbeat can re-send it verbatim while a fresh one cannot be
+        # built; see `authority_heartbeat`.
+        self.authority_cache = None
+        self.authority_gap_ticks = 0
+        self.authority_gap_reason = ""
         self._product_memo = {}
+        # status.json is only rewritten when its content actually changes.
+        self._last_status_json = None
+        # Publishes the cached authority on its own thread, never the main
+        # executor `_snapshot` runs on; see `AuthorityHeartbeatPublisher`.
+        # `_authority_send_lock` guards `_authority_closed` and every
+        # heartbeat publish and gap log; close() sets the flag under it.
+        # Lock order: map_epoch_lock, then `_authority_send_lock`.
+        self._authority_send_lock = Lock()
+        self._authority_closed = False
+        self._authority_heartbeat = AuthorityHeartbeatPublisher(
+            self._send_authority,
+            period_s=AUTHORITY_HEARTBEAT_PERIOD_S,
+            log=self._log_authority_gap,
+        )
+        self.authority_heartbeat_thread = Thread(
+            target=self._authority_heartbeat.run,
+            args=(self.closed,),
+            name=f"{self.robot}-authority-heartbeat",
+            daemon=True,
+        )
+        self.authority_heartbeat_thread.start()
 
     def _color_image(self, message):
         accepted = self._remember_color_frame(self.color_images, message, "color")
@@ -607,7 +826,21 @@ class Bridge(Node):
             rclpy.try_shutdown(context=self.context)
 
     def close(self):
+        # Fence the heartbeat before anything it touches (self.authority_pub
+        # on self.sensor_node, and the node's logger) is destroyed below or
+        # by `main()`: this waits for a publish or log already in flight,
+        # and every later one sees the flag and does nothing, whether or
+        # not the join below succeeds.
+        with self._authority_send_lock:
+            self._authority_closed = True
         self.closed.set()
+        self.authority_heartbeat_thread.join(timeout=AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S)
+        if self.authority_heartbeat_thread.is_alive():
+            self.get_logger().error(
+                "authority heartbeat thread did not stop within "
+                f"{AUTHORITY_HEARTBEAT_JOIN_TIMEOUT_S:.1f}s of close(); it is "
+                "fenced and can no longer publish or log"
+            )
         if self.sensor_executor is not None:
             self.sensor_executor.shutdown(timeout_sec=2.0)
         if self.sensor_thread is not None:
@@ -1070,12 +1303,85 @@ class Bridge(Node):
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
-    def snapshot(self):
-        with map_epoch_lock(self.root):
-            record = read_map_epoch(self.root)
-            if record is None or record["run_id"] != self.core.run_id:
+    def _log_authority_gap(self, reason):
+        """Called from the heartbeat thread: the actual publish interval
+        just exceeded one heartbeat period.
+        """
+
+        with self._authority_send_lock:
+            if self._authority_closed:
                 return
+            self.get_logger().warn(
+                f"map authority heartbeat gap ({reason})", throttle_duration_sec=5.0
+            )
+
+    def _send_authority(self, message):
+        """Publish `message` only while the durable map epoch names its run.
+
+        Called on the heartbeat thread. The epoch record is re-read and the
+        message published under map_epoch_lock, the lock `claim_map_epoch()`
+        holds while it retires a run, so no claim can land between this
+        check and the publish. The lock wait is bounded
+        (`AUTHORITY_EPOCH_LOCK_WAIT_S`): a busy lock skips this send. Returns
+        None once published, otherwise the
+        reason; an unreadable record raises, which the heartbeat reports as
+        a failed send (fail closed).
+        """
+
+        data = json.dumps(message, allow_nan=False)
+        with map_epoch_lock(self.root, timeout=AUTHORITY_EPOCH_LOCK_WAIT_S) as locked:
+            if not locked:
+                return "epoch lock busy"
+            record = read_map_epoch(self.root)
+            if record is None:
+                return "no map epoch claimed"
+            if record["run_id"] != message["run_id"]:
+                return "map epoch retired"
+            with self._authority_send_lock:
+                if self._authority_closed:
+                    return "bridge closed"
+                self.authority_pub.publish(String(data=data))
+        return None
+
+    def _replace_if_current(self, temporary, path):
+        """Rename ``temporary`` onto ``path`` while this run's epoch is current.
+
+        graph_solution.json, snapshot.json and status.json are files
+        `claim_map_epoch()` deletes when it retires this run, so each rename
+        re-reads the durable epoch under map_epoch_lock. Only the small epoch
+        read and the rename happen under the lock; the heartbeat takes the
+        same lock before every send. Raises MapEpochRetired, after removing
+        ``temporary``, when the epoch has moved on. ``temporary`` must be
+        this writer's own (`write_unique_temporary`): a bridge process of
+        another epoch writing the same file uses a different one, so neither
+        can overwrite or delete the bytes the other renames.
+        """
+
+        try:
+            with map_epoch_lock(self.root):
+                record = read_map_epoch(self.root)
+                if record is not None and record["run_id"] == self.core.run_id:
+                    os.replace(temporary, path)
+                    return
+        finally:
+            temporary.unlink(missing_ok=True)
+        raise MapEpochRetired(self.core.run_id)
+
+    def snapshot(self):
+        # Not under map_epoch_lock: `_snapshot` reads the product (up to
+        # 64 MiB, with retries) and builds the authority, and the heartbeat
+        # needs that lock before every send. Each file write re-validates
+        # the epoch under the lock (`_replace_if_current`), and the heartbeat
+        # re-validates it before every send.
+        record = read_map_epoch(self.root)
+        if record is None or record["run_id"] != self.core.run_id:
+            # A fresh launch retired this robot's map epoch.
+            self._authority_heartbeat.invalidate()
+            return
+        try:
             self._snapshot()
+        except MapEpochRetired:
+            self._authority_heartbeat.invalidate()
 
     def _snapshot(self):
         with self._shared_lock:
@@ -1093,17 +1399,17 @@ class Bridge(Node):
                 tuple(self.core.poses),
                 self.core.poses,
             )
-            temporary = self.graph_solution_file.with_suffix(".tmp")
-            temporary.write_text(
+            temporary = write_unique_temporary(
+                self.graph_solution_file,
                 json.dumps(
                     {
                         "schema": "swarmdeck.pose-snapshot.v1",
                         "solution": solution.canonical_dict(),
                     },
                     allow_nan=False,
-                )
+                ),
             )
-            os.replace(temporary, self.graph_solution_file)
+            self._replace_if_current(temporary, self.graph_solution_file)
             self.graph_solution_revision = self.core.revision
         if self.core.revision and (
             self.latest_envelope is None
@@ -1126,14 +1432,24 @@ class Bridge(Node):
                 },
                 self.core.revision,
                 self.snapshot_file_revision,
+                replace=self._replace_if_current,
             )
         self.authority_revision = None
         source_reset_stamp = self.source_reset_stamp()
-        if (
-            self.core.revision
-            and sensor_input_is_fresh(last_sensor_at)
-            and source_reset_stamp is not None
-        ):
+        # A fresh authority needs sensor freshness, the reset ACK and a
+        # product paired to the current revision; none of that gates the
+        # heartbeat below, only whether this tick's authority is fresh or
+        # re-sent (`authority_heartbeat`). `gap_reason` names why this tick
+        # could not build a fresh one, for the rate-limited log.
+        built_authority = None
+        gap_reason = None
+        if not self.core.revision:
+            gap_reason = "no graph revision yet"
+        elif not sensor_input_is_fresh(last_sensor_at):
+            gap_reason = "sensor input stale"
+        elif source_reset_stamp is None:
+            gap_reason = "map reset acknowledgement unavailable"
+        else:
             try:
                 # Corrections are data, never a second TF authority. The
                 # navigation/planning frame is the continuous odometry frame.
@@ -1170,28 +1486,35 @@ class Bridge(Node):
                     )
                     if source_reset_stamp:
                         authority["source_reset_stamp"] = source_reset_stamp
-                    self.authority_pub.publish(
-                        String(data=json.dumps(authority, allow_nan=False))
-                    )
-                    self.authority_revision = artifact.revision
+                    built_authority = authority
                 elif product is not None:
                     self.authority_skipped += 1
+                    gap_reason = "worker product lags the current graph revision"
+                else:
+                    gap_reason = "no product published yet"
             except TransformException:
-                pass
-        if self.authority_revision is None:
-            self.authority_pub.publish(
-                String(
-                    data=json.dumps(
-                        {
-                            "robot_id": self.robot,
-                            "mission_id": self.core.mission_id,
-                            "robot_map_epoch": self.core.map_epoch,
-                            "run_id": self.core.run_id,
-                            "state": "resetting",
-                        }
-                    )
-                )
-            )
+                gap_reason = "transform lookup failed"
+        message, self.authority_cache = authority_heartbeat(
+            built_authority,
+            self.authority_cache,
+            robot_id=self.robot,
+            mission_id=self.core.mission_id,
+            robot_map_epoch=self.core.map_epoch,
+            run_id=self.core.run_id,
+        )
+        if built_authority is not None and message is not built_authority:
+            gap_reason = "built authority is not serializable"
+        self.authority_revision = message.get("mapping_graph_revision")
+        self.authority_gap_reason = gap_reason or ""
+        if gap_reason is not None:
+            self.authority_gap_ticks += 1
+        # Only the cached message changes here; `authority_heartbeat_thread`
+        # sends it on its own schedule, off this (possibly busy) main
+        # executor, re-validating the durable epoch before every send
+        # (`_send_authority`). `authority_gap_reason`/`authority_gap_ticks`
+        # above are this tick's own build-failure diagnostic; the heartbeat
+        # logs an *actual* send gap on its own terms.
+        self._authority_heartbeat.update(message)
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
         # budget; the failure is only visible here and in the worker's log.
@@ -1282,6 +1605,13 @@ class Bridge(Node):
                 else self.core.revision - self.authority_revision
             ),
             "authority_skipped": self.authority_skipped,
+            # Heartbeat gaps: ticks that could not build a fresh authority
+            # (re-sent the last good one, or reported resetting when there
+            # was none) and why the most recent one happened. The headline
+            # metric for the heartbeat fix is MGG never seeing the map go
+            # unavailable despite this counting above zero.
+            "authority_gap_ticks": self.authority_gap_ticks,
+            "authority_gap_reason": self.authority_gap_reason,
             # The worker's last build outcome (`mola/worker.json`): null until
             # a worker has reported, "" after a published build, otherwise the
             # failure, such as the point budget (`manifest exceeds point count
@@ -1295,9 +1625,12 @@ class Bridge(Node):
             "sensor_domain_id": self.sensor_domain_id,
             "sensor_error": self.sensor_error,
         }
-        temporary = self.status_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps(status))
-        os.replace(temporary, self.status_file)
+        self._last_status_json = write_text_if_changed(
+            self.status_file,
+            json.dumps(status),
+            self._last_status_json,
+            replace=self._replace_if_current,
+        )
 
     def replicate(self):
         while not self.closed.wait(2.0):
