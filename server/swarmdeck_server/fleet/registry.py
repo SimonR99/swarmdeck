@@ -395,22 +395,5 @@ class Registry:
             self.disconnect(robot_id, sink)
             return False
 
-    def goal_taken(
-        self, goal: dict[str, float], exclude: str, tol: float = 0.5
-    ) -> str | None:
-        """FR-N3: reject assigning the same goal to two robots."""
-        for rid, r in self.robots.items():
-            if rid == exclude or not r.goal:
-                continue
-            if (
-                abs(r.goal["x"] - goal["x"]) < tol
-                and abs(r.goal["y"] - goal["y"]) < tol
-            ):
-                return rid
-        return None
-
-    def snapshot(self) -> list[dict[str, Any]]:
-        return [r.to_state() for r in self.robots.values()]
-
 
 registry = Registry()
