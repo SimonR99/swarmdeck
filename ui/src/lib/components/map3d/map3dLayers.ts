@@ -7,7 +7,29 @@ import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
+import {
+  LayerDependencies,
+  goalDependencies,
+  loopDependencies,
+  pathDependencies,
+  trailDependencies
+} from './layerChanges';
 import type { MapRobot } from '../map2d/mapLayers';
+
+/** A rally beacon and its guide line, kept between updates and moved in place. */
+interface GoalMarker {
+  beacon: THREE.Group;
+  outerRing: THREE.Mesh;
+  innerRing: THREE.Mesh;
+  line: THREE.Line;
+  colorHex: number;
+}
+
+/** One inter-robot closure line, kept between updates and moved in place. */
+interface LoopMarker {
+  line: THREE.Line;
+  positions: THREE.BufferAttribute;
+}
 
 export class Map3DLayers {
   public group = new THREE.Group();
@@ -20,7 +42,10 @@ export class Map3DLayers {
   private detectionsGroup = new THREE.Group();
   private loopClosuresGroup = new THREE.Group();
   private networkMesh: THREE.Mesh | null = null;
-  private signatures = new Map<string, string>();
+  private networkSeq: number | null = null;
+  private goalMarkers = new Map<string, GoalMarker>();
+  private loopMarkers = new Map<string, LoopMarker>();
+  private dependencies = new LayerDependencies();
   public cursorReticle: THREE.Group;
 
   constructor() {
@@ -150,42 +175,13 @@ export class Map3DLayers {
     this.gridGroup.visible = options.showGrid;
 
     // Rebuild only when source data changes. Animation never recreates geometry.
-    const changed = (key: string, value: unknown) => {
-      const signature = JSON.stringify(value);
-      if (this.signatures.get(key) === signature) return false;
-      this.signatures.set(key, signature);
-      return true;
-    };
     const robots = options.robots;
-    if (
-      changed('goals', [
-        options.showPlans,
-        robots.map((r) => [r.robot_id, r.pose, r.goal, r.nav_status, r.mode])
-      ])
-    )
+    const changed = (key: string, values: unknown[]) => this.dependencies.changed(key, values);
+    if (changed('goals', goalDependencies(robots, options.showPlans)))
       this.updateGoals(robots, options.showPlans, options.time, options.getGroundZ);
-    if (
-      changed('paths', [
-        options.showPlans,
-        fleet.selected,
-        robots.map((r) => [
-          r.robot_id,
-          r.nav_status,
-          r.mode,
-          r.goal,
-          r.planned_path,
-          r.global_planned_path,
-          r.local_planned_path
-        ])
-      ])
-    )
+    if (changed('paths', pathDependencies(robots, options.showPlans, fleet.selected)))
       this.updatePaths(robots, options.showPlans, options.getGroundZ);
-    if (
-      changed('trails', [
-        options.showTrails,
-        Array.from(options.trails).filter(([id]) => robots.some((r) => r.robot_id === id))
-      ])
-    )
+    if (changed('trails', trailDependencies(robots, options.trails, options.showTrails)))
       this.updateTrails(
         new Map(Array.from(options.trails).filter(([id]) => robots.some((r) => r.robot_id === id))),
         options.showTrails,
@@ -200,95 +196,124 @@ export class Map3DLayers {
       ])
     )
       this.updateDetections(options.time, options.getGroundZ);
-    if (
-      changed('loops', [
-        options.showPlans,
-        mapStore.slamGraphs,
-        robots.map((r) => [r.robot_id, r.pose])
-      ])
-    )
+    if (changed('loops', loopDependencies(robots, options.showPlans, mapStore.slamGraphs)))
       this.updateLoopClosures(options.showPlans);
     this.updateNetworkDecal(options.showNetwork);
   }
 
   public invalidate() {
-    this.signatures.clear();
+    this.dependencies.clear();
+    this.networkSeq = null;
   }
 
+  /**
+   * Rally beacons and their guide lines.
+   *
+   * A navigating robot moves its guide line every telemetry update, so the
+   * markers are created once per robot and then moved: rebuilding the rings,
+   * the pillar and their materials several times a second was pure churn for
+   * the GPU and the collector.
+   */
   private updateGoals(
     robots: MapRobot[],
     showPlans: boolean,
     time: number,
     getGroundZ?: (x: number, y: number) => number
   ) {
-    this.clearGroup(this.goalsGroup);
-    if (!showPlans) return;
+    const live = new Set<string>();
+    if (showPlans) {
+      for (const robot of robots) {
+        const isNavActive =
+          robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
+        if (!isNavActive || !robot.goal) continue;
+        live.add(robot.robot_id);
 
-    for (const robot of robots) {
-      const isNavActive =
-        robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
-      if (!isNavActive || !robot.goal) continue;
+        const colorHex = new THREE.Color(fleet.colorOf(robot.robot_id)).getHex();
+        let marker = this.goalMarkers.get(robot.robot_id);
+        if (marker && marker.colorHex !== colorHex) {
+          this.removeGoalMarker(robot.robot_id, marker);
+          marker = undefined;
+        }
+        if (!marker) {
+          marker = this.createGoalMarker(colorHex);
+          this.goalMarkers.set(robot.robot_id, marker);
+          this.goalsGroup.add(marker.beacon, marker.line);
+        }
 
-      const color = new THREE.Color(fleet.colorOf(robot.robot_id));
-      const goalX = robot.goal.x;
-      const goalY = robot.goal.y;
-      const goalZ = mapFrameZ(robot.goal, getGroundZ);
-      // Robot pose Z may name the base/navigation origin rather than contact
-      // ground. Keep this non-planner guide attached to the rendered surface.
-      const robotGroundZ = getGroundZ?.(robot.pose.x, robot.pose.y) ?? 0;
+        const goalZ = mapFrameZ(robot.goal, getGroundZ);
+        // Robot pose Z may name the base/navigation origin rather than contact
+        // ground. Keep this non-planner guide attached to the rendered surface.
+        const robotGroundZ = getGroundZ?.(robot.pose.x, robot.pose.y) ?? 0;
+        marker.beacon.position.set(robot.goal.x, robot.goal.y, goalZ);
+        marker.outerRing.rotation.z = time * 2;
+        marker.innerRing.rotation.z = -time * 3;
 
-      const beaconGroup = new THREE.Group();
-      beaconGroup.position.set(goalX, goalY, goalZ);
+        const positions = marker.line.geometry.getAttribute('position') as THREE.BufferAttribute;
+        positions.setXYZ(0, robot.pose.x, robot.pose.y, robotGroundZ + 0.025);
+        positions.setXYZ(1, robot.goal.x, robot.goal.y, goalZ);
+        positions.needsUpdate = true;
+        marker.line.geometry.computeBoundingSphere();
+        marker.line.computeLineDistances();
+      }
+    }
 
-      // Rotating waypoint rally beacon rings
-      const outerRingGeo = new THREE.RingGeometry(0.38, 0.44, 24);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.85
-      });
-      const outerRing = new THREE.Mesh(outerRingGeo, ringMat);
-      outerRing.rotation.z = time * 2;
-      beaconGroup.add(outerRing);
+    for (const [robotId, marker] of this.goalMarkers) {
+      if (!live.has(robotId)) this.removeGoalMarker(robotId, marker);
+    }
+  }
 
-      const innerRingGeo = new THREE.RingGeometry(0.18, 0.22, 16);
-      const innerRing = new THREE.Mesh(innerRingGeo, ringMat);
-      innerRing.rotation.z = -time * 3;
-      beaconGroup.add(innerRing);
+  private createGoalMarker(colorHex: number): GoalMarker {
+    const color = new THREE.Color(colorHex);
+    const beacon = new THREE.Group();
 
-      // Vertical holographic light pillar
-      const beamGeo = new THREE.CylinderGeometry(0.04, 0.04, 2.5, 12, 1, true);
-      beamGeo.rotateX(Math.PI / 2);
-      beamGeo.translate(0, 0, 1.25);
-      const beamMat = new THREE.MeshBasicMaterial({
+    // Rotating waypoint rally beacon rings
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85
+    });
+    const outerRing = new THREE.Mesh(new THREE.RingGeometry(0.38, 0.44, 24), ringMat);
+    beacon.add(outerRing);
+    const innerRing = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.22, 16), ringMat);
+    beacon.add(innerRing);
+
+    // Vertical holographic light pillar
+    const beamGeo = new THREE.CylinderGeometry(0.04, 0.04, 2.5, 12, 1, true);
+    beamGeo.rotateX(Math.PI / 2);
+    beamGeo.translate(0, 0, 1.25);
+    const beam = new THREE.Mesh(
+      beamGeo,
+      new THREE.MeshBasicMaterial({
         color,
         transparent: true,
         opacity: 0.35,
         side: THREE.DoubleSide
-      });
-      const beam = new THREE.Mesh(beamGeo, beamMat);
-      beaconGroup.add(beam);
+      })
+    );
+    beacon.add(beam);
 
-      this.goalsGroup.add(beaconGroup);
-
-      // Dashed route line from robot to goal
-      const linePts = [
-        new THREE.Vector3(robot.pose.x, robot.pose.y, robotGroundZ + 0.025),
-        new THREE.Vector3(goalX, goalY, goalZ)
-      ];
-      const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
-      const lineMat = new THREE.LineDashedMaterial({
+    // Dashed route line from robot to goal
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
+    const line = new THREE.Line(
+      lineGeo,
+      new THREE.LineDashedMaterial({
         color,
         dashSize: 0.35,
         gapSize: 0.2,
         transparent: true,
         opacity: 0.8
-      });
-      const line = new THREE.Line(lineGeo, lineMat);
-      line.computeLineDistances();
-      this.goalsGroup.add(line);
-    }
+      })
+    );
+    return { beacon, outerRing, innerRing, line, colorHex };
+  }
+
+  private removeGoalMarker(robotId: string, marker: GoalMarker) {
+    this.goalsGroup.remove(marker.beacon, marker.line);
+    this.disposeObject(marker.beacon);
+    this.disposeObject(marker.line);
+    this.goalMarkers.delete(robotId);
   }
 
   private updatePaths(
@@ -438,37 +463,53 @@ export class Map3DLayers {
     return null;
   }
 
+  /** Closure lines follow both robots' poses, so they too are moved in place. */
   private updateLoopClosures(showPlans: boolean) {
-    this.clearGroup(this.loopClosuresGroup);
-    if (!showPlans) return;
-
     const seen = new Set<string>();
-    for (const [robotId, graph] of Object.entries(mapStore.slamGraphs)) {
-      const a = fleet.get(robotId);
-      if (!a) continue;
-      for (const link of graph.inter_robot) {
-        const key = [robotId, link.other].sort().join('|');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const b = fleet.get(link.other);
-        if (!b) continue;
+    if (showPlans) {
+      for (const [robotId, graph] of Object.entries(mapStore.slamGraphs)) {
+        const a = fleet.get(robotId);
+        if (!a) continue;
+        for (const link of graph.inter_robot) {
+          const key = [robotId, link.other].sort().join('|');
+          if (seen.has(key)) continue;
+          const b = fleet.get(link.other);
+          if (!b) continue;
+          seen.add(key);
 
-        const pts = [
-          new THREE.Vector3(a.pose.x, a.pose.y, 0.18),
-          new THREE.Vector3(b.pose.x, b.pose.y, 0.18)
-        ];
-        const geo = new THREE.BufferGeometry().setFromPoints(pts);
-        const mat = new THREE.LineDashedMaterial({
-          color: 0x00d4ff,
-          dashSize: 0.4,
-          gapSize: 0.2,
-          transparent: true,
-          opacity: 0.85
-        });
-        const l = new THREE.Line(geo, mat);
-        l.computeLineDistances();
-        this.loopClosuresGroup.add(l);
+          let marker = this.loopMarkers.get(key);
+          if (!marker) {
+            const geo = new THREE.BufferGeometry();
+            const positions = new THREE.Float32BufferAttribute(new Float32Array(6), 3);
+            geo.setAttribute('position', positions);
+            const line = new THREE.Line(
+              geo,
+              new THREE.LineDashedMaterial({
+                color: 0x00d4ff,
+                dashSize: 0.4,
+                gapSize: 0.2,
+                transparent: true,
+                opacity: 0.85
+              })
+            );
+            marker = { line, positions };
+            this.loopMarkers.set(key, marker);
+            this.loopClosuresGroup.add(line);
+          }
+          marker.positions.setXYZ(0, a.pose.x, a.pose.y, 0.18);
+          marker.positions.setXYZ(1, b.pose.x, b.pose.y, 0.18);
+          marker.positions.needsUpdate = true;
+          marker.line.geometry.computeBoundingSphere();
+          marker.line.computeLineDistances();
+        }
       }
+    }
+
+    for (const [key, marker] of this.loopMarkers) {
+      if (seen.has(key)) continue;
+      this.loopClosuresGroup.remove(marker.line);
+      this.disposeObject(marker.line);
+      this.loopMarkers.delete(key);
     }
   }
 
@@ -492,10 +533,16 @@ export class Map3DLayers {
       const material = this.networkMesh.material as THREE.MeshBasicMaterial;
       if (!material.map || material.map.image !== networkLayer.canvas) {
         material.map?.dispose();
+        // A new texture uploads the canvas as it stands, patch included.
         material.map = new THREE.CanvasTexture(networkLayer.canvas);
         material.needsUpdate = true;
+        this.networkSeq = networkLayer.seq;
+      } else if (this.networkSeq !== networkLayer.seq) {
+        // Re-upload only what a patch changed. Flagging this every update
+        // pushed the whole heatmap to the GPU five times a second.
+        this.networkSeq = networkLayer.seq;
+        material.map.needsUpdate = true;
       }
-      material.map.needsUpdate = true;
 
       const pose = decalPose(networkLayer.info, mapStore.info?.transforms?.[networkLayer.robotId]);
       this.networkMesh.scale.set(pose.width, pose.height, 1);
@@ -504,6 +551,24 @@ export class Map3DLayers {
     } else if (this.networkMesh) {
       this.networkMesh.visible = false;
     }
+  }
+
+  /** Release one detached object's own geometries and materials. */
+  private disposeObject(object: THREE.Object3D) {
+    const geometries = new Set<THREE.BufferGeometry>(),
+      materials = new Set<THREE.Material>();
+    object.traverse((c) => {
+      if (c instanceof THREE.Mesh || c instanceof THREE.Line) {
+        geometries.add(c.geometry);
+        for (const m of Array.isArray(c.material) ? c.material : [c.material]) materials.add(m);
+      }
+    });
+    geometries.forEach((g) => g.dispose());
+    materials.forEach((m) => {
+      (m as THREE.MeshBasicMaterial).map?.dispose();
+      m.dispose();
+    });
+    object.clear();
   }
 
   private clearGroup(g: THREE.Group) {
@@ -524,6 +589,8 @@ export class Map3DLayers {
   }
   public dispose() {
     this.clearGroup(this.group);
-    this.signatures.clear();
+    this.goalMarkers.clear();
+    this.loopMarkers.clear();
+    this.dependencies.clear();
   }
 }

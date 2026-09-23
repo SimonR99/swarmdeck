@@ -20,9 +20,11 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
+  import { settings } from '$lib/stores/settings.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
+  import { trails as trailStore } from '$lib/stores/trails.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
@@ -42,6 +44,8 @@
     type LiveReplicaSelection
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
+  import { MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
+  import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -154,44 +158,44 @@
   export function centreFleet() {
     if (!scene) return;
     scene.centreRobots(robotsOnMap());
-    scene.render();
+    requestRender();
   }
 
   export function centreSelected() {
     if (!scene) return;
     scene.centreRobots(robotsOnMap(), new Set(fleet.selected));
-    scene.render();
+    requestRender();
   }
 
   export function zoomBy(factor: number) {
     if (!scene) return;
     scene.zoomBy(factor);
-    scene.render();
+    requestRender();
   }
 
   export function rotateBy(angleDelta: number) {
     if (!scene) return;
     scene.rotateBy(angleDelta);
-    scene.render();
+    requestRender();
   }
 
   export function resetRotation() {
     if (!scene) return;
     scene.resetRotation();
-    scene.render();
+    requestRender();
   }
 
   export function fitCloud() {
     if (!scene) return;
     scene.fitMap();
-    scene.render();
+    requestRender();
   }
 
   export function setCeiling(height: number) {
     ceilingCutoff = height;
     if (scene) {
       scene.setCeiling(height);
-      scene.render();
+      requestRender();
     }
   }
 
@@ -199,7 +203,7 @@
     if (!scene) return;
     scene.yaw = -0.785; // 45 deg
     scene.pitch = 0.96; // 55 deg
-    scene.render();
+    requestRender();
   }
 
   export function cutCeilingQuick() {
@@ -222,7 +226,7 @@
           : 'Point-cloud proxy · checking for Gaussian reconstruction';
         void fetchGaussians();
       }
-      scene.render();
+      requestRender();
     }
   }
 
@@ -230,7 +234,7 @@
     colorMode = mode;
     if (scene) {
       scene.terrain.setColorMode(mode);
-      scene.render();
+      requestRender();
     }
   }
 
@@ -238,7 +242,7 @@
     pointSize = size;
     if (scene) {
       scene.terrain.setPointSize(size);
-      scene.render();
+      requestRender();
     }
   }
 
@@ -280,7 +284,7 @@
       gaussianEtag = '';
       liveReplica = null;
       scene?.layers.invalidate();
-      scene?.render();
+      requestRender();
       void fetchCloud();
     }
   });
@@ -400,6 +404,7 @@
       scene.fitMap();
       firstCloud = false;
     }
+    requestRender();
   }
 
   async function fetchCloud() {
@@ -483,6 +488,7 @@
       gaussianEtag = response.headers.get('ETag') ?? '';
       gaussianCount = scene.gaussians.count;
       gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
+      requestRender();
     } catch (e) {
       if (!controller.signal.aborted && currentScope === gaussianScope()) {
         const cached = gaussianCount > 0;
@@ -591,9 +597,11 @@
         scene.pitch = Math.max(0.12, Math.min(1.48, scene.pitch + dy * 0.007));
       }
       pointerDownPos = { x: e.clientX, y: e.clientY };
-      scene.render();
+      requestRender();
     } else {
       // Hover raycasting
+      const reticle = scene.layers.cursorReticle;
+      const wasVisible = reticle.visible;
       const groundHit = scene.raycastGround(ndc);
       if (groundHit) {
         cursor3D = { x: groundHit.x, y: groundHit.y, z: groundHit.z };
@@ -601,16 +609,19 @@
 
         // Update 3D goal cursor reticle position
         if (navigation.goalMode && Boolean(tacticalReplica && liveTactical)) {
-          scene.layers.cursorReticle.visible = true;
-          scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
+          reticle.visible = true;
+          reticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
         } else {
-          scene.layers.cursorReticle.visible = false;
+          reticle.visible = false;
         }
       } else {
         cursor3D = null;
-        scene.layers.cursorReticle.visible = false;
+        reticle.visible = false;
         onCursorChange?.(null);
       }
+      // Only the reticle follows the pointer; hovering an otherwise still
+      // scene is not a reason to redraw it.
+      if (reticle.visible || wasVisible) requestRender();
     }
   }
 
@@ -668,12 +679,12 @@
             navigation.cancelGoalMode();
           }
           scene.layers.cursorReticle.visible = false;
-          scene.render();
+          requestRender();
           return;
         }
         navigation.cancelGoalMode();
         scene.layers.cursorReticle.visible = false;
-        scene.render();
+        requestRender();
         return;
       }
     }
@@ -683,7 +694,7 @@
     if (clickedRobotId) {
       fleet.select(clickedRobotId, e.shiftKey);
       actions.selectRobots(fleet.selected);
-      scene.render();
+      requestRender();
       return;
     }
 
@@ -691,7 +702,7 @@
     const detHit = scene.layers.raycastDetection(ndc, scene.camera);
     if (detHit) {
       review.select(detHit);
-      scene.render();
+      requestRender();
       return;
     }
 
@@ -706,7 +717,7 @@
     if (!scene) return;
     onCameraInteraction?.();
     scene.zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
-    scene.render();
+    requestRender();
   }
 
   function onContextMenu(e: MouseEvent) {
@@ -715,14 +726,32 @@
 
   // Animation & Rendering Loop
   let rafId = 0;
-  let lastFrame = 0;
   let lastLayers = 0;
+  const scheduler = new RenderScheduler();
+  /** Wall clock until which telemetry counts as movement. */
+  let movingUntil = 0;
+
+  /** Draw on the next animation frame, starting the loop if it had stopped. */
+  function requestRender(moving = false) {
+    if (moving) movingUntil = performance.now() + MOTION_LINGER_MS;
+    scheduler.markDirty();
+    if (!rafId && mounted && active && !document.hidden) rafId = requestAnimationFrame(tick);
+  }
+
   function tick(timestamp: number) {
     rafId = 0;
-    if (!scene || !active || document.hidden) return;
-    rafId = requestAnimationFrame(tick);
-    if (timestamp - lastFrame < 1000 / QUALITY[quality].fps) return;
-    lastFrame = timestamp;
+    if (!scene || !active) return;
+    const decision = scheduler.frame({
+      now: timestamp,
+      hidden: document.hidden,
+      moving: timestamp < movingUntil,
+      // A robot held through a gap in its source frame needs frames to keep
+      // coming, or its grace period never expires and it is drawn for ever.
+      decorating: scene.robotManager.animating || scene.robotManager.retaining,
+      fps: QUALITY[quality].fps
+    });
+    if (decision.render || decision.again) rafId = requestAnimationFrame(tick);
+    if (!decision.render) return;
     const time = timestamp * 0.001;
 
     // Center on the currently displayed robots. Live component telemetry is
@@ -787,6 +816,8 @@
   function pauseScene() {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
+    // Whatever changed while the map was away is drawn once on return.
+    scheduler.markDirty();
     generation++;
     pending?.abort();
     pending = null;
@@ -797,10 +828,36 @@
   function resumeScene() {
     if (!scene || !active || document.hidden) return;
     scene.resize();
-    if (!rafId) rafId = requestAnimationFrame(tick);
+    requestRender();
     void fetchCloud();
     if (renderMode === 'gaussians') void fetchGaussians();
   }
+
+  // Everything the drawn frame is built from, listed and explained in
+  // sceneInputs.ts. Reading it here is what turns a store or prop change into
+  // exactly one redraw, instead of the scene being redrawn continuously in
+  // case one of them had changed.
+  $effect(() => {
+    void sceneDrawInputs(
+      { fleet, settings, trails: trailStore, mapStore, review, replicaTactical },
+      {
+        liveReplica,
+        replicaCloud,
+        follow,
+        showGrid,
+        showTrails,
+        showLabels,
+        showSensors,
+        showPlans,
+        showNetwork,
+        quality,
+        renderMode,
+        colorMode,
+        pointSize
+      }
+    );
+    if (mounted && active) untrack(() => requestRender(true));
+  });
 
   $effect(() => {
     if (!mounted) return;
@@ -818,6 +875,7 @@
     const cutoff = ceilingCutoff;
     if (mounted && scene) {
       scene.setCeiling(cutoff);
+      untrack(() => requestRender());
     }
   });
 
@@ -853,7 +911,7 @@
     const ro = new ResizeObserver(() => {
       if (!active || document.hidden) return;
       scene?.resize();
-      scene?.render();
+      requestRender();
     });
     ro.observe(canvas);
 

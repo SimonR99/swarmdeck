@@ -1,10 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { rebaseViewport } from './mapViewport';
+  import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
     globalMapMembers,
     hasQualifiedRasterFrame,
-    RasterRobotProjectionCache
+    RasterRobotProjectionCache,
+    RasterTrailProjectionCache
   } from './mapFrames';
   import {
     Box,
@@ -34,6 +36,7 @@
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import { session } from '$lib/stores/session.svelte';
+  import { trails } from '$lib/stores/trails.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { review } from '$lib/stores/review.svelte';
@@ -92,16 +95,23 @@
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
 
-  const trails = new Map<string, { x: number; y: number }[]>();
   const overlayCache = new RasterRobotProjectionCache();
+  const trailCache = new RasterTrailProjectionCache();
   const seenMapEpochs = new Map<string, string>();
   $effect(() => {
     for (const [robotId, epoch] of Object.entries(mapStore.robotMapEpochs)) {
       if (seenMapEpochs.get(robotId) === epoch) continue;
       seenMapEpochs.set(robotId, epoch);
-      trails.delete(robotId);
+      trails.clear(robotId);
     }
   });
+
+  /** A robot's recorded history, placed on the raster this canvas is showing. */
+  function trailOnRaster(robotId: string): readonly { x: number; y: number }[] {
+    const robot = fleet.get(robotId);
+    if (!robot) return [];
+    return trailCache.project(robot, trails.points(robotId), mapStore.info?.transforms);
+  }
   const pointers = new Map<number, { x: number; y: number }>();
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
@@ -202,6 +212,7 @@
 
   function clearTrails() {
     trails.clear();
+    trailCache.clear();
   }
 
   async function resetMaps(robotId?: string) {
@@ -218,7 +229,7 @@
     resetError = null;
     try {
       await actions.resetMap(robotId);
-      if (robotId) trails.delete(robotId);
+      if (robotId) trails.clear(robotId);
       else clearTrails();
       if (!robotId || mapStore.viewMode === 'global' || mapStore.viewRobot === robotId) {
         await mapStore.reloadCurrentView();
@@ -382,7 +393,7 @@
         info,
         view,
         screenOf,
-        trails,
+        trailOf: trailOnRaster,
         showTrails,
         showPlans,
         showSensors,
@@ -399,18 +410,63 @@
     }
   });
 
-  // Continuous render loop & resize observer
-  $effect(() => {
-    let raf = 0;
-    const loop = () => {
+  // Redraw on demand & resize observer.
+  //
+  // The canvas used to redraw on every animation frame whether or not anything
+  // had changed, and did so even while the 3D view was covering it. Nothing on
+  // it animates on its own, so a frame is drawn only when one of the things it
+  // is drawn from changed.
+  let redrawHandle = 0;
+  function scheduleDraw() {
+    if (redrawHandle || show3D || document.hidden) return;
+    redrawHandle = requestAnimationFrame(() => {
+      redrawHandle = 0;
       draw();
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    const ro = new ResizeObserver(() => draw());
+    });
+  }
+
+  $effect(() => {
+    // Everything the canvas is drawn from.
+    void show3D;
+    void mapStore.revision;
+    void mapStore.seq;
+    void mapStore.ready;
+    void mapStore.info;
+    void mapStore.viewMode;
+    void mapStore.viewRobot;
+    void mapStore.slamGraphs;
+    void fleet.sceneRevision;
+    void fleet.selected;
+    void trails.revision;
+    void review.proposals;
+    void review.entities;
+    void review.selected;
+    void review.highlighted;
+    void settings.value.robots;
+    void view.scale;
+    void view.tx;
+    void view.ty;
+    void view.rotation;
+    void view.initialised;
+    void follow;
+    void showGrid;
+    void showTrails;
+    void showLabels;
+    void showSensors;
+    void showPlans;
+    void showNetwork;
+    untrack(scheduleDraw);
+  });
+
+  $effect(() => {
+    const ro = new ResizeObserver(() => scheduleDraw());
     if (host) ro.observe(host);
+    const onVisibility = () => scheduleDraw();
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      cancelAnimationFrame(raf);
+      if (redrawHandle) cancelAnimationFrame(redrawHandle);
+      redrawHandle = 0;
+      document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
     };
   });
@@ -423,10 +479,29 @@
     return () => window.removeEventListener('keydown', cancelGoalMode);
   });
 
+  // The map's HTTP polling: one timer for the raster catalogue, the merge
+  // status and the raster image, each at its own cadence, none of it while the
+  // tab is hidden and no raster image while the 3D view is covering the canvas.
+  const mapPoll = new MapPollScheduler();
   $effect(() => {
-    void mapStore.refreshStatus();
-    const timer = window.setInterval(() => void mapStore.refreshStatus(), 3000);
-    return () => window.clearInterval(timer);
+    const visible = !show3D;
+    untrack(() => mapPoll.invalidate());
+    const tick = () =>
+      void mapStore.poll(
+        mapPoll.due({
+          now: Date.now(),
+          hidden: document.hidden,
+          rasterVisible: visible,
+          rasterReady: mapStore.ready
+        })
+      );
+    tick();
+    const timer = window.setInterval(tick, MAP_POLL_TICK_MS);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
   });
 
   $effect(() => {
@@ -441,7 +516,9 @@
     void mapStore.viewMode;
     void mapStore.viewRobot;
     untrack(() => {
-      trails.clear();
+      // Only the cached raster placement is stale; the recorded history is in
+      // the world frame and belongs to the robot, not to the view.
+      trailCache.clear();
       lastRenderedInfo = null;
       view.initialised = false;
     });
@@ -669,7 +746,7 @@
         {showSensors}
         {showPlans}
         {showNetwork}
-        {trails}
+        trails={trails.all()}
         onCameraInteraction={() => (follow = false)}
         onCursorChange={(coords) => (cursorWorld = coords)}
       />

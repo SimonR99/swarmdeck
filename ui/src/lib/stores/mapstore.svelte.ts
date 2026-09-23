@@ -8,6 +8,7 @@ import {
   type OptimizedScope
 } from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
+import { keepIfUnchanged } from './sameFieldValue';
 import type { NetworkPatch, MapStatus, Pose, SlamGraph } from '$lib/types/protocol';
 
 export type { OptimizedScope } from './optimizedScopes';
@@ -254,16 +255,38 @@ export const mapStore = {
     state.revision++;
   },
 
+  /**
+   * One pass of the merged map poll. Each part is asked for by the scheduler
+   * in `mapPollScheduler.ts`, which owns the cadences.
+   */
+  async poll(work: { scopes: boolean; status: boolean; raster: boolean }) {
+    if (work.scopes || work.raster) await this.loadOptimizedScopes();
+    if (work.status) await this.loadStatus();
+    if (work.raster) await this.refreshGlobalOptimizedView({ indexLoaded: true });
+  },
+
   async refreshStatus() {
+    await this.loadOptimizedScopes();
+    await this.loadStatus();
+  },
+
+  async loadStatus() {
     if (statusLoading) return;
     statusLoading = true;
     try {
-      await this.loadOptimizedScopes();
       const response = await fetch('/api/map/status', { cache: 'no-store' });
       if (!response.ok) throw new Error(`map status ${response.status}`);
-      state.status = (await response.json()) as MapStatus;
+      const status = (await response.json()) as MapStatus;
+      // A status that says what the last one said keeps its reference, so the
+      // panels and the map layers built from it are left alone.
+      state.status = keepIfUnchanged(state.status, status);
       state.statusUpdatedAt = Date.now();
-      if (state.status.slam_graphs) state.slamGraphs = { ...state.slamGraphs, ...state.status.slam_graphs };
+      if (status.slam_graphs) {
+        state.slamGraphs = keepIfUnchanged(state.slamGraphs, {
+          ...state.slamGraphs,
+          ...status.slam_graphs
+        });
+      }
       if (!state.ready) await this.loadGlobalOptimized();
     } catch {
       // The explicit mock profile has no HTTP map status endpoint.
@@ -280,7 +303,9 @@ export const mapStore = {
       // Keep per-robot rasters in the catalogue: local mode resolves the
       // selected robot to `robot:<id>`. Global ranking deliberately ignores
       // these scopes, so retaining them cannot contaminate fleet selection.
-      state.optimizedScopes = body.maps ?? [];
+      const maps = keepIfUnchanged(state.optimizedScopes, body.maps ?? []);
+      if (maps === state.optimizedScopes) return;
+      state.optimizedScopes = maps;
       state.revision++;
     } catch (error) {
       console.warn('[swarmdeck] optimized map index failed', error);
@@ -315,12 +340,12 @@ export const mapStore = {
     }
   },
 
-  async refreshGlobalOptimizedView() {
+  async refreshGlobalOptimizedView(options?: { indexLoaded?: boolean }) {
     if (globalRefreshInFlight) return;
     globalRefreshInFlight = true;
     try {
       const previous = state.globalOptimizedScope;
-      await this.loadOptimizedScopes();
+      if (!options?.indexLoaded) await this.loadOptimizedScopes();
       const next = shownScope();
       if (!next) {
         if (state.ready) {

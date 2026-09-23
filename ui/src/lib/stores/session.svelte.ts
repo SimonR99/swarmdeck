@@ -1,4 +1,5 @@
 import type { Alert, Detection, SimReset } from '$lib/types/protocol';
+import { capDetections } from './detectionWindow';
 
 type ConnState = 'connecting' | 'live' | 'mock' | 'lost';
 
@@ -139,7 +140,7 @@ export const session = {
     const tracked: TrackedDetection = { ...d, received_at: Date.now() / 1000 };
     const i = state.detections.findIndex((x) => x.id === d.id);
     if (i >= 0) state.detections[i] = tracked;
-    else state.detections = [...state.detections, tracked];
+    else state.detections = capDetections([...state.detections, tracked]);
   },
 
   /**

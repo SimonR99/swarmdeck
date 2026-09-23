@@ -42,17 +42,60 @@ export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransfor
   return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
 }
 
-/** Re-express one coherent telemetry packet in the transform baked into the raster. */
-export function projectRobotToRaster(robot: RobotState, frames: FrameTransforms): RobotState | null {
+/** The rigid world-to-raster correction for one robot, or null when it has none. */
+export interface RasterProjection {
+  x: number;
+  y: number;
+  yaw: number;
+  c: number;
+  s: number;
+}
+
+/**
+ * The correction between the transform a robot's telemetry was published with
+ * and the one baked into the displayed raster. `undefined` when the robot
+ * needs none, `null` when the raster cannot place it.
+ */
+export function rasterProjection(
+  robot: Pick<RobotState, 'robot_id' | 'navigation_transform'>,
+  frames: FrameTransforms
+): RasterProjection | null | undefined {
   const source = robot.navigation_transform;
-  if (!source) return robot;
+  if (!source) return undefined;
   const target = frames?.[robot.robot_id];
   if (!target) return null;
-  // Compose once per packet; every path vertex shares this rigid transform.
   const yaw = target.yaw - source.yaw;
   const c = Math.cos(yaw), s = Math.sin(yaw);
-  const x = target.x - source.x * c + source.y * s;
-  const y = target.y - source.x * s - source.y * c;
+  return {
+    x: target.x - source.x * c + source.y * s,
+    y: target.y - source.x * s - source.y * c,
+    yaw,
+    c,
+    s
+  };
+}
+
+/** Place recorded world-frame trail points on the displayed raster. */
+export function projectTrailToRaster(
+  points: readonly { x: number; y: number }[],
+  projection: RasterProjection | null | undefined
+): { x: number; y: number }[] {
+  if (projection === undefined) return points as { x: number; y: number }[];
+  if (projection === null) return [];
+  const { x, y, c, s } = projection;
+  return points.map((point) => ({
+    x: x + point.x * c - point.y * s,
+    y: y + point.x * s + point.y * c
+  }));
+}
+
+/** Re-express one coherent telemetry packet in the transform baked into the raster. */
+export function projectRobotToRaster(robot: RobotState, frames: FrameTransforms): RobotState | null {
+  const projection = rasterProjection(robot, frames);
+  if (projection === undefined) return robot;
+  if (projection === null) return null;
+  // Compose once per packet; every path vertex shares this rigid transform.
+  const { x, y, c, s, yaw } = projection;
   const point = <T extends Point & { yaw?: number }>(value: T): T => ({
     ...value,
     x: x + value.x * c - value.y * s,
@@ -79,5 +122,37 @@ export class RasterRobotProjectionCache {
     const value = projectRobotToRaster(robot, frames);
     this.entries.set(robot, { key, value });
     return value;
+  }
+}
+
+/**
+ * The same correction for a robot's trail. Recomputed only when the trail
+ * gained a point or the raster changed the transform it was published with: a
+ * trail is six hundred points and the canvas redraws for many other reasons.
+ */
+export class RasterTrailProjectionCache {
+  private entries = new Map<
+    string,
+    { key: string; length: number; last: unknown; value: { x: number; y: number }[] }
+  >();
+
+  project(
+    robot: Pick<RobotState, 'robot_id' | 'navigation_transform'>,
+    points: readonly { x: number; y: number }[],
+    frames: FrameTransforms
+  ): { x: number; y: number }[] {
+    const key = JSON.stringify([robot.navigation_transform, frames?.[robot.robot_id]]);
+    const last = points[points.length - 1] ?? null;
+    const cached = this.entries.get(robot.robot_id);
+    if (cached && cached.key === key && cached.length === points.length && cached.last === last) {
+      return cached.value;
+    }
+    const value = projectTrailToRaster(points, rasterProjection(robot, frames));
+    this.entries.set(robot.robot_id, { key, length: points.length, last, value });
+    return value;
+  }
+
+  clear() {
+    this.entries.clear();
   }
 }

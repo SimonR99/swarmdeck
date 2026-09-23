@@ -5,7 +5,7 @@ import { session } from '$lib/stores/session.svelte';
 import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
-import { MockFleet } from './mock';
+import type { MockFleet } from './mock';
 import { fetchJsonWithTimeout, resetRequestId, resetRobotMap } from './resetHttp';
 
 /**
@@ -26,7 +26,6 @@ let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
 let tickTimer: number | null = null;
-let rasterRefreshTimer: number | null = null;
 let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
@@ -192,7 +191,14 @@ function dispatch(msg: ServerMessage) {
   }
 }
 
-function startMock() {
+/**
+ * The local simulator, fetched only when `?mock` asked for it. A live
+ * dashboard must never load synthetic robots, let alone ship them in the
+ * bundle it parses at startup.
+ */
+async function startMock() {
+  if (!started || mock) return;
+  const { MockFleet } = await import('./mock');
   if (!started || mock) return;
   session.setConnection('mock');
   mock = new MockFleet(dispatch, MOCK_ROBOTS);
@@ -204,7 +210,7 @@ function connect() {
     return;
   }
   if (FORCE_MOCK) {
-    startMock();
+    void startMock();
     return;
   }
   session.setConnection('connecting');
@@ -420,9 +426,8 @@ export function startConnection() {
   void resumeReset();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
-  rasterRefreshTimer = setInterval(() => {
-    void mapStore.refreshGlobalOptimizedView();
-  }, 2000) as unknown as number;
+  // The map view owns the map's polling: it is the only thing that displays a
+  // raster, and it knows when one is on screen. See mapPollScheduler.ts.
 }
 
 export function teardown() {
@@ -430,10 +435,8 @@ export function teardown() {
   started = false;
   clearTimeout(retryTimer ?? undefined);
   clearInterval(tickTimer ?? undefined);
-  clearInterval(rasterRefreshTimer ?? undefined);
   retryTimer = null;
   tickTimer = null;
-  rasterRefreshTimer = null;
   if (ws) ws.onclose = null;
   ws?.close();
   ws = null;

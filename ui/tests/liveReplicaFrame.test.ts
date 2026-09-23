@@ -119,7 +119,10 @@ test('live goal endpoint posts component coordinates to the bounded route', asyn
   assert.equal(request?.url, `/api/autonomy/replicas/components/live/${session}/goal`);
   assert.deepEqual(JSON.parse(String(request?.init?.body)), {
     robot_id: 'robot-a', component_id: component, solution_order: [2, 7],
-    goal: { x: 8, y: 22, z: 0.4, yaw: 0 }
+    goal: { x: 8, y: 22, z: 0.4, yaw: 0 },
+    // The route takes the operator's "explore if unknown" choice with the
+    // goal; not sending it at all is not the same as sending false.
+    explore_if_unknown: false
   });
 });
 
