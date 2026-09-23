@@ -25,7 +25,6 @@ from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, map_service
 
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 DEPLOYMENT_SCOPE_PREFIX = "deployment:"
 _optimized: dict[
     str,
@@ -396,24 +395,6 @@ async def reset_all_maps() -> Response:
     await broadcast({"type": "network_clear", "robot_id": None})
     events.log("map_reset", {"scope": "all", "robots": reset})
     return JSONResponse({"ok": True, "scope": "all", "robots": reset})
-
-
-def _prune_optimized_maps(scopes: Any) -> list[str]:
-    if not isinstance(scopes, list) or not all(
-        isinstance(scope, str) for scope in scopes
-    ):
-        return []
-    live = set(scopes)
-    with _optimized_lock:
-        dead = sorted(
-            scope for scope in set(_optimized) - live if not is_server_scope(scope)
-        )
-        for scope in dead:
-            _optimized.pop(scope, None)
-            _optimized_seq.pop(scope, None)
-            _optimized_publication.pop(scope, None)
-        _drop_optimized_png_cache(dead)
-    return dead
 
 
 async def get_optimized_index() -> dict[str, Any]:
