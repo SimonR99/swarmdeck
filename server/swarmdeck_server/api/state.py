@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 from fastapi import WebSocket
 
-from ..bus import bus, mark_session_start, session_elapsed, stamps
+from ..bus import mark_session_start, session_elapsed, stamps
 from ..config.detection import DETECTION_CLASSES, floor_for
 from ..config.settings import (
     SettingsStore,

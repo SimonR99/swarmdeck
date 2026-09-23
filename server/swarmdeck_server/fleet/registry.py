@@ -15,7 +15,7 @@ from typing import Any
 from autonomy.live_mapping import display_path, validate_live_mapping
 from autonomy.slam_status import peer_status
 
-from ..bus import bus, stamps
+from ..bus import stamps
 
 OFFLINE_AFTER_S = 4.0
 MAX_NAV_FAILURE_REASON_LENGTH = 512
