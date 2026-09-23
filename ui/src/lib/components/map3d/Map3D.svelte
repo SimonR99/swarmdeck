@@ -37,7 +37,8 @@
   } from './replicaTactical';
   import {
     fetchLiveReplicaFrame,
-    LIVE_REPLICA_FRESHNESS_BUDGET_S,
+    liveReplicaDrawChanged,
+    liveRobotFreshness,
     liveRobotToMapRobot,
     liveReplicaMatchesSelection,
     postLiveReplicaGoal,
@@ -119,9 +120,19 @@
   let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
-  let liveReplica = $state<LiveReplicaSelection | null>(null);
+  // Read by the frame but not reactive: every poll brings new freshness ages,
+  // so setLiveReplica() bumps liveReplicaRevision only when what is drawn changed.
+  let liveReplica: LiveReplicaSelection | null = null;
+  let liveReplicaRevision = $state(0);
   let liveReplicaPending: AbortController | null = null;
   let liveReplicaKey = '';
+
+  function setLiveReplica(next: LiveReplicaSelection | null) {
+    const redraw = liveReplicaDrawChanged(liveReplica, next, performance.now());
+    liveReplica = next;
+    // Called from effects too, which must not come to depend on the counter.
+    if (redraw) liveReplicaRevision = untrack(() => liveReplicaRevision) + 1;
+  }
 
   function robotsOnMap(): MapRobot[] {
     if (tacticalReplica) {
@@ -135,7 +146,7 @@
       )) return [];
       if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
       return liveReplica.frame.robots
-        .filter((robot) => robot.freshness.pose_s + age <= LIVE_REPLICA_FRESHNESS_BUDGET_S)
+        .filter((robot) => liveRobotFreshness(robot, age).pose)
         .filter((robot) => fleet.isEnabled(robot.robot_id))
         .filter((robot) => tacticalReplica.scope !== 'robot' || robot.robot_id === tacticalReplica.robotId)
         .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
@@ -282,7 +293,7 @@
       replicaRevision.clear();
       replicaNeedsRebuild = true;
       gaussianEtag = '';
-      liveReplica = null;
+      setLiveReplica(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
@@ -315,7 +326,7 @@
     try {
       const frame = await fetchLiveReplicaFrame(selection, controller.signal);
       if (key !== liveReplicaKey || !liveTactical || !replicaTactical.selection) return;
-      if (frame) liveReplica = { frame, receivedAt: startedAt };
+      if (frame) setLiveReplica({ frame, receivedAt: startedAt });
       // A 404/409 retains the last verified overlay until its three-second
       // freshness budget expires; this avoids blinking during a frame swap.
     } catch (reason) {
@@ -527,7 +538,7 @@
       liveReplicaKey = key;
       liveReplicaPending?.abort();
       liveReplicaPending = null;
-      liveReplica = null;
+      setLiveReplica(null);
     }
     if (key && mounted && active) void refreshLiveReplica();
   });
@@ -841,7 +852,7 @@
     void sceneDrawInputs(
       { fleet, settings, trails: trailStore, mapStore, review, replicaTactical },
       {
-        liveReplica,
+        liveReplicaRevision,
         replicaCloud,
         follow,
         showGrid,

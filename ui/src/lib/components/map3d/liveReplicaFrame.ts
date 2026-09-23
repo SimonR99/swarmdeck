@@ -1,5 +1,6 @@
 import type { MapRobot } from '../map2d/mapLayers.ts';
 import type { ReplicaTacticalSelection } from './replicaTactical.ts';
+import { sameDrawnValue } from '../../stores/sameFieldValue.ts';
 
 export const LIVE_REPLICA_FRESHNESS_BUDGET_S = 3;
 
@@ -307,21 +308,66 @@ function projectedGeometry(robot: LiveReplicaRobot): ProjectedLiveRobotGeometry 
   return result;
 }
 
+/** Which parts of a live robot are still drawn this long after its frame was received. */
+export function liveRobotFreshness(robot: LiveReplicaRobot, elapsedS: number) {
+  return {
+    pose: robot.freshness.pose_s + elapsedS <= LIVE_REPLICA_FRESHNESS_BUDGET_S,
+    goal: robot.goal !== null && robot.freshness.goal_s !== null &&
+      robot.freshness.goal_s + elapsedS <= LIVE_REPLICA_FRESHNESS_BUDGET_S,
+    path: robot.freshness.path_s !== null &&
+      robot.freshness.path_s + elapsedS <= LIVE_REPLICA_FRESHNESS_BUDGET_S
+  };
+}
+
+/**
+ * Whether replacing the live frame `previous` with `next` can change what the
+ * map draws at `now` (milliseconds, the clock `receivedAt` is on).
+ *
+ * The frame is polled once a second and every poll carries new freshness ages,
+ * so a parked fleet would otherwise redraw the map at the poll rate. The
+ * coordinates are compared to a micrometre (`sameDrawnValue`), and the ages
+ * matter only through whether each pose, goal and path is fresh. The previous
+ * frame may have been drawn fresh when it arrived and stale by a later redraw,
+ * so the next frame redraws unless it agrees with both.
+ */
+export function liveReplicaDrawChanged(
+  previous: LiveReplicaSelection | null,
+  next: LiveReplicaSelection | null,
+  now: number
+): boolean {
+  if (!previous || !next) return previous !== next;
+  const before = previous.frame;
+  const after = next.frame;
+  if (before.robots.length !== after.robots.length) return true;
+  const previousAge = (now - previous.receivedAt) / 1000;
+  const nextAge = (now - next.receivedAt) / 1000;
+  for (let i = 0; i < after.robots.length; i++) {
+    const { freshness: _previousFreshness, ...beforeRobot } = before.robots[i];
+    const { freshness: _nextFreshness, ...afterRobot } = after.robots[i];
+    if (!sameDrawnValue(beforeRobot, afterRobot)) return true;
+    const fresh = liveRobotFreshness(after.robots[i], nextAge);
+    for (const drawn of [
+      liveRobotFreshness(before.robots[i], 0),
+      liveRobotFreshness(before.robots[i], previousAge)
+    ]) {
+      if (drawn.pose !== fresh.pose || drawn.goal !== fresh.goal || drawn.path !== fresh.path) return true;
+    }
+  }
+  return !sameDrawnValue({ ...before, robots: [] }, { ...after, robots: [] });
+}
+
 export function liveRobotToMapRobot(robot: LiveReplicaRobot, base?: MapRobot, elapsedS = 0): MapRobot {
   const geometry = projectedGeometry(robot);
-  const freshGoal = robot.goal && robot.freshness.goal_s !== null &&
-    robot.freshness.goal_s + elapsedS <= LIVE_REPLICA_FRESHNESS_BUDGET_S;
-  const freshPath = robot.freshness.path_s !== null &&
-    robot.freshness.path_s + elapsedS <= LIVE_REPLICA_FRESHNESS_BUDGET_S;
+  const fresh = liveRobotFreshness(robot, elapsedS);
   return {
     ...base,
     robot_id: robot.robot_id,
     robot_type: robot.robot_type ?? base?.robot_type,
     pose: { x: geometry.pose.x, y: geometry.pose.y, z: geometry.pose.z, yaw: geometry.poseYaw },
-    goal: freshGoal ? geometry.goal : null,
-    planned_path: freshPath ? geometry.plannedPath : emptyPath,
-    global_planned_path: freshPath ? geometry.globalPlannedPath : emptyPath,
-    local_planned_path: freshPath ? geometry.localPlannedPath : emptyPath,
+    goal: fresh.goal ? geometry.goal : null,
+    planned_path: fresh.path ? geometry.plannedPath : emptyPath,
+    global_planned_path: fresh.path ? geometry.globalPlannedPath : emptyPath,
+    local_planned_path: fresh.path ? geometry.localPlannedPath : emptyPath,
     nav_status: (robot.nav_status as MapRobot['nav_status']) ?? base?.nav_status,
     mode: (robot.mode as MapRobot['mode']) ?? base?.mode
   };

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   LIVE_REPLICA_FRESHNESS_BUDGET_S,
   liveRobotToMapRobot,
+  liveReplicaDrawChanged,
   liveReplicaMatchesSelection,
   parseLiveReplicaFrame,
   postLiveReplicaGoal
@@ -136,4 +137,55 @@ test('initial frame sentinel is explicit and missing solution order is rejected'
   const missing = payload();
   delete (missing as { solution_order?: unknown }).solution_order;
   assert.throws(() => parseLiveReplicaFrame(missing), /solution_order/);
+});
+
+test('a live frame that repeats a parked robot one poll later does not redraw', () => {
+  const previous = { frame: parseLiveReplicaFrame(payload()), receivedAt: 1000 };
+  const repeated = payload();
+  // Only the freshness ages advance, and the pose comes back with last-digit noise.
+  repeated.robots[0].freshness = { pose_s: 0.82, goal_s: 0.9, path_s: 0.9 };
+  repeated.robots[0].pose = { x: 1.0000000000000002, y: 2, z: 0, yaw: 0 };
+  const next = { frame: parseLiveReplicaFrame(repeated), receivedAt: 2000 };
+  assert.equal(liveReplicaDrawChanged(previous, next, 2000), false);
+});
+
+test('a live frame that moves a robot, or changes the frame, redraws', () => {
+  const previous = { frame: parseLiveReplicaFrame(payload()), receivedAt: 1000 };
+  const moved = payload();
+  moved.robots[0].pose = { x: 1.01, y: 2, z: 0, yaw: 0 };
+  assert.equal(liveReplicaDrawChanged(previous, { frame: parseLiveReplicaFrame(moved), receivedAt: 2000 }, 2000), true);
+  const reframed = payload();
+  reframed.frame_id = 'component_frame_2';
+  assert.equal(liveReplicaDrawChanged(previous, { frame: parseLiveReplicaFrame(reframed), receivedAt: 2000 }, 2000), true);
+  const joined = payload();
+  joined.robots.push({ ...joined.robots[0], robot_id: 'robot-b' });
+  assert.equal(liveReplicaDrawChanged(previous, { frame: parseLiveReplicaFrame(joined), receivedAt: 2000 }, 2000), true);
+});
+
+test('a live frame whose pose, goal or path went stale redraws', () => {
+  const previous = { frame: parseLiveReplicaFrame(payload()), receivedAt: 1000 };
+  for (const field of ['pose_s', 'goal_s', 'path_s'] as const) {
+    const stale = payload();
+    stale.robots[0].freshness = { pose_s: 0, goal_s: 0, path_s: 0, [field]: LIVE_REPLICA_FRESHNESS_BUDGET_S + 0.5 };
+    const next = { frame: parseLiveReplicaFrame(stale), receivedAt: 2000 };
+    assert.equal(liveReplicaDrawChanged(previous, next, 2000), true, `${field} going stale did not redraw`);
+  }
+});
+
+test('a live frame appearing or being dropped redraws', () => {
+  const live = { frame: parseLiveReplicaFrame(payload()), receivedAt: 1000 };
+  assert.equal(liveReplicaDrawChanged(null, live, 1000), true);
+  assert.equal(liveReplicaDrawChanged(live, null, 1000), true);
+  assert.equal(liveReplicaDrawChanged(null, null, 1000), false);
+});
+
+test('a live robot that went stale since its last frame redraws whether or not it is fresh again', () => {
+  // Drawn fresh when it arrived; four seconds later it would be drawn stale.
+  const previous = { frame: parseLiveReplicaFrame(payload()), receivedAt: 1000 };
+  const recovered = { frame: parseLiveReplicaFrame(payload()), receivedAt: 5000 };
+  assert.equal(liveReplicaDrawChanged(previous, recovered, 5000), true);
+  const stillStale = payload();
+  stillStale.robots[0].freshness = { pose_s: 4, goal_s: 4, path_s: 4 };
+  const next = { frame: parseLiveReplicaFrame(stillStale), receivedAt: 5000 };
+  assert.equal(liveReplicaDrawChanged(previous, next, 5000), true);
 });

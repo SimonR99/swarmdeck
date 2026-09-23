@@ -33,7 +33,7 @@ function stores() {
 
 function displayState(): SceneDrawState {
   return {
-    liveReplica: null,
+    liveReplicaRevision: 0,
     replicaCloud: null,
     follow: true,
     showGrid: true,
@@ -97,7 +97,7 @@ test('every store the frame is drawn from can make it dirty', () => {
 
 test('every display option the frame is drawn from can make it dirty', () => {
   const change: ((state: SceneDrawState) => void)[] = [
-    (s) => (s.liveReplica = { frame: {}, receivedAt: 1 }),
+    (s) => (s.liveReplicaRevision += 1),
     (s) => (s.replicaCloud = { partial: true }),
     (s) => (s.follow = false),
     (s) => (s.showGrid = false),
