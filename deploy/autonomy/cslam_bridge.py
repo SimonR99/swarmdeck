@@ -176,6 +176,14 @@ def sensor_input_is_fresh(last_sensor_at, now=None):
     return last_sensor_at > 0.0 and 0.0 <= age < AUTHORITY_SENSOR_TTL_S
 
 
+def authority_is_serializable(authority):
+    try:
+        json.dumps(authority, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch, run_id):
     """Decide the map-authority message to publish this tick.
 
@@ -192,9 +200,12 @@ def authority_heartbeat(built, cached, *, robot_id, mission_id, robot_map_epoch,
     Returns ``(message, new_cache)``. ``new_cache`` is the dict to keep for
     the next tick: the fresh authority, the same cached authority when it was
     re-sent, or None once there is nothing left worth re-sending.
+
+    A ``built`` authority that cannot be serialized for the wire (a NaN) is
+    treated as not built, so it never evicts the last good one.
     """
 
-    if built is not None:
+    if built is not None and authority_is_serializable(built):
         return built, built
     if (
         cached is not None
@@ -1491,6 +1502,8 @@ class Bridge(Node):
             robot_map_epoch=self.core.map_epoch,
             run_id=self.core.run_id,
         )
+        if built_authority is not None and message is not built_authority:
+            gap_reason = "built authority is not serializable"
         self.authority_revision = message.get("mapping_graph_revision")
         self.authority_gap_reason = gap_reason or ""
         if gap_reason is not None:

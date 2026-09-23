@@ -1099,3 +1099,25 @@ def test_heartbeat_skips_a_tick_instead_of_stalling_behind_a_slow_lock_holder(
     assert 0.1 <= elapsed < 0.2  # bounded by the lock wait, not the holder
     assert bridge.published == []
     assert len(logged) == 1 and logged[0].endswith("s between sends: epoch lock busy")
+
+
+def test_an_unserializable_candidate_never_evicts_the_last_good_authority(
+    bridge_module,
+):
+    """A freshly built authority that cannot be sent (a NaN, which the wire
+    JSON forbids) is rejected before it can replace the cache: the last
+    good authority keeps being re-sent, or `resetting` when there is none.
+    """
+
+    heartbeat = bridge_module.authority_heartbeat
+    mission = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    kwargs = dict(robot_id="robot_0", mission_id=mission, robot_map_epoch=0, run_id=run_id)
+    good = _authority(mission, run_id, 0, 3)
+    invalid = {**_authority(mission, run_id, 0, 4), "T_component_planning": [float("nan")]}
+
+    message, cache = heartbeat(invalid, good, **kwargs)
+    assert message is good and cache is good
+
+    message, cache = heartbeat(invalid, None, **kwargs)
+    assert message["state"] == "resetting" and cache is None
