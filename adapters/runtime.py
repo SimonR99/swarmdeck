@@ -600,6 +600,10 @@ class AdapterTelemetryMixin:
             "exploration_reason": getattr(
                 getattr(self, "exploration", None), "reason", None
             ),
+            # The waypoint being explored toward, while it has no known route.
+            "exploration_goal": getattr(
+                getattr(self, "goal_exploration", None), "display_goal", None
+            ),
             "fleet_exploration_status": getattr(
                 getattr(getattr(self, "exploration", None), "coordinator", None),
                 "completion_state",

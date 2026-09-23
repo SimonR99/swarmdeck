@@ -507,8 +507,19 @@
           <Crosshair class="h-3.5 w-3.5" />
           {navigation.goalMode ? 'Armed' : 'Set goal'}
         </button>
+        <label
+          class="mt-2 flex items-center gap-2 text-[10px] font-medium text-fg-muted"
+          title="If the explored map does not reach the goal yet, explore toward it and go there once a route is known, instead of failing."
+        >
+          <input
+            type="checkbox"
+            checked={navigation.exploreIfUnknown}
+            onchange={(e) => navigation.setExploreIfUnknown(e.currentTarget.checked)}
+          />
+          Explore if unknown
+        </label>
         <button
-          disabled={robot.nav_status !== 'active'}
+          disabled={robot.nav_status !== 'active' && !robot.exploration_goal}
           class="mt-2 flex h-10 w-full items-center justify-center gap-1 rounded-full border
                  border-border text-[10px] font-medium text-fg-muted hover:bg-surface-2
                  disabled:opacity-40"

@@ -11,14 +11,19 @@ from __future__ import annotations
 # Checked in order: the first group with a phrase in the reason explains it.
 _EXPLANATIONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
+        ("exploring toward it ended",),
+        "Explored toward the goal until there was nothing left to explore, "
+        "without finding a route to it. It may be unreachable for this robot.",
+    ),
+    (
         (
             "goal cannot be linked",
             "no route over the global graph reaches",
             "no route through the local lattice reaches",
         ),
         "No known route to the goal: the explored map does not connect it to "
-        "where the robot can go. Explore toward it first, or pick a goal in "
-        "mapped space.",
+        'where the robot can go. Send it with "Explore if unknown" to explore '
+        "toward it, or pick a goal in mapped space.",
     ),
     (
         ("no mapped ground under the goal",),

@@ -23,6 +23,9 @@ class ObjectivePlanClaim:
     objective: str
     goal: dict | None
     generation: int
+    # Explore toward a navigate goal MGG has no known route to, instead of
+    # failing it (adapters.goal_exploration).
+    explore_if_unknown: bool = False
 
 
 class MggObjectivePlanning:
@@ -310,13 +313,14 @@ class MggObjectivePlanning:
         return "ready", "", plan
 
     def _owns(self, generation):
-        return generation == self.bridge._goal_generation
+        # None: a route probe, which drives nothing and is owned by no goal.
+        return generation is None or generation == self.bridge._goal_generation
 
     @staticmethod
     def _remaining(deadline):
         return math.inf if deadline is None else max(0.0, deadline - time.monotonic())
 
-    def claim_objective(self, objective, goal=None):
+    def claim_objective(self, objective, goal=None, explore_if_unknown=False):
         if objective not in ("navigate", "return_home"):
             raise ValueError(f"unsupported MGG objective {objective!r}")
         copied = deepcopy(goal) if isinstance(goal, dict) else None
@@ -331,7 +335,12 @@ class MggObjectivePlanning:
             self._nav_failure_generation = None
             self._controller_attempts = 0
         self.bridge.set_goal_pending_if_current(generation)
-        return ObjectivePlanClaim(objective, copied, generation)
+        return ObjectivePlanClaim(
+            objective,
+            copied,
+            generation,
+            explore_if_unknown=bool(explore_if_unknown) and objective == "navigate",
+        )
 
     def execute_claimed(self, claim):
         if not isinstance(claim, ObjectivePlanClaim):
@@ -374,7 +383,9 @@ class MggObjectivePlanning:
                 reason = "MGG objective map identity stayed stale"
                 outcome = "failed"
             if outcome != "ready":
-                if outcome != "superseded":
+                if outcome != "superseded" and not self._explore_instead(
+                    claim, goal, reason
+                ):
                     self._fail_if_current(reason, claim.generation)
                 return False
             try:
@@ -545,6 +556,23 @@ class MggObjectivePlanning:
             decorated.pop("nav_failure_reason", None)
         return decorated
 
+    def _explore_instead(self, claim, goal, reason):
+        """Hand a navigate goal with no known route to goal exploration."""
+        from adapters.goal_exploration import is_no_known_route
+
+        explorer = getattr(self.bridge, "goal_exploration", None)
+        if (
+            not claim.explore_if_unknown
+            or explorer is None
+            or not is_no_known_route(reason)
+            or not self._owns(claim.generation)
+        ):
+            return False
+        with self._lock:
+            self._planning_generation = None
+            self._initial_claim_generation = None
+        return explorer.begin(claim.goal, goal)
+
     def _fail_if_current(self, message, generation):
         if self.bridge.set_nav_status_if_current(generation, "failed"):
             with self._lock:
@@ -567,3 +595,18 @@ def configure_objective_planning(bridge):
     bridge.objective_planner = (
         MggObjectivePlanning(bridge, config) if backend == "mgg" else None
     )
+    bridge.goal_exploration = None
+    exploration = getattr(bridge, "exploration", None)
+    if bridge.objective_planner is not None and exploration is not None:
+        from adapters.goal_exploration import GoalExploration
+
+        try:
+            bridge.goal_exploration = GoalExploration(
+                bridge, bridge.objective_planner, exploration, config
+            )
+        except ImportError as exc:
+            # An mgg_msgs older than set_exploration_target: goals without a
+            # known route fail as before.
+            bridge.node.get_logger().warning(
+                f"[{bridge.id}] explore-to-goal unavailable: {exc}"
+            )

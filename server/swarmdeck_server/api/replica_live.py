@@ -34,6 +34,8 @@ class LiveGoal(BaseModel):
     component_id: str
     solution_order: tuple[int, int]
     goal: ComponentGoal
+    # Explore toward the goal while it has no known route, instead of failing.
+    explore_if_unknown: bool = False
 
     @field_validator("solution_order", mode="before")
     @classmethod
@@ -334,6 +336,12 @@ async def set_live_goal(session_id: str, command: LiveGoal):
             component_goal=original,
         )
     registry.attend(robot.robot_id)
-    if not await send_objective(registry, robot.robot_id, "navigate", goal):
+    if not await send_objective(
+        registry,
+        robot.robot_id,
+        "navigate",
+        goal,
+        explore_if_unknown=command.explore_if_unknown,
+    ):
         raise HTTPException(409, "Robot command connection is unavailable")
     return {"ok": True}

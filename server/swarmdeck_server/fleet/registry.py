@@ -60,6 +60,8 @@ class Robot:
     )
     exploration_status: str = "idle"
     exploration_reason: str | None = None
+    # The waypoint the robot is exploring toward, while it has no known route.
+    exploration_goal: dict | None = None
     fleet_exploration_status: str = "unknown"
     exploration_coordination: dict | None = None
     home_pose: dict[str, float] | None = None
@@ -106,6 +108,7 @@ class Robot:
             "home_pose": self.home_pose,
             "exploration_status": self.exploration_status,
             "exploration_reason": self.exploration_reason,
+            "exploration_goal": self.exploration_goal,
             "peer_slam": self.peer_slam if self.online else None,
             "live_mapping": self.live_mapping if self.online else None,
             "fleet_exploration_status": (
@@ -250,6 +253,9 @@ class Registry:
             r.exploration_reason = (
                 reason.strip()[:512] or None if isinstance(reason, str) else None
             )
+        if "exploration_goal" in msg:
+            goal = msg["exploration_goal"]
+            r.exploration_goal = goal if isinstance(goal, dict) else None
         if msg.get("fleet_exploration_status") in {"unknown", "incomplete", "complete"}:
             r.fleet_exploration_status = msg["fleet_exploration_status"]
         coordination = msg.get("exploration_coordination")

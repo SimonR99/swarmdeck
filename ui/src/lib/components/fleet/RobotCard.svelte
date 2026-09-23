@@ -43,6 +43,8 @@
   const modeLabel = $derived(
     robot.mode === 'estop'
       ? 'E-STOP'
+      : robot.mode === 'explore' && robot.exploration_goal
+        ? 'EXPLORING TO GOAL'
       : robot.mode === 'explore'
         ? explorationLabel(robot.exploration_status)
         : robot.mode === 'recover'

@@ -63,16 +63,20 @@ test('the goal is posted with the displayed solution order and component id', as
   globalThis.fetch = fetchImpl;
   try {
     await postGlobalRasterGoal('robot_2', 'component:abc', { x: 3, y: 4 }, fetchImpl);
+    // "Explore if unknown" rides along on the same request.
+    await postGlobalRasterGoal('robot_2', 'component:abc', { x: 3, y: 4 }, fetchImpl, true);
   } finally {
     globalThis.fetch = original;
   }
-  const posted = calls.find((call) => call.url.endsWith('/goal'));
-  assert.ok(posted);
-  assert.equal(posted.url, '/api/autonomy/replicas/components/live/mission-1/goal');
-  assert.deepEqual(posted.body, {
+  const posted = calls.filter((call) => call.url.endsWith('/goal'));
+  assert.equal(posted.length, 2);
+  assert.equal(posted[0].url, '/api/autonomy/replicas/components/live/mission-1/goal');
+  assert.deepEqual(posted[0].body, {
     robot_id: 'robot_2',
     component_id: 'component:abc',
     solution_order: [42, 0],
-    goal: { x: 3, y: 4, z: 0, yaw: Math.atan2(4, 3) }
+    goal: { x: 3, y: 4, z: 0, yaw: Math.atan2(4, 3) },
+    explore_if_unknown: false
   });
+  assert.equal((posted[1].body as { explore_if_unknown: boolean }).explore_if_unknown, true);
 });

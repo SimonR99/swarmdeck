@@ -332,7 +332,8 @@ export async function postLiveReplicaGoal(
   robotId: string,
   displayedSolutionOrder: [number, number] | null,
   goal: { x: number; y: number; z: number; yaw: number },
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  exploreIfUnknown = false
 ): Promise<void> {
   const response = await fetch(`/api/autonomy/replicas/components/live/${encodeURIComponent(selection.sessionId)}/goal`, {
     method: 'POST',
@@ -342,7 +343,8 @@ export async function postLiveReplicaGoal(
       robot_id: robotId,
       component_id: selection.componentId,
       solution_order: solutionOrder(displayedSolutionOrder, true),
-      goal
+      goal,
+      explore_if_unknown: exploreIfUnknown
     }),
     signal
   });

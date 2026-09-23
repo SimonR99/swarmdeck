@@ -120,7 +120,13 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         )
     from .objective_commands import send_objective
 
-    if not await send_objective(app.registry, robot_id, "navigate", goal):
+    if not await send_objective(
+        app.registry,
+        robot_id,
+        "navigate",
+        goal,
+        explore_if_unknown=body.get("explore_if_unknown") is True,
+    ):
         return JSONResponse(
             {"error": f"Failed to send navigation goal to {robot_id}"},
             status_code=502,

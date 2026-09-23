@@ -182,6 +182,26 @@ def test_goal_is_inverted_once_and_keeps_component_anchor(setup):
     assert sent["goal"]["z"] == 1
     assert sent["goal"]["yaw"] == pytest.approx(-1.5707963267948966)
     assert registry.robots["r0"].nav_failure_reason is None
+    # Ordinary goals carry no exploration option.
+    assert "explore_if_unknown" not in sent
+
+
+def test_explore_if_unknown_reaches_the_robot(setup):
+    client, _registry, sink, _ = setup
+    response = client.post(
+        BASE + "/goal",
+        json=dict(
+            robot_id="r0",
+            component_id="component",
+            solution_order=[0, -1],
+            goal=dict(x=7, y=24, z=0, yaw=0),
+            explore_if_unknown=True,
+        ),
+    )
+    assert response.status_code == 200
+    sent = sink.send_json.call_args.args[0]
+    assert sent["type"] == "plan_objective"
+    assert sent["explore_if_unknown"] is True
 
 
 def test_new_publication_with_same_frame_revision_keeps_goal_valid(setup):

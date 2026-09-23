@@ -657,7 +657,9 @@
                 selection,
                 id,
                 displayedSolutionOrder,
-                { x: hit.x, y: hit.y, z: hit.z, yaw: 0 }
+                { x: hit.x, y: hit.y, z: hit.z, yaw: 0 },
+                undefined,
+                navigation.exploreIfUnknown
               );
             }
             navigation.finishGoal({ x: hit.x, y: hit.y });

@@ -17,6 +17,9 @@ def test_planner_reasons_become_actionable_explanations():
     assert "blocked or stuck" in explain_navigation_failure(
         "Failed to make progress; error_code=105"
     )
+    assert "nothing left to explore" in explain_navigation_failure(
+        "no known route to the goal, and exploring toward it ended (complete)"
+    )
     assert "see the planner's reason" in explain_navigation_failure("odd new reason")
     assert "without a reported reason" in explain_navigation_failure(None)
 

@@ -46,7 +46,8 @@ export async function postGlobalRasterGoal(
   robotId: string,
   scope: string,
   goal: { x: number; y: number },
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  exploreIfUnknown = false
 ): Promise<void> {
   const catalogue = await fetchImpl('/api/autonomy/replicas/components', { cache: 'no-store' });
   if (!catalogue.ok) throw new Error(`replica catalogue ${catalogue.status}`);
@@ -64,6 +65,8 @@ export async function postGlobalRasterGoal(
     { robotId, sessionId, componentId: scope },
     robotId,
     view.solution_order,
-    componentGoal(robot, goal)
+    componentGoal(robot, goal),
+    undefined,
+    exploreIfUnknown
   );
 }

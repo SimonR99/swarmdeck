@@ -305,3 +305,59 @@ def test_global_display_plan_is_whole_route(monkeypatch):
     assert displayed is not None
     assert len(displayed.poses) == 3
     assert displayed.poses[-1].x == 2
+
+
+NO_ROUTE = (
+    "goal cannot be linked to the global graph; goal lattice: 1 vertices in 1 "
+    "sweep(s), 1 reached from the goal, 0 bridge checks, none onto the "
+    "robot's roadmap"
+)
+
+
+def test_goal_without_a_known_route_is_explored_toward_when_asked(monkeypatch):
+    bridge, planner, _client = rig(
+        monkeypatch,
+        lambda request: response_for(
+            request, status=Response.UNREACHABLE, reason=NO_ROUTE
+        ),
+    )
+    bridge.goal_exploration = Mock()
+    bridge.goal_exploration.begin.return_value = True
+    claim = planner.claim_objective(
+        "navigate", {"x": 40.0, "y": 3.0}, explore_if_unknown=True
+    )
+    assert claim.explore_if_unknown
+    assert planner.execute_claimed(claim) is False
+    requested, in_frame = bridge.goal_exploration.begin.call_args.args
+    assert requested == {"x": 40.0, "y": 3.0}
+    assert (in_frame["x"], in_frame["y"]) == (40.0, 3.0)
+    assert bridge.nav_status != "failed"
+    assert planner._nav_failure_reason is None
+
+
+@pytest.mark.parametrize(
+    "explore, reason",
+    [(False, NO_ROUTE), (True, "odometry is stale")],
+)
+def test_other_refusals_still_fail_the_goal(monkeypatch, explore, reason):
+    bridge, planner, _client = rig(
+        monkeypatch,
+        lambda request: response_for(
+            request, status=Response.UNREACHABLE, reason=reason
+        ),
+    )
+    bridge.goal_exploration = Mock()
+    claim = planner.claim_objective(
+        "navigate", {"x": 40.0, "y": 3.0}, explore_if_unknown=explore
+    )
+    assert planner.execute_claimed(claim) is False
+    bridge.goal_exploration.begin.assert_not_called()
+    assert bridge.nav_status == "failed"
+    assert planner._nav_failure_reason == reason
+
+
+def test_route_probe_is_not_superseded_by_exploration_goals(monkeypatch):
+    bridge, planner, _client = rig(monkeypatch, response_for)
+    outcome, _reason, plan = planner._call_once("navigate", {"x": 2.0, "y": 0.0}, None)
+    assert outcome == "ready" and plan is not None
+    bridge.follow_path.assert_not_called()

@@ -93,6 +93,18 @@ async def dispatch_command(
             "Command rejected: robot map epoch changed or is unavailable",
         )
         return
+    goal_exploration = getattr(bridge, "goal_exploration", None)
+    if goal_exploration is not None and kind in (
+        "explore",
+        "plan_objective",
+        "cancel_goal",
+        "drive",
+        "stop",
+        "reset",
+        "body_command",
+    ):
+        # Any operator command supersedes exploring toward a goal.
+        goal_exploration.cancel()
     exploration = getattr(bridge, "exploration", None)
     if exploration is not None:
         if kind == "explore":
@@ -140,9 +152,17 @@ async def dispatch_command(
                 with getattr(bridge, "_goal_lock", nullcontext()):
                     if not command_matches_map_epoch(bridge, msg):
                         return
+                    # Only asked of planners when set, so one without the
+                    # option keeps working for ordinary goals.
+                    options = (
+                        {"explore_if_unknown": True}
+                        if msg.get("explore_if_unknown") is True
+                        else {}
+                    )
                     owned = claim(
                         objective,
                         msg.get("goal", {}) if objective == "navigate" else None,
+                        **options,
                     )
             except (TypeError, ValueError) as exc:
                 _emit(bridge, "warning", f"Invalid planning objective: {exc}")

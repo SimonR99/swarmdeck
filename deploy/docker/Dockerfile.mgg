@@ -4,7 +4,7 @@ SHELL ["/bin/bash", "-c"]
 COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
 RUN bash /tmp/use-ros-snapshot.sh
 # Pin the planner: the ros2 branch of MGGPlanner.
-ARG MGG_REV=4578db8f9694235e9cfd0e1ea97b90bc7412ca54
+ARG MGG_REV=46e3e8e005390433d1ec5baa969d1e15d9e0cdf8
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \

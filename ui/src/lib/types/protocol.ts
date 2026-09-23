@@ -100,6 +100,8 @@ export interface RobotState extends Stamps {
   goal: Point | null;
   exploration_status?: "idle" | "starting" | "exploring" | "waiting" | "locally_exhausted" | "complete" | "blocked" | "stopped";
   exploration_reason?: string | null;
+  /** The waypoint being explored toward, while it has no known route. */
+  exploration_goal?: { x: number; y: number; z?: number } | null;
   peer_slam?: {
     robot_id: string;
     mission_id: string;

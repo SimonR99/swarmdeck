@@ -598,7 +598,7 @@
       return;
     }
     for (const id of targets) {
-      void postGlobalRasterGoal(id, scope, world).catch((reason) => {
+      void postGlobalRasterGoal(id, scope, world, fetch, navigation.exploreIfUnknown).catch((reason) => {
         session.addAlert({
           id: `raster_goal_${id}`,
           level: 'warn',
