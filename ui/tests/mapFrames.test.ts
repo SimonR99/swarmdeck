@@ -7,13 +7,17 @@ import {
 import {
   globalMapMembers,
   hasQualifiedRasterFrame,
-  overlayFrameOnGlobalGrid,
   projectRobotToRaster,
   projectTrailToRaster,
   rasterProjection,
   RasterRobotProjectionCache,
   RasterTrailProjectionCache
 } from '../src/lib/components/map2d/mapFrames.ts';
+import {
+  applyPlanarTransform,
+  overlayFrameOnGlobalGrid,
+  planarTransform
+} from '../src/lib/components/map/overlayFrame.ts';
 import type { Point, Pose, RobotState } from '../src/lib/types/protocol.ts';
 import { TrailRecorder } from '../src/lib/stores/trailRecorder.ts';
 const transform = { x: 10, y: 20, yaw: Math.PI / 2 };
@@ -212,3 +216,15 @@ test('network heatmaps require transform provenance from the displayed raster he
   assert.equal(overlayFrameOnGlobalGrid('robot_9', rasterFrames), undefined);
 });
 
+
+test('the 2D raster and the 3D decal place overlays with the same rigid transform', () => {
+  const pose = { x: 3.2, y: -1.7, yaw: 0.9 };
+  const point = { x: 4.1, y: 2.3 };
+  const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+  const expected = { x: pose.x + point.x * c - point.y * s, y: pose.y + point.x * s + point.y * c };
+  assert.deepEqual(applyPlanarTransform(planarTransform(pose), point), expected);
+  const decal = decalPose({ width: 0, height: 0, resolution: 1, origin: point }, pose);
+  assert.deepEqual({ x: decal.x, y: decal.y }, expected);
+  const identity = decalPose({ width: 2, height: 4, resolution: 0.5, origin: { x: -1, y: 1 } });
+  assert.deepEqual(identity, { width: 1, height: 2, x: -0.5, y: 2, yaw: 0 });
+});

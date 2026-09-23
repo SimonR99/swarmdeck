@@ -6,7 +6,7 @@ make pointer handling, map selection, and reset controls harder to navigate.
 The functions intentionally receive the current viewport and layer toggles;
 they remain stateless apart from the trail history supplied by the component. */
 
-import { overlayFrameOnGlobalGrid } from './mapFrames.ts';
+import { overlayFrameOnGlobalGrid } from '../map/overlayFrame.ts';
 import { displayedRoute, type MapRobot, type RoutePoint } from '../map/mapRobot.ts';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
@@ -337,7 +337,7 @@ export function drawNetworkHeatmap(
   // Global map mode: render network heatmaps for all active robots
   for (const layer of mapStore.networkLayers) {
     if (!fleet.isEnabled(layer.robotId)) continue;
-    const tf = mapStore.info?.transforms?.[layer.robotId];
+    const tf = overlayFrameOnGlobalGrid(layer.robotId, mapStore.info?.transforms);
     const width =
       (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
     const height =

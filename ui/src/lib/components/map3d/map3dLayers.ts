@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { decalPose, mapFrameZ, routePositions, type MapPoint3D } from './mapFrames';
+import { overlayFrameOnGlobalGrid } from '../map/overlayFrame';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -526,7 +527,10 @@ export class Map3DLayers {
         material.map.needsUpdate = true;
       }
 
-      const pose = decalPose(networkLayer.info, mapStore.info?.transforms?.[networkLayer.robotId]);
+      const pose = decalPose(
+        networkLayer.info,
+        overlayFrameOnGlobalGrid(networkLayer.robotId, mapStore.info?.transforms)
+      );
       this.networkMesh.scale.set(pose.width, pose.height, 1);
       this.networkMesh.rotation.z = pose.yaw;
       this.networkMesh.position.set(pose.x, pose.y, 0.21);
