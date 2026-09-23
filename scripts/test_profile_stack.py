@@ -353,3 +353,15 @@ def test_latency_real_motion_in_navigation_frame(monkeypatch):
     result = _trace(monkeypatch, [_pose(9, 5, 4, transform),
                                 _pose(11, 5, 4.2, transform)])
     assert result['latency_s'] == {'robot_0': [1]}
+
+
+def test_browser_timeout_returns_unavailable(monkeypatch, tmp_path):
+    import subprocess
+    import profile_stack
+
+    monkeypatch.setattr(profile_stack, '_find_playwright_modules', lambda: tmp_path)
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+    monkeypatch.setattr(profile_stack, 'sh', timeout)
+    result = profile_stack.browser_cpu('http://localhost:5173', idle_s=1, pans=0)
+    assert 'timed out' in result['error']

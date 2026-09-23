@@ -566,7 +566,10 @@ def browser_cpu(
         "CLK_TCK": str(os.sysconf("SC_CLK_TCK")),
     }
     timeout = idle_s + pans * 3 + 90
-    result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
+    try:
+        result = sh([str(node), "-e", _BROWSER_JS], timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return {"error": f"browser measurement timed out after {timeout:g} s"}
     for line in reversed((result.stdout + "\n" + result.stderr).splitlines()):
         line = line.strip()
         if line.startswith("{"):
