@@ -782,14 +782,14 @@ class DeploymentRasterRefresher:
                 if submap["submap_id"].startswith(f"{robot}/")
             ]
             view = {**view, "selected": {**view["selected"], "submaps": owned}}
+            # Once per robot: each call hashes every submap id for its cache
+            # key, so calling it per submap made this digest quadratic.
+            keys = self._submap_keys(view)
             snapshot = replica_views.digest(
                 [
                     component,
                     transform,
-                    [
-                        self._submap_keys(view)[str(submap["submap_id"])]
-                        for submap in owned
-                    ],
+                    [keys[str(submap["submap_id"])] for submap in owned],
                 ]
             )
             if self.robot_built.get(scope) == snapshot and map_routes.has_optimized_map(
