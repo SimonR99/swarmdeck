@@ -24,11 +24,7 @@ from fastapi import Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 
-def _app():
-    from . import app
-
-    return app
-
+from . import state
 
 # ----------------------------------------------------------------- Robot Controls & Perception
 # Re-exported from teleop_routes for modularity and backwards compatibility
@@ -102,8 +98,7 @@ async def get_agent_capture(filename: str) -> Any:
 
 async def post_agent_snapshot(robot_id: str) -> Any:
     """Capture the current camera frame from robot_id and save as a chat-ready attachment."""
-    app = _app()
-    frame_tuple = app._camera_frames.get(robot_id)
+    frame_tuple = state._camera_frames.get(robot_id)
     if not frame_tuple or not frame_tuple[0]:
         return JSONResponse(
             {"error": f"No active camera frame available for robot '{robot_id}'"},
@@ -143,12 +138,11 @@ def _find_agy_binary() -> Optional[str]:
 
 
 def _get_workspace_dir() -> str:
-    app = _app()
     if os.path.isdir("/workspace"):
         return "/workspace"
     if os.path.isdir("/app/server"):
         return "/app"
-    return str(app.REPO)
+    return str(state.REPO)
 
 
 async def get_agent_status() -> dict[str, Any]:
@@ -181,7 +175,6 @@ async def get_agent_status() -> dict[str, Any]:
 
 async def post_agent_chat(request: Request) -> Response:
     """Stream Cortex chat completions, multimodal image understanding, and tool calls via SSE."""
-    app = _app()
     try:
         body = await request.json()
     except Exception:
@@ -240,7 +233,7 @@ async def post_agent_chat(request: Request) -> Response:
     )
 
     # Build fleet snapshot
-    fleet_snap = app.fleet_snapshot()
+    fleet_snap = state.fleet_snapshot()
     fleet_summary = (
         ", ".join(
             [

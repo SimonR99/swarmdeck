@@ -21,7 +21,7 @@ def test_registry_preserves_local_exhaustion_and_expires_offline_completion():
 
 
 def test_fleet_start_shares_run_and_participants(monkeypatch):
-    from swarmdeck_server.api import app as module
+    from swarmdeck_server.api import app as module, state
 
     registry = Registry()
     for name in ("r0", "r1"):
@@ -33,8 +33,8 @@ def test_fleet_start_shares_run_and_participants(monkeypatch):
         return True
 
     monkeypatch.setattr(registry, "send", send)
-    monkeypatch.setattr(module, "registry", registry)
-    monkeypatch.setattr(module.events, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(state, "registry", registry)
+    monkeypatch.setattr(state.events, "log", lambda *args, **kwargs: None)
     asyncio.run(module.handle_gui_message({"type": "start_explore"}))
     assert len(sent) == 2
     first, second = (message for _, message in sent)

@@ -238,7 +238,7 @@ def robot_command_error(robot_id: str) -> str | None:
 
 
 async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> None:
-    from .app import CONFIG, broadcast
+    from .state import CONFIG, broadcast
     from ..bus import stamps
 
     global _raster_generation
@@ -376,7 +376,7 @@ async def reset_all_maps() -> Response:
             },
             status_code=409,
         )
-    from .app import broadcast
+    from .state import broadcast
 
     blocked = sorted(
         robot.robot_id
