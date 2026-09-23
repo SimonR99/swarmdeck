@@ -27,6 +27,10 @@ from gi.repository import Gst
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jpeg_frame import raw_frame_bytes  # noqa: E402
 
+# Keep JPEG preferred through brief delivery gaps (20 frames at the default
+# 10 fps), but resume raw video if that camera's compressed stream disappears.
+COMPRESSED_PREFERENCE_TIMEOUT_S = 2.0
+
 
 class Ros2JpegRtspPublisher(Node):
     """Keep only the newest eligible frame and encode it as H.264 for MediaMTX."""
@@ -120,7 +124,7 @@ class Ros2JpegRtspPublisher(Node):
     def _on_raw_frame(self, msg: Image) -> None:
         if (
             self._failed.is_set()
-            or time.monotonic() - self._last_compressed_at < 2.0
+            or time.monotonic() - self._last_compressed_at < COMPRESSED_PREFERENCE_TIMEOUT_S
             or not self._can_push(self.raw_source)
         ):
             return
