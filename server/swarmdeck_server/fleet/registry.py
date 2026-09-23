@@ -413,24 +413,4 @@ class Registry:
         return [r.to_state() for r in self.robots.values()]
 
 
-class _CachedEpochStore:
-    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
-        from ..api.map_routes import cached_map_epoch
-
-        return cached_map_epoch(robot_id, session_id)
-
-
-_cached_epoch_store = _CachedEpochStore()
-
-
-def _epoch_store():
-    return _cached_epoch_store
-
-
-def _command_guard(robot_id):
-    from ..api.map_routes import robot_command_error
-
-    return robot_command_error(robot_id)
-
-
-registry = Registry(epoch_store=_epoch_store, command_guard=_command_guard)
+registry = Registry()

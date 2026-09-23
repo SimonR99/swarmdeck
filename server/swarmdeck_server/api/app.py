@@ -39,6 +39,11 @@ async def lifespan(_: FastAPI):
         task.cancel()
 
 
+from .map_routes import CachedEpochStore, command_guard
+
+state.registry.epoch_store = CachedEpochStore
+state.registry.command_guard = command_guard
+
 app = FastAPI(title="SwarmDeck", lifespan=lifespan)
 
 from .autonomy_routes import router as autonomy_router

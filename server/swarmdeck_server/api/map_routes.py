@@ -522,3 +522,14 @@ def reset_optimized_maps() -> None:
         _optimized_publication.clear()
         _drop_optimized_png_cache()
         _raster_generation += 1
+
+
+class CachedEpochStore:
+    """Registry-facing view of the API's bounded epoch cache."""
+
+    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
+        return cached_map_epoch(robot_id, session_id)
+
+
+def command_guard(robot_id: str) -> str | None:
+    return robot_command_error(robot_id)
