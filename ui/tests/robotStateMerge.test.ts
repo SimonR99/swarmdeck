@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeRobotState, sameFieldValue } from '../src/lib/stores/robotStateMerge.ts';
+import { mergeRobotState } from '../src/lib/stores/robotStateMerge.ts';
 import type { RobotState } from '../src/lib/types/protocol.ts';
 
 function robotState(overrides: Partial<RobotState> = {}): RobotState {
@@ -71,13 +71,4 @@ test('the first message for a robot is adopted whole', () => {
     changed: true,
     drawable: true
   });
-});
-
-test('field comparison distinguishes shape as well as value', () => {
-  assert.equal(sameFieldValue(null, null), true);
-  assert.equal(sameFieldValue(null, {}), false);
-  assert.equal(sameFieldValue([1, 2], [1, 2]), true);
-  assert.equal(sameFieldValue([1, 2], [2, 1]), false);
-  assert.equal(sameFieldValue({ x: 1 }, { x: 1, y: 2 }), false);
-  assert.equal(sameFieldValue({ x: 1, y: undefined }, { x: 1 }), false);
 });

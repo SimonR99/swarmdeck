@@ -26,7 +26,6 @@ let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
 let tickTimer: number | null = null;
-let rasterRefreshTimer: number | null = null;
 let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
@@ -420,9 +419,8 @@ export function startConnection() {
   void resumeReset();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
-  rasterRefreshTimer = setInterval(() => {
-    void mapStore.refreshGlobalOptimizedView();
-  }, 2000) as unknown as number;
+  // The map view owns the map's polling: it is the only thing that displays a
+  // raster, and it knows when one is on screen. See mapPollScheduler.ts.
 }
 
 export function teardown() {
@@ -430,10 +428,8 @@ export function teardown() {
   started = false;
   clearTimeout(retryTimer ?? undefined);
   clearInterval(tickTimer ?? undefined);
-  clearInterval(rasterRefreshTimer ?? undefined);
   retryTimer = null;
   tickTimer = null;
-  rasterRefreshTimer = null;
   if (ws) ws.onclose = null;
   ws?.close();
   ws = null;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { rebaseViewport } from './mapViewport';
+  import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
     globalMapMembers,
     hasQualifiedRasterFrame,
@@ -478,10 +479,29 @@
     return () => window.removeEventListener('keydown', cancelGoalMode);
   });
 
+  // The map's HTTP polling: one timer for the raster catalogue, the merge
+  // status and the raster image, each at its own cadence, none of it while the
+  // tab is hidden and no raster image while the 3D view is covering the canvas.
+  const mapPoll = new MapPollScheduler();
   $effect(() => {
-    void mapStore.refreshStatus();
-    const timer = window.setInterval(() => void mapStore.refreshStatus(), 3000);
-    return () => window.clearInterval(timer);
+    const visible = !show3D;
+    untrack(() => mapPoll.invalidate());
+    const tick = () =>
+      void mapStore.poll(
+        mapPoll.due({
+          now: Date.now(),
+          hidden: document.hidden,
+          rasterVisible: visible,
+          rasterReady: mapStore.ready
+        })
+      );
+    tick();
+    const timer = window.setInterval(tick, MAP_POLL_TICK_MS);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
   });
 
   $effect(() => {

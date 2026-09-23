@@ -1,35 +1,5 @@
 import type { RobotState } from '../types/protocol.ts';
-
-/**
- * Structural comparison of one `robot_state` field.
- *
- * Telemetry arrives as freshly parsed JSON, so every field of every message is
- * a new object even when the robot has not moved. Comparing by value is what
- * lets the store keep the previous reference, which in turn is what lets the
- * renderers detect change by identity instead of stringifying the fleet.
- */
-export function sameFieldValue(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  const arrayA = Array.isArray(a);
-  if (arrayA !== Array.isArray(b)) return false;
-  if (arrayA) {
-    const left = a as unknown[];
-    const right = b as unknown[];
-    if (left.length !== right.length) return false;
-    for (let i = 0; i < left.length; i++) if (!sameFieldValue(left[i], right[i])) return false;
-    return true;
-  }
-  const left = a as Record<string, unknown>;
-  const right = b as Record<string, unknown>;
-  const keys = Object.keys(left);
-  if (keys.length !== Object.keys(right).length) return false;
-  for (const key of keys) {
-    if (!Object.hasOwn(right, key)) return false;
-    if (!sameFieldValue(left[key], right[key])) return false;
-  }
-  return true;
-}
+import { sameFieldValue } from './sameFieldValue.ts';
 
 /**
  * Fields that advance on their own clock in every broadcast, whether or not
