@@ -647,11 +647,13 @@ def latency_trace(window: float) -> dict:
     ``plan_count``, and an ``error`` key if the stack is unreachable.
     """
     probe = _WS_ROBOT_STATE_PROBE.replace("WINDOW", str(window))
+    start_epoch = time.time()
     ws_result = sh(
         ["docker", "exec", "-i", container("server"), "python", "-"],
         input=probe,
         timeout=window + 30,
     )
+    end_epoch = time.time()
     try:
         raw_events = json.loads(ws_result.stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
@@ -664,7 +666,11 @@ def latency_trace(window: float) -> dict:
         if rid != "__error__":
             robot_events[rid].append((float(utc), float(x), float(y)))
 
-    # parse mgg log with timestamps from the last window + 60 s
+    # Fetch MGG logs with a generous --since window (+60 s) to avoid missing
+    # the boundary, then filter to [start_epoch, end_epoch] so that plan
+    # cycles that completed before the robot-state probe started are excluded.
+    # Without this filter, plans from up to 60 s before the probe could be
+    # correlated against current-window motion, producing false latencies.
     logs = sh(
         [
             "docker", "logs", "--timestamps",
@@ -672,7 +678,10 @@ def latency_trace(window: float) -> dict:
             container("mgg"),
         ],
     )
-    plan_events = parse_timestamped_plan_lines(logs.stdout + logs.stderr)
+    all_plan_events = parse_timestamped_plan_lines(logs.stdout + logs.stderr)
+    plan_events = [
+        (t, c) for t, c in all_plan_events if start_epoch <= t <= end_epoch
+    ]
 
     cadences = replan_cadence(plan_events)
     latencies: dict[str, list[float]] = collections.defaultdict(list)

@@ -173,6 +173,74 @@ def test_replan_cadence_empty():
 
 
 # ---------------------------------------------------------------------------
+# latency_trace window filtering (fix 1)
+# ---------------------------------------------------------------------------
+
+# Build a docker-timestamps log snippet spanning two time ranges.
+# The plan line at T=1000 is BEFORE our probe window; T=2000 is inside it.
+_PLAN_CONTENT = (
+    "[robot_0.mgg.mggplanner_node]: planning cycle: grid graph: 400 free cells, "
+    "100 vertices, 2000 edges (global 0 m); 500 ms (global 5, grid 450, gain 35, select 10)"
+)
+
+
+def _make_ts_line(epoch_s: float, content: str) -> str:
+    """Build a fake docker --timestamps log line for a given UTC epoch."""
+    import datetime as dt
+    ts = dt.datetime.fromtimestamp(epoch_s, tz=dt.timezone.utc)
+    frac = f"{ts.microsecond:06d}000"  # pad to nanoseconds
+    return f"{ts.strftime('%Y-%m-%dT%H:%M:%S')}.{frac}Z {content}"
+
+
+def test_latency_window_filter_drops_pre_window_plans():
+    """Plan events before start_epoch must be excluded from the filtered list."""
+    start_epoch = 2000.0
+    end_epoch   = 2100.0
+
+    # one plan well before the window, one inside
+    old_line    = _make_ts_line(1000.0, _PLAN_CONTENT)
+    inside_line = _make_ts_line(2050.0, _PLAN_CONTENT)
+    log_text = old_line + "\n" + inside_line + "\n"
+
+    all_events = parse_timestamped_plan_lines(log_text)
+    assert len(all_events) == 2, "both raw lines must parse"
+
+    # apply the same filter latency_trace uses
+    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
+    assert len(filtered) == 1, "only the inside-window plan must survive"
+    assert abs(filtered[0][0] - 2050.0) < 1.0
+
+
+def test_latency_window_filter_drops_post_window_plans():
+    """Plan events after end_epoch must also be excluded."""
+    start_epoch = 2000.0
+    end_epoch   = 2100.0
+
+    inside_line = _make_ts_line(2050.0, _PLAN_CONTENT)
+    after_line  = _make_ts_line(2200.0, _PLAN_CONTENT)
+    log_text = inside_line + "\n" + after_line + "\n"
+
+    all_events = parse_timestamped_plan_lines(log_text)
+    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
+    assert len(filtered) == 1
+    assert abs(filtered[0][0] - 2050.0) < 1.0
+
+
+def test_latency_window_filter_empty_when_all_outside():
+    """All plans outside the window → empty filtered list."""
+    start_epoch = 5000.0
+    end_epoch   = 5100.0
+
+    log_text = (
+        _make_ts_line(1000.0, _PLAN_CONTENT) + "\n"
+        + _make_ts_line(9000.0, _PLAN_CONTENT) + "\n"
+    )
+    all_events = parse_timestamped_plan_lines(log_text)
+    filtered = [(t, c) for t, c in all_events if start_epoch <= t <= end_epoch]
+    assert filtered == []
+
+
+# ---------------------------------------------------------------------------
 # short_command (existing helper; regression guard)
 # ---------------------------------------------------------------------------
 
