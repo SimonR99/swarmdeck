@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 from collections import OrderedDict
@@ -33,6 +34,13 @@ _optimized: dict[
 _optimized_lock = threading.Lock()
 _server_scopes: set[str] = set()
 _optimized_seq: dict[str, int] = {}
+# ``seq`` restarts at 1 after a retire, prune, reset or server restart, so it
+# cannot name a published raster on its own. Each publication also takes the
+# next value of a process-wide counter, and the ETag and PNG cache key use it
+# with a per-process nonce: no two publications ever share either.
+_OPTIMIZED_PROCESS_NONCE = secrets.token_hex(8)
+_optimized_publication_counter = 0
+_optimized_publication: dict[str, int] = {}
 _raster_generation = 0
 _robot_epoch_locks: dict[str, asyncio.Lock] = {}
 _OPTIMIZED_PNG_CACHE_MAX_ENTRIES = 16
@@ -129,6 +137,7 @@ def publish_optimized_map(
     *,
     expected_generation: int | None = None,
 ) -> bool:
+    global _optimized_publication_counter
     cells = np.asarray(cells, dtype=np.int8)
     if cells.shape != (meta.height, meta.width):
         raise ValueError("grid cells shape does not match metadata")
@@ -143,6 +152,8 @@ def publish_optimized_map(
         _optimized[scope] = (meta, cells, tuple(robots), transforms)
         _server_scopes.add(scope)
         _optimized_seq[scope] = _optimized_seq.get(scope, 0) + 1
+        _optimized_publication_counter += 1
+        _optimized_publication[scope] = _optimized_publication_counter
     return True
 
 
@@ -158,6 +169,7 @@ def retire_server_scopes(keep: str | Iterable[str] | None = None) -> list[str]:
             _optimized.pop(scope, None)
             _server_scopes.discard(scope)
             _optimized_seq.pop(scope, None)
+            _optimized_publication.pop(scope, None)
         _drop_optimized_png_cache(dead)
     return dead
 
@@ -255,6 +267,7 @@ async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> 
         for scope in dead:
             _optimized.pop(scope, None)
             _optimized_seq.pop(scope, None)
+            _optimized_publication.pop(scope, None)
             _server_scopes.discard(scope)
         _drop_optimized_png_cache(dead)
     await registry.send(robot_id, {"type": "stop", **stamps()})
@@ -398,6 +411,7 @@ def _prune_optimized_maps(scopes: Any) -> list[str]:
         for scope in dead:
             _optimized.pop(scope, None)
             _optimized_seq.pop(scope, None)
+            _optimized_publication.pop(scope, None)
         _drop_optimized_png_cache(dead)
     return dead
 
@@ -419,8 +433,10 @@ async def get_optimized_index() -> dict[str, Any]:
     return {"type": "optimized_maps", "maps": items}
 
 
-def _etag_for_optimized_map(scope: str, seq: int) -> str:
-    token = hashlib.sha256(f"{scope}\0{seq}".encode()).hexdigest()[:24]
+def _etag_for_optimized_map(scope: str, publication: int) -> str:
+    token = hashlib.sha256(
+        f"{_OPTIMIZED_PROCESS_NONCE}\0{scope}\0{publication}".encode()
+    ).hexdigest()[:24]
     return f'"optimized-map-{token}"'
 
 
@@ -443,10 +459,10 @@ def _drop_optimized_png_cache(scopes: Iterable[str] | None = None) -> None:
 
 
 def _png_for_optimized_map(
-    scope: str, seq: int, meta: GridMeta, cells: np.ndarray
+    scope: str, publication: int, meta: GridMeta, cells: np.ndarray
 ) -> tuple[str, bytes]:
     global _optimized_png_cache_bytes
-    cache_key = (scope, seq)
+    cache_key = (scope, publication)
     with _optimized_lock:
         cached = _optimized_png_cache.get(cache_key)
         if cached is not None:
@@ -454,7 +470,7 @@ def _png_for_optimized_map(
             return cached
     from ..mapsvc.output import grid_png
 
-    encoded = (_etag_for_optimized_map(scope, seq), grid_png(meta, cells))
+    encoded = (_etag_for_optimized_map(scope, publication), grid_png(meta, cells))
     with _optimized_lock:
         cached = _optimized_png_cache.get(cache_key)
         if cached is not None:
@@ -475,12 +491,13 @@ async def get_optimized_map(scope: str, if_none_match: str | None = None) -> Res
     with _optimized_lock:
         entry = _optimized.get(scope)
         seq = _optimized_seq.get(scope, 0)
+        publication = _optimized_publication.get(scope, 0)
     if entry is None:
         return JSONResponse(
             {"error": f"no optimized map for {scope!r}"}, status_code=404
         )
     meta, cells, _robots, transforms = entry
-    etag, body = _png_for_optimized_map(scope, seq, meta, cells)
+    etag, body = _png_for_optimized_map(scope, publication, meta, cells)
     headers = {
         **_map_headers(
             {
@@ -502,5 +519,6 @@ def reset_optimized_maps() -> None:
         _optimized.clear()
         _server_scopes.clear()
         _optimized_seq.clear()
+        _optimized_publication.clear()
         _drop_optimized_png_cache()
         _raster_generation += 1

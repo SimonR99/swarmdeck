@@ -646,3 +646,48 @@ def test_robot_digest_computes_the_submap_keys_once_per_robot(monkeypatch):
     )
     assert reports == {"robot_0": "skipped: stop after the digest"}
     assert len(calls) == 1
+
+
+def test_optimized_map_etag_differs_after_seq_restarts_and_process_restarts(
+    monkeypatch,
+):
+    # ``seq`` restarts at 1 after a reset (and after a server restart); an
+    # ETag of scope and seq alone would answer a client's If-None-Match with
+    # 304 for different content.
+    for name, value in {
+        "_optimized": {},
+        "_optimized_seq": {},
+        "_optimized_publication": {},
+        "_server_scopes": set(),
+    }.items():
+        monkeypatch.setattr(map_routes, name, value, raising=False)
+    map_routes._optimized_png_cache.clear()
+    monkeypatch.setattr(map_routes, "_optimized_png_cache_bytes", 0)
+    meta = GridMeta(0.2, 2, 2, 0.0, 0.0)
+
+    def publish_and_fetch(value):
+        cells = np.full((2, 2), value, dtype=np.int8)
+        assert map_routes.publish_optimized_map("robot:robot_0", meta, cells, (), None)
+        response = asyncio.run(map_routes.get_optimized_map("robot:robot_0"))
+        assert response.headers["X-Map-Seq"] == "1"
+        return response.headers["ETag"], response.body
+
+    first_etag, first_body = publish_and_fetch(0)
+    map_routes.reset_optimized_maps()
+    second_etag, second_body = publish_and_fetch(100)
+    assert second_body != first_body
+    assert second_etag != first_etag
+    stale = asyncio.run(
+        map_routes.get_optimized_map("robot:robot_0", if_none_match=first_etag)
+    )
+    assert stale.status_code == 200
+
+    # A restarted server counts publications from the start again; its
+    # process nonce keeps the ETag apart.
+    map_routes.reset_optimized_maps()
+    monkeypatch.setattr(map_routes, "_optimized_publication_counter", 0, raising=False)
+    monkeypatch.setattr(
+        map_routes, "_OPTIMIZED_PROCESS_NONCE", "restarted", raising=False
+    )
+    third_etag, _ = publish_and_fetch(0)
+    assert third_etag not in {first_etag, second_etag}
