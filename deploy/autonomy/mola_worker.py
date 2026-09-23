@@ -871,23 +871,31 @@ class MolaWorker:
                 "artifacts": artifacts,
             }
             _write_fsynced(staging / "index.json", _json_bytes(index))
+            refused = None
             with map_epoch_lock(peer_root):
                 if read_map_epoch(peer_root) != lifetime:
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("robot map epoch advanced during native build")
-                try:
-                    assert_map_epoch_dependencies(peer_root, dependencies)
-                except (OSError, ValueError):
-                    self._invalidate_runtime(peer_root)
-                    raise WorkerError("peer map epoch advanced during native build")
-                for staged_path, final_path in staged:
-                    os.replace(staged_path, final_path)
-                # A newer graph revision may supersede this build, but a new
-                # robot lifetime may never receive an old build's geometry.
-                os.replace(staging / "source.json", mola_root / "source.json")
-                # source.json is durable before index.json names it.
-                _fsync_directory(mola_root)
-                os.replace(staging / "index.json", mola_root / "index.json")
+                    refused = "robot map epoch advanced during native build"
+                else:
+                    try:
+                        assert_map_epoch_dependencies(peer_root, dependencies)
+                    except (OSError, ValueError):
+                        refused = "peer map epoch advanced during native build"
+                if refused is None:
+                    for staged_path, final_path in staged:
+                        os.replace(staged_path, final_path)
+                    # A newer graph revision may supersede this build, but a
+                    # new robot lifetime may never receive an old build's
+                    # geometry.
+                    os.replace(staging / "source.json", mola_root / "source.json")
+                    # source.json is durable before index.json names it.
+                    _fsync_directory(mola_root)
+                    os.replace(staging / "index.json", mola_root / "index.json")
+            if refused is not None:
+                # Decided under the lock, torn down after it: runtime.close()
+                # may wait on the native process, and the bridge's heartbeat
+                # needs map_epoch_lock.
+                self._invalidate_runtime(peer_root)
+                raise WorkerError(refused)
             _fsync_directory(mola_root)
             self._prune(
                 components_root,

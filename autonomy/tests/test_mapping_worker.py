@@ -1429,3 +1429,47 @@ def test_process_peer_reads_and_fsyncs_outside_the_map_epoch_lock(
     assert ("read snapshot", True) in probes
     assert ("fsync file", True) in probes
     assert all(free for _, free in probes), probes
+
+
+def test_epoch_advance_failure_tears_the_runtime_down_after_releasing_the_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """A build whose robot epoch advanced is refused under map_epoch_lock,
+    but its native runtime (`runtime.close()`, which may wait on the native
+    process) is torn down only after the lock is released, so the bridge's
+    authority heartbeat is never held up by it.
+    """
+    from autonomy.map_epochs import claim_map_epoch, read_map_epoch, write_peer_epochs
+
+    mission = "00000000-0000-0000-0000-000000000002"
+    claim_map_epoch(tmp_path, mission, "robot_0")
+    peer = tmp_path / mission / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    snapshot = json.loads((peer / "snapshot.json").read_text())
+    snapshot.update(
+        run_id=read_map_epoch(peer)["run_id"],
+        mission_id=mission,
+        robot_id="robot_0",
+        robot_map_epoch=0,
+        participant_robot_ids=["robot_0"],
+        robot_map_epochs={"robot_0": 0},
+    )
+    write_peer_epochs(peer, mission, {"robot_0": 0})
+    (peer / "snapshot.json").write_text(json.dumps(snapshot))
+
+    def resetting_import(command, _timeout):
+        Path(command[-1]).write_bytes(b"old native product")
+        claim_map_epoch(tmp_path, mission, "robot_0")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=resetting_import)
+    probes: list[bool] = []
+    original = worker._invalidate_runtime
+
+    def probing_invalidate(peer_root):
+        probes.append(_map_epoch_lock_is_free(peer))
+        original(peer_root)
+
+    monkeypatch.setattr(worker, "_invalidate_runtime", probing_invalidate)
+    with pytest.raises(WorkerError, match="robot map epoch advanced"):
+        worker.process_peer(peer)
+    assert probes and all(probes), probes
