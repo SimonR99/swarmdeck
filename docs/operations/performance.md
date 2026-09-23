@@ -512,3 +512,133 @@ Two alternating runs each, 15 s idle, then three mouse-drag pans.
 - The plan's target, the dashboard tab under 25 % CPU at idle, was set for
   Firefox with a GPU. It needs a check in a real browser, which SwiftShader
   cannot stand in for.
+
+## 2026-09-23T19:17 - tuf, SubT, 4 robots, drift, RTX 4070, idle, final (commit 6cc9f15)
+
+- **Real-time factor 1.00** (29.9 s simulated in 29.9 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| argos | 58 |
+| sim | 30 |
+| peer3 | 11 |
+| peer1 | 11 |
+| peer2 | 11 |
+| peer0 | 11 |
+| mgg | 6 |
+| server | 0 |
+| mediamtx | 0 |
+| mapping | 0 |
+| ui | 0 |
+| **total** | **138** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| argos3 | argos | 58 |
+| swarmdeck_argos_bridge.py | sim | 14 |
+| python3 /r3 | peer3 | 7 |
+| python3 /r2 | peer2 | 7 |
+| python3 /r1 | peer1 | 7 |
+| python3 /r0 | peer0 | 7 |
+| adapter_sim.py | sim | 3 |
+| lidar_handler_node.py /r1 | peer1 | 2 |
+| lidar_handler_node.py /r0 | peer0 | 2 |
+| lidar_handler_node.py /r2 | peer2 | 2 |
+| lidar_handler_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r2 | peer2 | 2 |
+| loop_closure_detection_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r1 | peer1 | 2 |
+| loop_closure_detection_node.py /r0 | peer0 | 2 |
+
+- MGG plan cycles: none in the window (fleet not exploring?)
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 4.1 | 9.9 |
+| fleet_change | 0.1 | 1.0 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+## 2026-09-23T19:18 - tuf, SubT, exploring (4 robots), RTX 4070, final (commit 6cc9f15)
+
+- Explore started by the harness
+- **Real-time factor 1.00** (119.5 s simulated in 119.5 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| mapping | 123 |
+| mgg | 71 |
+| peer2 | 69 |
+| sim | 69 |
+| argos | 66 |
+| peer1 | 62 |
+| server | 33 |
+| peer0 | 30 |
+| peer3 | 12 |
+| mediamtx | 0 |
+| ui | 0 |
+| **total** | **535** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| argos3 | argos | 66 |
+| swarmdeck-mola-import | mapping | 55 |
+| loop_closure_detection_node.py /r2 | peer2 | 46 |
+| swarmdeck-mola-import | mapping | 41 |
+| loop_closure_detection_node.py /r1 | peer1 | 41 |
+| python | server | 33 |
+| swarmdeck_argos_bridge.py | sim | 27 |
+| swarmdeck-mola-import | mapping | 25 |
+| mggplanner_node /robot_1/mgg | mgg | 23 |
+| mggplanner_node /robot_2/mgg | mgg | 22 |
+| mggplanner_node /robot_0/mgg | mgg | 18 |
+| python3 /r2 | peer2 | 16 |
+| python3 /r1 | peer1 | 15 |
+| loop_closure_detection_node.py /r0 | peer0 | 14 |
+| python3 /r0 | peer0 | 11 |
+
+- **MGG plan cycles: 41**, wall ms median 192 (max 314); lattice median 105, gain median 50; median 1499 vertices, 26388 edges
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 18.9 | 125.2 |
+| fleet_change | 0.1 | 2.5 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+### Plan-log-to-displacement (proxy) (MGG plan → navigation-frame displacement >= 0.10 m)
+- MGG plan cycles in window: 32
+- Cut-off plans without a displacement sample: 1
+  - Clock: host UTC wall clock (docker log timestamps vs container time.time()); typical error < 1 ms
+  - **robot_0**; replan cadence: median 12.04 s, p90 16.57 s, max 16.57 s (9 intervals); latency: median 1.39 s, p90 1.80 s, max 1.80 s (10 samples)
+  - **robot_1**; replan cadence: median 12.14 s, p90 16.71 s, max 16.71 s (8 intervals); latency: median 1.38 s, p90 2.04 s, max 2.04 s (9 samples)
+  - **robot_2**; replan cadence: median 11.01 s, p90 13.37 s, max 14.38 s (11 intervals); latency: median 1.44 s, p90 2.17 s, max 2.52 s (11 samples)
+
+### Reading: clean-up wave 1, final (`6cc9f15`)
+
+Same launch as the 12:04/12:05 baselines (`0bb7f5a`). The simulation ran at real time throughout.
+
+| | Baseline `0bb7f5a` | Final `6cc9f15` |
+|---|---:|---:|
+| Stack CPU, idle | 136 % | 138 % |
+| Stack CPU, exploring 120 s | 869 % | 535 % (-38 %) |
+| server, exploring | 79 % | 33 % |
+| sim, exploring | 79 % | 69 % |
+| mapping, exploring | 195 % | 123 % |
+| mgg, exploring | 94 % | 71 % |
+| MGG plan cycle, median (max) | 692 (1040) ms | 192 (314) ms |
+| MGG lattice build, median | 492 ms | 105 ms |
+| `robot_state` at idle | 20 msg/s, 49 KB/s | 4.1 msg/s, 9.9 KB/s |
+
+- Plan-log-to-displacement proxy, with the corrected trace (registration
+  changes rejected, each plan cut off at the next): median 1.38-1.44 s,
+  p90 1.8-2.2 s per robot; replans every 11-12 s. The time from a plan to
+  the robot moving is now about seven times the planning time, which makes it
+  the next exploration-pace target. The earlier ~1.3 s figure was measured
+  with the uncorrected trace.
+- The stack CPU while exploring varies with what the fleet is doing: peer3,
+  the Spot, stays near idle in both runs.
