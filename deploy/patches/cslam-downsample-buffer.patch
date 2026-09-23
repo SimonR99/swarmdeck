@@ -1,0 +1,13 @@
+--- a/cslam/cslam/lidar_pr/icp_utils.py
++++ b/cslam/cslam/lidar_pr/icp_utils.py
+@@ -96,7 +96,9 @@
+ def downsample(points, voxel_size):
+ 
+     mask = np.isfinite(points).all(axis=1)
+-    filtered_points = points[mask]
++    # Open3D's Vector3dVector fast buffer path requires contiguous doubles.
++    # Float32 ROS input otherwise incurs a Python/pybind conversion per point.
++    filtered_points = np.ascontiguousarray(points[mask], dtype=np.float64)
+ 
+     open3d_cloud = open3d.geometry.PointCloud()
+     open3d_cloud.points = open3d.utility.Vector3dVector(filtered_points)
