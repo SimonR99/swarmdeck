@@ -195,6 +195,23 @@ def test_parked_scans_repeat_only_at_the_scene_change_period(bridge_module):
     assert not parked_since(rest, rest, 9.0 + bridge_module.PARKED_REPUBLISH_S, 9.0)
 
 
+def test_write_text_if_changed_skips_the_write_when_nothing_changed(tmp_path, bridge_module):
+    write_text_if_changed = bridge_module.write_text_if_changed
+    path = tmp_path / "status.json"
+
+    last = write_text_if_changed(path, "a", None)
+    assert last == "a" and path.read_text() == "a"
+    mtime = path.stat().st_mtime_ns
+
+    # Unchanged text: no replace, the file is untouched.
+    last = write_text_if_changed(path, "a", last)
+    assert last == "a" and path.stat().st_mtime_ns == mtime
+
+    # Changed text: written and returned as the new cache.
+    last = write_text_if_changed(path, "b", last)
+    assert last == "b" and path.read_text() == "b"
+
+
 def _authority(mission_id, run_id, epoch, revision):
     return {
         "robot_id": "robot_0",

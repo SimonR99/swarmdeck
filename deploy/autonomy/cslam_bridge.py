@@ -128,6 +128,22 @@ def create_steady_timer(node, period_s, callback):
     return clock, node.create_timer(period_s, callback, clock=clock)
 
 
+def write_text_if_changed(path, text, last):
+    """Atomically write ``text`` to ``path`` only when it differs from ``last``.
+
+    Returns the text now on disk, to pass as ``last`` on the next call. A
+    peer's status.json was rewritten every tick whether or not anything in it
+    had changed; most of a parked peer's ticks change nothing.
+    """
+
+    if text == last:
+        return last
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(text)
+    os.replace(temporary, path)
+    return text
+
+
 def sensor_input_is_fresh(last_sensor_at, now=None):
     """Keep authority liveness tied to real sensor delivery, not ROS time."""
 
@@ -496,6 +512,8 @@ class Bridge(Node):
         self.authority_gap_ticks = 0
         self.authority_gap_reason = ""
         self._product_memo = {}
+        # status.json is only rewritten when its content actually changes.
+        self._last_status_json = None
 
     def _color_image(self, message):
         accepted = self._remember_color_frame(self.color_images, message, "color")
@@ -1366,9 +1384,9 @@ class Bridge(Node):
             "sensor_domain_id": self.sensor_domain_id,
             "sensor_error": self.sensor_error,
         }
-        temporary = self.status_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps(status))
-        os.replace(temporary, self.status_file)
+        self._last_status_json = write_text_if_changed(
+            self.status_file, json.dumps(status), self._last_status_json
+        )
 
     def replicate(self):
         while not self.closed.wait(2.0):
