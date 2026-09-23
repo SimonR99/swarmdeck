@@ -293,6 +293,73 @@ def pyspy(target_container: str, pattern: str, seconds: int) -> list[tuple[float
         )
 
 
+# ------------------------------------------------------------ exploration
+
+
+EXPLORE_PROBE = r"""
+import asyncio, json, websockets
+async def main():
+    async with websockets.connect("ws://localhost:8080/ws") as ws:
+        await ws.send(json.dumps({"type": "start_explore"}))
+        await asyncio.sleep(1.0)
+asyncio.run(main())
+"""
+
+
+def start_explore() -> None:
+    """Fleet-wide Explore, as the dashboard's Fleet toggle sends it."""
+    sh(
+        ["docker", "exec", "-i", container("server"), "python", "-"],
+        input=EXPLORE_PROBE,
+        timeout=30,
+    )
+
+
+# ---------------------------------------------------------------- perf
+
+PERF_IMAGE = "swarmdeck-perf:6.8.0-48"
+
+PERF_SCRIPT = r"""
+pid=$(ps -eo pid,pcpu,comm --sort=-pcpu | awk '/mggplanner_node/{print $1; exit}')
+[ -z "$pid" ] && { echo "no mggplanner_node"; exit 0; }
+echo "profiling mggplanner_node pid $pid"
+perf record -q -F 199 -g -p $pid -o /tmp/perf.data -- sleep $SECONDS >/dev/null 2>&1
+echo "--- self"
+perf report -q -i /tmp/perf.data --stdio --no-children --sort symbol   --percent-limit 1.5 -g none 2>/dev/null | head -30
+echo "--- inclusive"
+perf report -q -i /tmp/perf.data --stdio --children --sort symbol   --percent-limit 4 -g none 2>/dev/null | head -40
+"""
+
+
+def perf_mgg(seconds: int) -> str:
+    """perf profile of the busiest MGG planner, from a throwaway sidecar.
+
+    Ubuntu's perf_event_paranoid level 4 refuses CAP_PERFMON alone, so the
+    sidecar gets SYS_ADMIN and no seccomp filter; it only lives for the
+    profile and shares nothing with the stack but the PID namespace.
+    """
+    result = sh(
+        [
+            "docker",
+            "run",
+            "--rm",
+            f"--pid=container:{container('mgg')}",
+            "--cap-add",
+            "SYS_ADMIN",
+            "--cap-add",
+            "SYS_PTRACE",
+            "--security-opt",
+            "seccomp=unconfined",
+            PERF_IMAGE,
+            "sh",
+            "-c",
+            PERF_SCRIPT.replace("$SECONDS", str(seconds)),
+        ],
+        timeout=seconds + 300,
+    )
+    return (result.stdout + result.stderr).strip()
+
+
 # ---------------------------------------------------------------- report
 
 
@@ -306,6 +373,9 @@ def report(args) -> str:
     containers = running_containers()
     if not containers:
         return "No swarmdeck containers are running."
+    if args.start_explore:
+        start_explore()
+        lines.append("- Explore started by the harness")
 
     rtf = real_time_factor(args.window)
     if "rtf" in rtf:
@@ -347,6 +417,10 @@ def report(args) -> str:
     for kind, (count, size) in sorted(traffic.items(), key=lambda kv: -kv[1][1]):
         lines.append(f"| {kind} | {count / window:.1f} | {size / window / 1024:.1f} |")
 
+    if args.perf_mgg:
+        lines += ["", "### perf: busiest MGG planner", "", "```"]
+        lines += [perf_mgg(args.perf_mgg), "```"]
+
     if args.profiles:
         lines += ["", "### py-spy (inclusive share of active samples)"]
         for name, target, pattern in PYTHON_TARGETS:
@@ -366,6 +440,16 @@ def main() -> int:
     parser.add_argument("--profiles", action="store_true")
     parser.add_argument("--profile-seconds", type=int, default=20)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument(
+        "--start-explore", action="store_true", help="send fleet-wide Explore first"
+    )
+    parser.add_argument(
+        "--perf-mgg",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help=f"perf-profile the busiest MGG planner (needs the {PERF_IMAGE} image)",
+    )
     parser.add_argument("--label", default="")
     parser.add_argument("--append", type=Path, help="append the report to this file")
     args = parser.parse_args()
