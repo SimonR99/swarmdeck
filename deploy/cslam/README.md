@@ -38,6 +38,12 @@ capture-time TF lookup attempts (including retries), so the controller can measu
 the miss rate. The 1 Hz snapshot cadence, write-on-change status behavior,
 authority thread and epoch fence are unchanged.
 
+At 10 Hz lidar, removing 30 polling callbacks/s moves about 10 useful normalization
+callbacks/s into the cloud callback; the net saving is about 20 idle callbacks/s,
+not 30. Parked clouds are still checked at 10 Hz. This scheduling reduction alone
+is not evidence of a material CPU reduction or of meeting the parked <10% target;
+measure it alongside TF misses and the upstream solver/scoring savings.
+
 RGB-D caches remain bounded (8 records, 64 MiB per stream, 16 MiB per message)
 and decode-free. Frames up to 250 ms before a scan can be valid color sources;
 opening a cache only after forwarding that scan would lose those observations.
