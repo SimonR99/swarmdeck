@@ -385,11 +385,11 @@ def generate_argos_xml(
             isinstance(parked_rate, bool)
             or not isinstance(parked_rate, (int, float))
             or not math.isfinite(parked_rate)
-            or not 0 < parked_rate <= lidar.rate
+            or not 1 <= parked_rate <= lidar.rate
             or not math.isclose(_divider(parked_rate) * parked_rate, TICKS_PER_SECOND)
         ):
             raise ValueError(
-                "simulation.parked_lidar_rate must be positive, no faster than "
+                "simulation.parked_lidar_rate must be at least 1 Hz, no faster than "
                 "fleet.lidar.rate, and divide the 100 Hz physics tick rate exactly"
             )
         parked_divider = _divider(parked_rate)

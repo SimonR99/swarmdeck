@@ -179,7 +179,7 @@ def test_parked_lidar_is_opt_in_and_preserves_moving_scans(tmp_path, cfg):
 
 
 @pytest.mark.parametrize(
-    "rate", [0, -1, 11, 3, float("nan"), float("inf"), True, "bad"]
+    "rate", [0, 0.25, 0.5, -1, 11, 3, float("nan"), float("inf"), True, "bad"]
 )
 def test_parked_lidar_rejects_invalid_or_unrepresentable_rates(tmp_path, cfg, rate):
     config = yaml.safe_load(yaml.safe_dump(cfg))

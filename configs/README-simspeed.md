@@ -21,7 +21,7 @@ a command. Small physical jitter conservatively keeps the full rate. All four
 faces share a phase and observe the same anchor; a scan never combines faces
 from different ticks. Cameras are not throttled.
 
-`parked_lidar_rate` must be a positive number no greater than `fleet.lidar.rate`
+`parked_lidar_rate` must be at least 1 Hz (the bridge's scan-age limit) and no greater than `fleet.lidar.rate`
 and must divide the 100 Hz physics tick rate exactly (2 and 5 are supported;
 3 is not). Omitting it disables the optimization. This is an opt-in reduction
 in **parked** temporal coverage: moving objects near a parked robot are observed
