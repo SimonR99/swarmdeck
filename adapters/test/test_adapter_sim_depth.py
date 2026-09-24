@@ -273,7 +273,6 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     sim_module, monkeypatch
 ):
     """Perception stays local and never posts a JPEG preview."""
-    import threading
     from unittest.mock import MagicMock
 
     import numpy as np
@@ -282,7 +281,6 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     bridge.node = MagicMock()
     bridge.id = "robot_0"
     bridge.http_url = "http://backend:8080"
-    bridge._upload_lock = threading.Lock()
     bridge._camera_dirty = True
     bridge._detection_enabled = True
     bridge._detection_period_s = 0.2
@@ -325,13 +323,11 @@ def test_camera_processing_still_detects_without_a_preview_upload(
 
 
 def _camera_bridge(sim_module):
-    import threading
     from unittest.mock import MagicMock
 
     bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
     bridge.node = MagicMock()
     bridge.id = "robot_0"
-    bridge._upload_lock = threading.Lock()
     bridge._camera_encoding_warned = False
     bridge.frames = []
     bridge._detect_bgr = lambda image, **_: bridge.frames.append(image)

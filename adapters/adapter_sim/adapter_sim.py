@@ -12,24 +12,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import deque
 import importlib
 import json
 import math
 import os
 import sys
 import threading
-from contextlib import nullcontext
 import time
 import urllib.parse
 import urllib.request
-import zlib
 from pathlib import Path
 
 import rclpy
 import websockets
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Twist
 from nav2_msgs.action import FollowPath
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as NavPath
@@ -37,9 +34,6 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import (
-    QoSDurabilityPolicy,
-    QoSProfile,
-    QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import CameraInfo, Image
@@ -82,7 +76,6 @@ from sim_cslam import (
 sys.path.insert(0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"))
 from spawn_fleet import (  # noqa: E402
     DEFAULT_ROBOT_PROFILE,
-    lidar_spec,
     robot_spec,
     robot_types,
 )
@@ -98,14 +91,6 @@ DEPTH_MAX_M = 8.0
 # this is not a synchronisation tolerance — it is what stops a frozen depth
 # stream projecting a live detection onto stale geometry.
 DEPTH_MAX_AGE_S = 0.35
-
-# Voxel edge for downsampling the 3D map before upload, metres. Coarser than the
-# 5 cm occupancy grid on purpose: this feeds a view whose points are one pixel.
-CLOUD_VOXEL = 0.10
-
-# Transport quantisation. 1 cm keeps a cloud well inside int16 and is far finer
-# than the voxel above, so it costs nothing in fidelity.
-CLOUD_SCALE = 0.01
 
 
 def resolve_sim_robot_count(
@@ -224,8 +209,6 @@ NAV_RECOVER_TIMEOUT_S = 125.0
 # service cannot consume the whole shared deadline.
 LIFECYCLE_SERVICE_TIMEOUT_S = 2.0
 
-SERVICE_TIMEOUT_S = 8.0
-
 
 def _srv_type(module: str, name: str):
     try:
@@ -257,7 +240,6 @@ class RobotBridge(
         http_url: str,
         platform: str | None = None,
         *,
-        instantaneous_planar_scan: bool = False,
         exploration_config: dict | None = None,
         planning_config: dict | None = None,
     ) -> None:
@@ -286,21 +268,14 @@ class RobotBridge(
         )
         self.robot_type = self.cfg["robot_type"]
         self.footprint_radius = self.cfg["footprint_radius"]
-        self.footprint = self.cfg["footprint"]
         # Where this platform's RGBD camera is bolted, from the same table the
         # SDF was rendered from. Turning a duck detection into a map marker is
         # the only thing that reads it. See camera_point_to_map().
         self.camera_x = spec.camera_x
         self.camera_z = spec.camera_z
-        self.lidar_x = spec.lidar_x
-        self.lidar_z = spec.lidar_z
-        self._scan_cloud_at = 0.0
         self.battery = None
 
         self._odom_to_base: dict[str, float] | None = None
-        self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(
-            maxlen=128
-        )
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -349,11 +324,6 @@ class RobotBridge(
         # Nav2 bringup recovery — see NAV_READY_GRACE_S.
         self._nav_down_since = 0.0
         self._nav_recovered_at = 0.0
-        # Held for the whole of reset(), and tried without blocking by every
-        # upload. That ordering is what stops a grid captured before the reset
-        # reaching the backend after it: an upload already running finishes
-        # first, and one that starts during the reset is skipped.
-        self._upload_lock = threading.Lock()
         self._service_clients: dict = {}
         self._reset_report: dict | None = None
 
@@ -366,11 +336,6 @@ class RobotBridge(
         # copy in the merged map tracked how far they reached.
         node.create_subscription(TFMessage, f"/{robot_id}/tf", self._on_tf, 200)
 
-        latched = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
         # The independent media process subscribes to RGB for dashboard video.
         # Only perception needs these three streams in the adapter itself.
@@ -1050,38 +1015,6 @@ class RobotBridge(
 
     # -- reset ---------------------------------------------------------
 
-    def _call(
-        self, name: str, srv_type, request, timeout_s: float = SERVICE_TIMEOUT_S
-    ) -> bool:
-        """Call a ROS service from a worker thread and say whether it answered.
-
-        Polls the future instead of using spin_until_future_complete: rclpy.spin()
-        already owns this node on the ROS thread, and adding a second executor
-        over the same node is how a service call becomes a permanent hang. The
-        spin thread completes the future; this one only watches for it.
-        """
-        client = self._service_clients.get(name)
-        if client is None:
-            client = self.node.create_client(srv_type, name)
-            self._service_clients[name] = client
-        if not client.wait_for_service(timeout_sec=timeout_s):
-            self.node.get_logger().warn(f"[{self.id}] service unavailable: {name}")
-            return False
-
-        future = client.call_async(request)
-        deadline = time.monotonic() + timeout_s
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        if not future.done():
-            future.cancel()
-            self.node.get_logger().warn(f"[{self.id}] service timed out: {name}")
-            return False
-        error = future.exception()
-        if error is not None:
-            self.node.get_logger().warn(f"[{self.id}] service failed: {name}: {error}")
-            return False
-        return True
-
     def _lifecycle_service_response(
         self, name: str, srv_type, request, not_after: float
     ):
@@ -1198,16 +1131,6 @@ class RobotBridge(
         """
         if not self._camera_dirty or self._camera_frame is None:
             return
-        if not self._upload_lock.acquire(blocking=False):
-            return  # a reset is running
-        try:
-            self._process_camera_locked()
-        finally:
-            self._upload_lock.release()
-
-    def _process_camera_locked(self) -> None:
-        if not self._camera_dirty or self._camera_frame is None:
-            return
         self._camera_dirty = False
         msg = self._camera_frame
 
@@ -1318,14 +1241,12 @@ def main() -> None:
         print(f"[adapter_sim] assuming every robot is a {DEFAULT_ROBOT_PROFILE}")
         platforms = [DEFAULT_ROBOT_PROFILE] * robot_count
 
-    instantaneous_planar_scan = bool(fleet_cfg) and lidar_spec(fleet_cfg).rings == 1
     bridges = [
         RobotBridge(
             node,
             f"{args.prefix}{i}",
             http_url,
             platforms[i],
-            instantaneous_planar_scan=instantaneous_planar_scan,
             exploration_config={
                 "enabled": os.environ.get("SWARMDECK_MGG_ENABLED", "0").lower()
                 in ("1", "true", "yes"),

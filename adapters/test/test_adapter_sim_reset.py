@@ -30,7 +30,6 @@ def make_bridge(sim):
     bridge._cancel_events = {}
     bridge._nav_quiet_unknown = False
     bridge._last_drive_at = 12.0
-    bridge._upload_lock = threading.Lock()
     bridge._service_clients = {}
     bridge._reset_report = None
     bridge.http_url = "http://server:8080"
