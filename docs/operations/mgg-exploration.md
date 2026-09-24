@@ -276,9 +276,46 @@ voxels and the same platform-specific collision and terrain limits.
 
 PCI's forward bootstrap is disabled (`bootstrap_distance=0`);
 exploration waits for actual mapped geometry. Each planner maintains its own
-graph. Graph exchange is deliberately not connected across local
-map frames: enable it only with verified inter-robot transforms, not assumed
-identity transforms.
+graph and merges the others' roadmaps into it (below).
+
+### Roadmap sharing
+
+Every planner publishes its global roadmap on the shared `/mgg/graphs` topic
+and merges the other planners' roadmaps from it, so a robot does not re-explore
+what another already covered. A roadmap is merged only with a transform from
+the sender's planning frame (`robot_N/odom`) into the receiver's, never an
+assumed identity: `deploy/mgg/robot_poses.py` publishes those transforms on
+`/robot_N/mgg/neighbour_transforms` (MGG `neighbour_pose_source: topic`), and
+MGG drops a roadmap whose transform is missing or older than
+`neighbour_transform_ttl_sec` (5 s). The source is selected with
+`--robot-poses` in `scripts/sim-up` (`ROBOT_POSES=` for `make up-sim`,
+`SWARMDECK_ROBOT_POSES` in the `mgg` service):
+
+- `cslam` (default, and the only source on hardware): C-SLAM's inter-robot
+  estimate, from the peers' map authorities. Two robots in the same map
+  component give `inv(T_component_planning of ours) @ T_component_planning of
+  theirs`. **Consequence:** the simulation keeps inter-robot closures off by
+  default (`SWARMDECK_INTER_ROBOT_CLOSURES=false`), so with `cslam` the
+  planners share nothing until C-SLAM links two robots into one component.
+- `ground_truth` (simulation only): the ARGoS bridge's `/robot_N/ground_truth`
+  paired with `/robot_N/odom` of the same tick places every odometry frame in
+  the world, so the planners share from the start.
+
+`robot_poses.py` logs once per neighbour when it has no transform
+(`no transform to robot_1 (not in the same C-SLAM map component yet)`) and once
+when it gains one (`sharing roadmaps with robot_1`); MGG logs
+`Swarm Graph Merge: Connected with robot N` and `roadmap update from robot N`.
+
+Roadmaps are exchanged at ground height: the sender lowers its vertices by its
+driving height and the receiver raises them by its own, so a Spot's roadmap
+lands at a Bunker's driving height. The receiver does not take over an edge
+that exceeds its own step and grade limits (a Spot's 0.30 m step is not a
+Bunker's). Merged vertices follow the transform when it moves them by more than
+5 cm. A neighbour whose roadmap no longer holds a vertex it sent, or holds it
+elsewhere in its own frame, restarted (a map reset restarts its planner): what
+was merged from its old run is cut out and its new roadmap merged afresh.
+MGG's communication range (15 m between the robots' latest positions) still
+applies.
 
 ## ROS 2 hardware
 
@@ -408,6 +445,17 @@ Continuation retains the exact goal in the stable planning frame. Transforming
 the UI goal happens before planning; the final path is compared in that same
 frame. Route tokens, mission/component authority, and current map checks fence
 continuations, and cancellation invalidates outstanding work.
+
+A Navigate goal where this robot's map has no ground, but another robot's
+merged roadmap passes within 1.5 m in xy, is attached to that roadmap: the
+other robot drove there, which is the evidence of traversable ground. The goal
+keeps its x and y (the route still ends on it) and takes that vertex's height;
+the link is refused only through space this robot's map knows to be occupied.
+The route then follows the other robot's edges, which the shortcut leaves in
+place, and the local controller follows it while the robot maps its own way. A
+segment the controller cannot pass ends the navigation with the controller's
+reason, like any other obstruction (after the usual
+`controller_replan_max_attempts` replans for a no-progress failure).
 
 Graph poses use driving height, while UI goals use navigation-base height.
 An unsupported tentative goal inherits the preceding graph pose's driving

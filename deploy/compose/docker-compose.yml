@@ -400,6 +400,9 @@ services:
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
       SWARMDECK_MAPS_ROOT: /maps
+      # Inter-robot transforms for roadmap sharing: cslam or ground_truth
+      # (`sim-up --robot-poses`, deploy/mgg/robot_poses.py).
+      SWARMDECK_ROBOT_POSES: "${SWARMDECK_ROBOT_POSES:-cslam}"
     volumes:
       - ../../configs:/app/configs:ro
       - ../mgg:/app/deploy/mgg:ro
