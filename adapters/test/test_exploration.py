@@ -1377,3 +1377,34 @@ def test_controller_failure_wakes_for_the_recovery_backoff(monkeypatch):
     explorer._on_wake()
     explorer.replan_client.call_async.assert_called_once()
     assert explorer.controller_replan_attempts == 1
+
+
+def test_path_validation_time_is_its_own_stage_not_planner_round_trip(monkeypatch):
+    import adapters.exploration as exploration
+
+    bridge, explorer = rig()
+    now = [20.0]
+    explorer.timing = PlanTiming(clock=lambda: now[0])
+    pose = {"x": 0.0, "y": 0.0}
+    bridge._route_progress_pose = Mock(side_effect=lambda frame: dict(pose))
+    info = bridge.node.get_logger.return_value.info
+    validate = exploration.planner_path
+
+    def slow_planner_path(*args, **kwargs):
+        now[0] += 0.3  # Validation of a long path takes 0.3 s.
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(exploration, "planner_path", slow_planner_path)
+    explorer.start()  # The start request is the replan request for timing.
+    now[0] = 20.2
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    pose["x"] = 0.2
+    explorer.tick()
+
+    lines = [c.args[0] for c in info.call_args_list if "timing" in c.args[0]]
+    assert len(lines) == 1
+    assert "at t=20.200" in lines[0]
+    assert "replan->path 0.200 s" in lines[0]
+    assert "->validated 0.300 s" in lines[0]
+    assert "->sent 0.300 s" in lines[0]

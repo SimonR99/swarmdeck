@@ -163,7 +163,7 @@ class PlanTiming:
     """Monotonic stage times of one MGG path, summarised in one log line.
 
     The stages are the replan request that asked for the path, its arrival,
-    the peer reservation grant, its submission to the controller, the
+    the end of its validation, the peer reservation grant, its submission to the controller, the
     controller's acceptance (when the bridge reports it) and the first
     ``MOTION_M`` of displacement from where the robot stood at submission.
     Displacement is sampled on the exploration tick, so it is a bound, not an
@@ -198,10 +198,15 @@ class PlanTiming:
     def controller_finished(self):
         self.terminal_at = self.clock()
 
-    def received(self, revision_ns, age_s):
-        """Start a new path; return the unlogged summary of the previous one."""
+    def received(self, revision_ns, age_s, received_at=None):
+        """Start a new path; return the unlogged summary of the previous one.
+
+        ``received_at`` is when the path arrived, taken before validation, so
+        validation time shows as the ``validated`` stage and never as planner
+        round trip.
+        """
         previous = self.finish("superseded")
-        now = self.clock()
+        now = self.clock() if received_at is None else received_at
         self.stages = {"received": now}
         if self.requested_at is not None:
             self.stages["requested"] = self.requested_at
@@ -247,7 +252,7 @@ class PlanTiming:
             parts.append(f"terminal->replan {self.request_after_terminal:.3f} s")
         if "requested" in stages:
             parts.append(f"replan->path {received - stages['requested']:.3f} s")
-        for stage in ("granted", "sent", "accepted", "moved"):
+        for stage in ("validated", "granted", "sent", "accepted", "moved"):
             if stage in stages:
                 parts.append(f"->{stage} {stages[stage] - received:.3f} s")
         parts.append(outcome)
@@ -919,6 +924,12 @@ class MggExploration:
             self.stop(notify_planner=False, status="stopped")
             self.awaiting_terminal = True
             return
+        received_at = self.timing.clock()
+        try:
+            now_ns = int(self.bridge.node.get_clock().now().nanoseconds)
+            age_s = (now_ns - stamp) / 1e9
+        except Exception:
+            age_s = None
         try:
             plan = planner_path(
                 path,
@@ -931,12 +942,8 @@ class MggExploration:
             self.stop()
             return
         self.last_path_revision_ns = plan.revision_ns
-        try:
-            now_ns = int(self.bridge.node.get_clock().now().nanoseconds)
-            age_s = (now_ns - plan.revision_ns) / 1e9
-        except Exception:
-            age_s = None
-        self._log_timing(self.timing.received(plan.revision_ns, age_s))
+        self._log_timing(self.timing.received(plan.revision_ns, age_s, received_at))
+        self.timing.mark("validated")
         generation = self.generation
         # A newer planner route supersedes any cancelled path retained only as
         # a peer-reservation token. Its same-session generation must not make

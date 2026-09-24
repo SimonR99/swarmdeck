@@ -95,8 +95,9 @@ arrives after the grant still revokes it and stops the path.
 The adapter logs one `exploration timing:` line per path at info level, when
 the robot has moved 0.10 m from where it stood when the path was submitted, or
 when the path ends before that (superseded, rejected, stopped, controller
-terminal). Times are monotonic seconds from the path's arrival: `->granted`
-(peer reservation), `->sent` (submitted to the controller), `->accepted` (the
+terminal). Times are monotonic seconds from the path's arrival, taken before
+it is validated: `->validated` (path checks done), `->granted` (peer
+reservation), `->sent` (submitted to the controller), `->accepted` (the
 controller accepted it; the simulation bridge reports this) and `->moved`
 (sampled on the 0.2 s exploration tick, so an upper bound). `age` is the path's
 age on the node clock at arrival, `replan->path` the planner round trip and
