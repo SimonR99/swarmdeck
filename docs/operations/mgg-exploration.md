@@ -317,6 +317,12 @@ was merged from its old run is cut out and its new roadmap merged afresh.
 MGG's communication range (15 m between the robots' latest positions) still
 applies.
 
+On hardware, `deploy/mgg/hardware.launch.py` takes the planner's robot id from
+the robot's position in `SWARMDECK_PEER_NAMES` (the merge drops a roadmap with
+its own id) and accepts only `cslam`. Each robot's `/mgg/graphs` and the peers'
+`map_authority` stay on that robot's own DDS domain until the peer bridge
+relays them, so hardware robots do not share roadmaps yet.
+
 ## ROS 2 hardware
 
 Hardware must run the MGG image built from the pinned `swarmdeck` branch. A
