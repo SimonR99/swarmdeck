@@ -1,14 +1,23 @@
 """Run one MGG planner/PCI against a continuous robot navigation frame."""
 
 from pathlib import Path
+import json
 import os
 import re
 import uuid
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+# Every planner publishes its global roadmap to one shared topic and reads the
+# others' from it, dropping its own (upstream's mgg_argos swarm launch).
+ROADMAP_TOPIC = "/mgg/graphs"
+ROADMAP_REMAPS = [
+    ("neighbour_graph_out", ROADMAP_TOPIC),
+    ("neighbour_graph_in", ROADMAP_TOPIC),
+]
 
 
 def map_backend_parameters(robot):
@@ -41,7 +50,12 @@ def robot_nodes(
     robot_index=1,
     size=None,
     planner_overrides=None,
+    peers=(),
+    robot_poses="cslam",
 ):
+    """One robot's MGG planner and PCI. With `peers`, the planner shares its
+    roadmap with theirs on ROADMAP_TOPIC, placed by robot_poses.py from the
+    `robot_poses` source (robot_poses.SOURCES)."""
     template = os.environ.get("SWARMDECK_PLANNING_FRAME_TEMPLATE")
     if template is not None:
         if template.count("{robot}") != 1:
@@ -66,18 +80,21 @@ def robot_nodes(
         # unknown (known occupied volume still rejects), as the qualified
         # simulation policy did before the ros2 port.
         "allow_unknown_lattice_body": sim_time,
+        # Other robots' roadmaps are placed with live inter-robot transforms
+        # from robot_poses.py, never the parameter file's static offsets.
+        "neighbour_pose_source": "topic",
     }
     overrides.update(planner_overrides or {})
     overrides.update(map_backend_parameters(robot))
     if size:
         overrides["RobotParams.size"] = size
-    return [
+    nodes = [
         Node(
             package="mgg_ros",
             executable="mggplanner_node",
             namespace=ns,
             parameters=[params, common, overrides],
-            remappings=tf_remaps + [("odometry", odom)],
+            remappings=tf_remaps + [("odometry", odom)] + ROADMAP_REMAPS,
         ),
         Node(
             package="mgg_pci",
@@ -94,6 +111,24 @@ def robot_nodes(
             remappings=tf_remaps + [("odometry", odom)],
         ),
     ]
+    if peers:
+        nodes.append(
+            ExecuteProcess(
+                cmd=[
+                    "python3",
+                    str(Path(__file__).with_name("robot_poses.py")),
+                    "--robot",
+                    robot,
+                    "--peers",
+                    json.dumps(list(peers)),
+                    "--robot-poses",
+                    robot_poses,
+                ],
+                name=f"{robot}_robot_poses",
+                output="screen",
+            )
+        )
+    return nodes
 
 
 def setup(context):

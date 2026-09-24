@@ -1,6 +1,7 @@
 """Run one onboard MGG instance using the robot adapter's configuration."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -28,6 +29,18 @@ def hardware_settings(config):
     }
 
 
+def hardware_peers(robot):
+    """The fleet's other robots from SWARMDECK_PEER_NAMES (a JSON list), whose
+    roadmaps are placed with C-SLAM's estimates: a robot has no ground truth,
+    so `cslam` is the only source here."""
+    if (os.environ.get("SWARMDECK_ROBOT_POSES") or "cslam") != "cslam":
+        raise ValueError("hardware roadmap sharing supports only cslam robot poses")
+    names = json.loads(os.environ.get("SWARMDECK_PEER_NAMES") or "[]")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError("SWARMDECK_PEER_NAMES must be a JSON list of robot names")
+    return [name for name in names if name != robot]
+
+
 def generate_launch_description():
     here = Path(__file__).parent
     spec = importlib.util.spec_from_file_location("mgg_robot", here / "robot.launch.py")
@@ -37,9 +50,10 @@ def generate_launch_description():
         config = yaml.safe_load(stream)
     planner = config["exploration"]["planner"]
     topics = config["topics"]
+    robot = os.environ["SWARMDECK_ROBOT_ID"]
     return LaunchDescription(
         module.robot_nodes(
-            os.environ["SWARMDECK_ROBOT_ID"],
+            robot,
             config["navigation_frame"],
             topics["odom"],
             "/tf",
@@ -47,5 +61,7 @@ def generate_launch_description():
             os.environ.get("MGG_PARAMS_FILE", str(here / "config/hardware.yaml")),
             False,
             planner_overrides=hardware_settings(config),
+            peers=hardware_peers(robot),
+            robot_poses="cslam",
         )
     )
