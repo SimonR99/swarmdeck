@@ -1198,3 +1198,21 @@ def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
 
     assert bridge.wait_goal_quiet(2, 0.0) is False
     assert bridge.wait_goal_quiet(3, 0.0) is True
+
+
+def test_hardware_state_probes_link_quality_towards_the_backend(mod, monkeypatch):
+    import adapters.runtime as runtime
+
+    calls = []
+    monkeypatch.setattr(
+        runtime,
+        "read_link_quality",
+        lambda iface, **target: calls.append((iface, target)) or {"quality": 1.0},
+    )
+    bridge = _bridge(mod, {"network_iface": "wlan0"})
+    bridge.http_url = "http://backend:8080"
+    bridge.battery = None
+    bridge.planned_path = []
+
+    assert bridge.state()["network"] == {"quality": 1.0}
+    assert calls == [("wlan0", {"host": "backend", "port": 8080})]

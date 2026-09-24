@@ -39,7 +39,6 @@ import sys
 import signal
 import threading
 import time
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -72,7 +71,6 @@ from adapters.perception.depth_projection import (
     transform_point,
     transform_points,
 )
-from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
     AdapterHelloMixin,
@@ -284,22 +282,6 @@ class HardwareBridge(
         )
 
     # ------------------------------------------------------------- capabilities
-
-    def _network_quality(self, iface: str):
-        # Keep the legacy module-level seam available to offline callers/tests.
-        host = getattr(self, "_server_host", None)
-        port = getattr(self, "_server_port", None)
-        if not host and getattr(self, "http_url", None):
-            try:
-                parsed = urllib.parse.urlparse(self.http_url)
-                host = parsed.hostname
-                port = parsed.port
-            except Exception:
-                pass
-        try:
-            return read_link_quality(iface, host=host, port=port)
-        except TypeError:
-            return read_link_quality(iface)
 
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
