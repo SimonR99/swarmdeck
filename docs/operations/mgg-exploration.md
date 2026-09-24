@@ -17,9 +17,9 @@ is called merely by launching the dashboard or containers.
 
 MGG is built from the `ros2` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`bb454037859cbb21b9bebaa34b6ba3c530b65c31` (which indexes MOLA grid cells with a
-flat hash table instead of binary searches; see
-[performance](performance.md)), selected by `MGG_REV` in
+`d3e6ef82152a28f785ce2a1c85334eab9ab2f301` (MOLA grid cells in a flat hash table,
+see [performance](performance.md), and roadmap sharing between planners with live
+transforms, see "Roadmap sharing" below), selected by `MGG_REV` in
 `deploy/docker/Dockerfile.mgg`, `Dockerfile.sim` and `Dockerfile.robot-ros2`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
