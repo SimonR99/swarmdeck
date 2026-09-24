@@ -78,8 +78,21 @@ controller's internally constructed local costmap inherits its parameters.
 Lifecycle ownership, per-robot node names, action endpoints and TF remaps remain
 unchanged. Simulation routes velocity through `cmd_vel_nav` → smoother →
 `cmd_vel_adapter` → adapter → `cmd_vel`, so the adapter gates driver motion.
-The bounded simulation startup process still exits after activation. Hardware callers keep
+The bounded simulation startup process (`navigation_startup`) stays up to serve
+`~/recover`. A failed initial bringup is retried 5 s later (`retry_interval_s`),
+up to 3 attempts of 60 s each (`startup_attempts`, `startup_timeout_s`). It then
+logs one terminal ERROR, `Navigation startup exhausted ...; not active:
+<node>=<state>, ...`, and makes no further automatic attempts; `~/recover` still
+retries on request. Nothing reads that line besides the sim container log and
+`/rosout`. Hardware callers keep
 `use_composition:=false` by default and retain their separate processes.
+
+Each composed node is requested by its own `LoadComposableNodes` action. Fast
+DDS can drop a `load_node` reply while a freshly started container has not yet
+matched the launch client ("failed to send response ... client will not receive
+response"); the node is loaded anyway, but launch_ros waits for that reply with
+no timeout before sending the next request of the same action. Batched, one lost
+reply left the robot without a velocity smoother and so without Nav2.
 
 With four robots, static batching removes 15 processes/participants and Nav2
 composition removes another four processes/participants. Actual discovery

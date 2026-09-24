@@ -11,12 +11,15 @@ import pytest
 
 pytest.importorskip("launch_ros", reason="Nav2 launch tests require the ROS image")
 import rclpy
-from composition_interfaces.srv import ListNodes
+from composition_interfaces.srv import ListNodes, LoadNode
 from geometry_msgs.msg import TransformStamped
 from lifecycle_msgs.srv import GetState
 from launch.actions import DeclareLaunchArgument
 from rcl_interfaces.srv import GetParameters
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.task import Future
 from tf2_msgs.msg import TFMessage
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -36,6 +39,127 @@ def test_nav_composition_is_opt_in_for_hardware():
     assert arguments["use_composition"].default_value[0].text == "false"
     session = ROOT / "swarmdeck_ros/src/swarmdeck_bringup/launch/session.launch.py"
     assert '"use_composition": "true"' in session.read_text()
+
+
+# Keeps only the load requests of nav.launch.py, aimed at a fake container.
+NAV_LOADS_ONLY = f"""
+import importlib.util
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch_ros.actions import LoadComposableNodes
+
+spec = importlib.util.spec_from_file_location("nav_launch", {str(NAV)!r})
+nav = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(nav)
+
+
+def generate_launch_description():
+    kinds = (DeclareLaunchArgument, LoadComposableNodes)
+    entities = nav.generate_launch_description().entities
+    return LaunchDescription([e for e in entities if isinstance(e, kinds)])
+"""
+
+# launch_ros's own batching: one action loading two nodes in sequence.
+BATCHED_LOADS = """
+from launch import LaunchDescription
+from launch_ros.actions import LoadComposableNodes
+from launch_ros.descriptions import ComposableNode
+
+
+def generate_launch_description():
+    nodes = [
+        ComposableNode(package="fake", plugin="fake::Node", name=name)
+        for name in ("controller_server", "velocity_smoother")
+    ]
+    return LaunchDescription([
+        LoadComposableNodes(
+            target_container="/lost_reply/nav_container",
+            composable_node_descriptions=nodes,
+        )
+    ])
+"""
+
+
+@pytest.mark.parametrize(
+    "loads, expected",
+    [(BATCHED_LOADS, 1), (NAV_LOADS_ONLY, 2)],
+    ids=["launch_ros_batch_blocks", "nav_launch_loads_each"],
+)
+def test_lost_load_reply_does_not_block_other_nav_nodes(tmp_path, loads, expected):
+    """Fast DDS can drop a load_node reply during discovery (tuf, robot_2).
+
+    launch_ros waits for each reply without a timeout before sending the next
+    request of the same action, so a batched container never loaded the
+    velocity smoother. nav.launch.py must request every node independently.
+    """
+    rclpy.init()
+    node = None
+    process = None
+    launch_file = tmp_path / "loads.launch.py"
+    launch_file.write_text(loads)
+    log = (tmp_path / "loads.log").open("w+")
+    requested = []
+    lost = Future()
+
+    async def load_node(request, response):
+        requested.append(request.node_name)
+        if len(requested) == 1:
+            # The container loaded the node, but the reply never arrives.
+            await lost
+        response.success = True
+        response.full_node_name = f"/lost_reply/{request.node_name}"
+        return response
+
+    try:
+        node = rclpy.create_node("nav_container", namespace="lost_reply")
+        # Reentrant: the container stays free while the lost reply is pending.
+        node.create_service(
+            LoadNode,
+            "~/_container/load_node",
+            load_node,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        process = subprocess.Popen(
+            [
+                "ros2",
+                "launch",
+                str(launch_file),
+                "namespace:=lost_reply",
+                "use_composition:=true",
+                "use_sim_time:=false",
+                f"params_file:={PARAMS}",
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 20
+        while len(requested) < expected and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.1)
+        # A second request would follow the first within milliseconds.
+        settle = time.monotonic() + 3
+        while time.monotonic() < settle:
+            executor.spin_once(timeout_sec=0.1)
+        assert len(requested) == expected, requested
+        if expected == 2:
+            assert set(requested) == {"controller_server", "velocity_smoother"}
+    finally:
+        if process is not None:
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        lost.cancel()
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+        log.seek(0)
+        print(log.read())
+        log.close()
 
 
 def call(node, service_type, name, request):

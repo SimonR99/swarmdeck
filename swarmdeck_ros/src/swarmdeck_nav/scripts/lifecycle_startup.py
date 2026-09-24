@@ -3,7 +3,9 @@
 
 A lost transition response is resolved by observing the node's actual state.
 The same owner remains available at ~/recover after initial startup; never
-retry an assumed transition or reset an already active node.
+retry an assumed transition or reset an already active node. A failed initial
+bringup is retried a bounded number of times; exhaustion is reported once,
+naming each node that is not active, and leaves only ~/recover.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from __future__ import annotations
 import signal
 import time
 import threading
+
+LIFECYCLE_STATE_LABELS = {1: "unconfigured", 2: "inactive", 3: "active", 4: "finalized"}
 
 
 class BringupCancelled(Exception):
@@ -99,7 +103,15 @@ def main():
     node.context.on_shutdown(stopping.set)
     names = node.declare_parameter("node_names", ["controller_server"]).value
     deadline_s = float(node.declare_parameter("startup_timeout_s", 60.0).value)
-    if not names or not 0 < deadline_s <= 300:
+    retry_s = float(node.declare_parameter("retry_interval_s", 5.0).value)
+    # Automatic attempts including the first: 3 x 60 s + 2 x 5 s by default.
+    attempts = int(node.declare_parameter("startup_attempts", 3).value)
+    if (
+        not names
+        or not 0 < deadline_s <= 300
+        or not 0 < retry_s <= 300
+        or not 1 <= attempts <= 20
+    ):
         node.destroy_node()
         rclpy.try_shutdown()
         raise ValueError("invalid navigation startup parameters")
@@ -163,7 +175,7 @@ def main():
         request.transition.id = transition
         return call(name + "/change_state", ChangeState, request, deadline).success
 
-    def run_bringup(response):
+    def run_bringup(response, retry_note=""):
         try:
             bringup(
                 names,
@@ -181,8 +193,21 @@ def main():
         except (TimeoutError, RuntimeError) as exc:
             response.success = False
             response.message = f"Navigation startup failed: {exc}"
-            node.get_logger().error(response.message)
+            node.get_logger().error(response.message + retry_note)
         return response
+
+    def not_active():
+        """Each node's observed state, for a terminal diagnostic."""
+        labels = []
+        for name in names:
+            try:
+                state = query(name, time.monotonic() + 2.0)
+            except (TimeoutError, RuntimeError):
+                labels.append(f"{name}=unavailable")
+                continue
+            if state != 3:
+                labels.append(f"{name}={LIFECYCLE_STATE_LABELS.get(state, state)}")
+        return ", ".join(labels) or "none (became active after the last attempt)"
 
     async def recover(_request, response):
         if stopping.is_set():
@@ -199,18 +224,37 @@ def main():
 
     node.create_service(Trigger, "~/recover", recover)
     try:
-        run_bringup(Trigger.Response())
+        made = 0
+        ready = False
+        retry_at = time.monotonic()
         while not stopping.is_set():
             if queued:
                 reply = queued[0]
                 response = run_bringup(requests[reply])
                 queued.popleft()
                 reply.set_result(response)
+                ready = ready or response.success
+            elif not ready and made < attempts and time.monotonic() >= retry_at:
+                # The adapter asks for recovery only while the controller's
+                # action server is undiscoverable; a configured controller
+                # beside a late or missing node is discoverable yet inactive.
+                made += 1
+                note = f"; retrying in {retry_s:g} s ({made}/{attempts})"
+                ready = run_bringup(
+                    Trigger.Response(), note if made < attempts else ""
+                ).success
+                retry_at = time.monotonic() + retry_s
+                if not ready and made == attempts and not stopping.is_set():
+                    node.get_logger().error(
+                        f"Navigation startup exhausted {attempts} automatic "
+                        f"attempts; not active: {not_active()}. No further "
+                        "automatic attempts; call ~/recover to retry."
+                    )
             else:
                 # Finite native waits let Python handle SIGINT/SIGTERM before
                 # shutting down the ROS context.
                 executor.spin_once(timeout_sec=0.1)
-    except (KeyboardInterrupt, ExternalShutdownException):
+    except (KeyboardInterrupt, ExternalShutdownException, BringupCancelled):
         pass
     finally:
         stopping.set()

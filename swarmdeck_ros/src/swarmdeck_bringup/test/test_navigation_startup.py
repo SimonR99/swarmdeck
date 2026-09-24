@@ -2,6 +2,10 @@
 
 import importlib.util
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -105,6 +109,158 @@ def test_active_node_loss_during_later_activation_is_not_reported_ready():
         startup.bringup(
             states, lambda name, _: states[name], change, clock=clock, sleep=clock.sleep
         )
+
+
+def start_owner(namespace, names, log, attempts):
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--ros-args",
+            "-r",
+            f"__ns:=/{namespace}",
+            "-p",
+            f"node_names:=[{','.join(names)}]",
+            "-p",
+            "startup_timeout_s:=1.0",
+            "-p",
+            "retry_interval_s:=0.5",
+            "-p",
+            f"startup_attempts:={attempts}",
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def stop_owner(owner):
+    owner.send_signal(signal.SIGINT)
+    try:
+        owner.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        owner.kill()
+        owner.wait(timeout=5)
+
+
+def test_failed_startup_retries_until_a_late_node_is_active(tmp_path):
+    """A node that appears after the startup deadline is still brought up.
+
+    Nothing else retries on the owner's behalf: the adapter only asks for
+    recovery when an action server is undiscoverable, and a configured but
+    inactive controller is discoverable.
+    """
+    rclpy = pytest.importorskip("rclpy", reason="needs the ROS image")
+    from lifecycle_msgs.srv import ChangeState, GetState
+
+    rclpy.init()
+    node = rclpy.create_node("late_fixture", namespace="late_nav")
+    log = (tmp_path / "owner.log").open("w+")
+    # Enough attempts that fixture discovery cannot exhaust the owner.
+    owner = start_owner("late_nav", ["controller_server"], log, attempts=10)
+    state = 1
+
+    def get_state(_request, response):
+        response.current_state.id = state
+        return response
+
+    def change_state(request, response):
+        nonlocal state
+        state = 2 if request.transition.id == 1 else 3
+        response.success = True
+        return response
+
+    def output():
+        log.seek(0)
+        return log.read()
+
+    try:
+        deadline = time.monotonic() + 15
+        while "Navigation startup failed" not in output():
+            assert time.monotonic() < deadline, output()
+            time.sleep(0.1)
+        node.create_service(GetState, "controller_server/get_state", get_state)
+        node.create_service(ChangeState, "controller_server/change_state", change_state)
+        deadline = time.monotonic() + 15
+        while state != 3 and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        assert state == 3, output()
+        deadline = time.monotonic() + 5
+        while "confirmed active" not in output() and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        assert "confirmed active" in output(), output()
+    finally:
+        stop_owner(owner)
+        node.destroy_node()
+        rclpy.shutdown()
+        print(output())
+        log.close()
+
+
+def test_permanently_missing_node_exhausts_automatic_attempts(tmp_path):
+    """Automatic retries are bounded and end in one diagnostic naming the gap.
+
+    ~/recover stays available for a deliberate retry after exhaustion.
+    """
+    rclpy = pytest.importorskip("rclpy", reason="needs the ROS image")
+    from lifecycle_msgs.srv import ChangeState, GetState
+    from std_srvs.srv import Trigger
+
+    rclpy.init()
+    node = rclpy.create_node("missing_fixture", namespace="missing_nav")
+    state = 1
+
+    def get_state(_request, response):
+        response.current_state.id = state
+        return response
+
+    def change_state(request, response):
+        nonlocal state
+        state = 2 if request.transition.id == 1 else 3
+        response.success = True
+        return response
+
+    node.create_service(GetState, "controller_server/get_state", get_state)
+    node.create_service(ChangeState, "controller_server/change_state", change_state)
+    log = (tmp_path / "owner.log").open("w+")
+    names = ["controller_server", "velocity_smoother"]
+    owner = start_owner("missing_nav", names, log, attempts=3)
+
+    def output():
+        log.seek(0)
+        return log.read()
+
+    try:
+        deadline = time.monotonic() + 30
+        while "exhausted" not in output():
+            assert time.monotonic() < deadline, output()
+            rclpy.spin_once(node, timeout_sec=0.1)
+        # Several retry intervals plus attempt deadlines: none may start.
+        settle = time.monotonic() + 4
+        while time.monotonic() < settle:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        lines = output().splitlines()
+        assert sum("Navigation startup failed" in line for line in lines) == 3
+        terminal = [line for line in lines if "exhausted" in line]
+        assert len(terminal) == 1, output()
+        assert "[ERROR]" in terminal[0]
+        assert "3 automatic attempts" in terminal[0]
+        assert "velocity_smoother=unavailable" in terminal[0]
+        assert "controller_server=inactive" in terminal[0]
+        assert "retrying" not in lines[-1] and terminal[0] == lines[-1]
+
+        client = node.create_client(Trigger, "navigation_startup/recover")
+        assert client.wait_for_service(timeout_sec=5), output()
+        future = client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=10)
+        assert future.done(), output()
+        assert not future.result().success
+        assert "velocity_smoother" in future.result().message
+    finally:
+        stop_owner(owner)
+        node.destroy_node()
+        rclpy.shutdown()
+        print(output())
+        log.close()
 
 
 @pytest.mark.parametrize("query_fails", [False, True])
