@@ -2,7 +2,6 @@
 
 Handles:
 - Uploading and saving user-provided images (screenshots, site maps, object photos)
-- Fetching robot camera frames from SwarmDeck server
 - Image analysis, metadata extraction, and multimodal vision preparation for AGY
 """
 
@@ -11,11 +10,9 @@ from __future__ import annotations
 import io
 import os
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from PIL import Image
 
@@ -58,22 +55,3 @@ def save_image_bytes(
         metadata["error"] = f"Failed to parse image headers: {exc}"
 
     return image_id, target_path, metadata
-
-
-def fetch_camera_snapshot(
-    robot_id: str, server_url: str = "http://server:8080"
-) -> Optional[Tuple[Path, Dict[str, Any]]]:
-    """Fetch live camera frame from SwarmDeck server and save to disk."""
-    url = f"{server_url.rstrip('/')}/api/camera/{robot_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": "CortexVision/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = resp.read()
-            if not data:
-                return None
-            image_id, path, meta = save_image_bytes(data, f"{robot_id}_live.jpg")
-            meta["robot_id"] = robot_id
-            meta["source"] = "robot_camera"
-            return path, meta
-    except Exception:
-        return None
