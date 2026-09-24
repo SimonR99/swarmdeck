@@ -85,9 +85,11 @@
     session.connection === 'live' ? 'ok' : session.connection === 'mock' ? 'warn' : 'danger'
   );
 
-  // Only the host supervisor can reset a simulation; adapter capabilities
-  // alone do not make that operation available.
-  const canReset = $derived(session.resetSupervisorAvailable);
+  // Only the host supervisor enables reset; retain progress/failure feedback
+  // even when its availability drops during the restart.
+  const canReset = $derived(
+    session.resetSupervisorAvailable || session.resetting || session.lastReset?.ok === false
+  );
   const resetError = $derived(session.lastReset?.ok === false ? session.lastReset.error : null);
 
   // Which map the canvas is showing. This used to be a single button that
