@@ -274,6 +274,9 @@ def setup(context, *args, **kwargs):
                             "robot_base_frame": f"{ns}/base_link",
                             "bounded_startup": "true",
                             "use_composition": "true",
+                            # Only the adapter may publish to the driver. It
+                            # closes its Nav2 relay during cancel/preemption.
+                            "output_cmd_vel_topic": "cmd_vel_adapter",
                             "robot_radius": f"{robot.footprint_radius:.3f}",
                             "footprint": robot.footprint,
                             "inflation_radius": f"{robot.footprint_radius + INFLATION_MARGIN:.3f}",

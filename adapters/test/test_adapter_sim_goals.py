@@ -32,6 +32,9 @@ def _bridge(sim_module):
     bridge._cancel_events = {}
     bridge._nav_quiet_unknown = False
     bridge._goal_lock = threading.RLock()
+    bridge._nav_execution_enabled = False
+    bridge._last_link_at = time.monotonic()
+    bridge.cfg = dict(sim_module.TRANSPORT_DEFAULTS)
     bridge.path_client = MagicMock()
     bridge.path_client.server_is_ready.return_value = True
     bridge._clear_escape = MagicMock()

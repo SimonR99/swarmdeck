@@ -91,6 +91,19 @@ mapping authority, then sends a trajectory to `FollowPath`; vendor adapters
 may pass a navigation-frame goal to their native controller. `stop`, manual
 drive, and a replacement objective cancel active route execution.
 
+### Simulation velocity ownership
+
+The simulation session remaps Nav2's smoothed output to
+`/<robot_id>/cmd_vel_adapter`. The simulation adapter uses the same velocity
+gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
+only an accepted, current route with an active status and fresh operator link
+can relay Nav2 output. Pending routes, cancellation, stop, and manual drive
+close the relay; manual drive and recovery still publish directly through the
+adapter. This adds one DDS hop after the smoother, not another smoothing stage.
+Bring up the updated session launch and adapter together; a legacy Nav2 launch
+publishing directly to `cmd_vel` bypasses this gate. The generic Nav2 launch
+and hardware launch defaults are unchanged.
+
 ## Collaborative graph
 
 Protocol 2 adapters may report graph health:

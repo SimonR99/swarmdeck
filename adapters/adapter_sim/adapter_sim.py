@@ -49,6 +49,7 @@ from adapters.runtime import (
     AdapterDetectionMixin,
     AdapterGoalOwnershipMixin,
     AdapterHelloMixin,
+    AdapterLinkMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
     TRANSPORT_DEFAULTS,
@@ -221,6 +222,7 @@ class RobotBridge(
     AdapterHelloMixin,
     AdapterDetectionMixin,
     AdapterGoalOwnershipMixin,
+    AdapterLinkMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
 ):
@@ -305,6 +307,9 @@ class RobotBridge(
         self._goal_handle = None
         self._goal_generation = 0
         self._goal_lock = threading.RLock()
+        self._nav_execution_enabled = False
+        self._last_link_at = 0.0
+        self._pending_drive = None
         self._goal_request_future = None
         self._goal_request_generation = None
         self._cancel_events: dict[int, threading.Event] = {}
@@ -357,6 +362,9 @@ class RobotBridge(
 
         self.path_client = ActionClient(node, FollowPath, f"/{robot_id}/follow_path")
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
+        node.create_subscription(
+            Twist, f"/{robot_id}/cmd_vel_adapter", self._on_nav_cmd_vel, 10
+        )
         from adapters.exploration import configure_exploration
         from adapters.objective_planning import configure_objective_planning
 
@@ -554,6 +562,7 @@ class RobotBridge(
             if expected_generation is None:
                 self._cancel_nav()
             generation = self._goal_generation
+            self._hold_goal_motion()
             try:
                 future = self.path_client.send_goal_async(request)
             except Exception as exc:
@@ -642,6 +651,10 @@ class RobotBridge(
                 except Exception:
                     pass
                 self._finish_goal("failed", generation)
+                return
+            # An inline terminal callback may already have retired this handle.
+            if self._goal_handle is handle:
+                self._nav_execution_enabled = True
 
     def _goal_result(self, future, generation: int, handle=None) -> None:
         with self._goal_lock:
@@ -716,6 +729,7 @@ class RobotBridge(
     ) -> None:
         if generation != self._goal_generation:
             return
+        self._hold_goal_motion()
         self._goal_handle = None
         self.goal = None
         self.planned_path = []
@@ -905,6 +919,7 @@ class RobotBridge(
 
     def _cancel_nav(self) -> int:
         with self._goal_lock:
+            self._hold_goal_motion()
             canceled_generation = self._goal_generation
             self._goal_generation += 1  # Ignore callbacks from superseded goals.
             quiet = threading.Event()

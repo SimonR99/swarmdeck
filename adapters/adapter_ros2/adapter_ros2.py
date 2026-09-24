@@ -846,12 +846,6 @@ class HardwareBridge(
             self.cancel_goal()
             self.mode = "estop"
 
-    def _on_nav_cmd_vel(self, msg) -> None:
-        with self._goal_lock:
-            if not self._nav_execution_enabled:
-                return
-            super()._on_nav_cmd_vel(msg)
-
     def set_stand_height(self, height: float) -> bool:
         """Command Spot's stand height in range [-0.15, 0.15] meters relative to default."""
         try:
@@ -1731,11 +1725,6 @@ class HardwareBridge(
         if self.traj_client is not None:
             self._call_trigger_async("stop")
         return generation
-
-    def _hold_goal_motion(self) -> None:
-        # Conditional cancellation closes the hardware velocity relay before
-        # returning, so wait_goal_quiet need not wait for the action server.
-        self._nav_execution_enabled = False
 
     def stop_for_exit(self) -> None:
         """Flush a synchronous SDK stop before the ROS executor is torn down."""

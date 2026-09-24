@@ -530,8 +530,15 @@ class AdapterGoalOwnershipMixin:
         """Whether the owning generation may still rewrite ``nav_status``."""
         return True
 
+    def _on_nav_cmd_vel(self, msg) -> None:
+        with self._goal_lock:
+            if not self._nav_execution_enabled:
+                return
+            super()._on_nav_cmd_vel(msg)
+
     def _hold_goal_motion(self) -> None:
-        """Stop relaying controller output while no accepted route executes."""
+        """Close the velocity relay before ownership returns to a planner."""
+        self._nav_execution_enabled = False
 
     def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
         """Cancel only the command owning ``expected_generation``."""
