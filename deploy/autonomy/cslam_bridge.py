@@ -1299,7 +1299,8 @@ class Bridge(Node):
             while len(cache) > 100:
                 expired = min(cache)
                 cache.pop(expired)
-                self.pending_capture_since.pop(expired, None)
+                if expired not in self.clouds and expired not in self.odoms:
+                    self.pending_capture_since.pop(expired, None)
                 self.dropped += 1
 
     def optimized(self, msg):

@@ -1430,3 +1430,17 @@ def test_tf_retry_never_schedules_beyond_sensor_freshness_limit(
     bridge.normalize_retry_s = 1.0
     bridge._retry_normalize()
     assert bridge.normalize_retry_timer.period == pytest.approx(0.2)
+
+
+def test_trimming_one_keyframe_cache_keeps_other_halfs_join_deadline(
+    bridge_module, monkeypatch
+):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    bridge.clouds = {seq: object() for seq in range(101)}
+    bridge.odoms = {0: object()}
+    bridge.pending_capture_since = {seq: 10.0 for seq in range(101)}
+    bridge.dropped = 0
+    bridge.consume(100)  # unmatched input still trims the overfull cloud cache
+    assert 0 not in bridge.clouds and 0 in bridge.odoms
+    assert bridge.pending_capture_since[0] == 10.0
+    assert bridge.dropped == 1
