@@ -1141,3 +1141,60 @@ def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
     assert subscribed["odom"] is mod.Odometry
     assert subscribed["plan"] is mod.NavPath
     assert bridge.navigation_frame == "odom"
+
+
+# -- goal ownership: behaviours the hardware bridge differs on -------------
+#
+# adapter_sim pins its own answers to the same calls. Here a cancel closes the
+# Nav2 velocity relay at once, so nothing waits for the action server, and a
+# replacement route keeps the public status "active" while it is prepared.
+
+
+@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])
+def test_hardware_conditional_cancel_reports_pending_as_active(mod, pending, status):
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    bridge._goal_generation = 3
+    bridge.nav_status, bridge.mode = "active", "nav"
+    bridge._nav_execution_enabled = True
+
+    assert bridge.cancel_goal_if_current(3, pending=pending) == 4
+
+    assert bridge._goal_generation == 4
+    assert bridge.nav_status == status
+    assert bridge.mode == "idle"
+    assert bridge._nav_execution_enabled is False
+    bridge.pub_cmd.publish.assert_called_once()
+
+
+def test_hardware_status_write_closes_the_relay_unless_active(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+    bridge._nav_execution_enabled = True
+
+    assert bridge.set_nav_status_if_current(3, "active") is True
+    assert bridge._nav_execution_enabled is True
+    assert bridge.set_nav_status_if_current(3, "failed") is True
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_execution_enabled is False
+
+
+def test_hardware_pending_goal_reports_active_with_the_relay_closed(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+    bridge.nav_status = "failed"
+    bridge._nav_execution_enabled = True
+
+    assert bridge.set_goal_pending_if_current(2) is False
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_execution_enabled is True
+    assert bridge.set_goal_pending_if_current(3) is True
+    assert bridge.nav_status == "active"
+    assert bridge._nav_execution_enabled is False
+
+
+def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+
+    assert bridge.wait_goal_quiet(2, 0.0) is False
+    assert bridge.wait_goal_quiet(3, 0.0) is True

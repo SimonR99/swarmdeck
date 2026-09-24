@@ -480,3 +480,58 @@ def test_stale_conditional_cancel_and_status_cannot_change_newer_state(sim_modul
     assert bridge.planned_path == [{"x": 3.0, "y": 4.0}]
     assert bridge.nav_status == "active"
     assert bridge.mode == "nav"
+
+
+# -- goal ownership: behaviours the simulation bridge differs on -----------
+#
+# adapter_ros2 pins its own answers to the same calls. The two differ on
+# purpose: here Nav2 drives the robot directly and a cancelled route keeps
+# moving until its terminal result arrives, so ownership waits for that.
+
+
+@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "idle")])
+def test_sim_conditional_cancel_reports_pending_as_idle(sim_module, pending, status):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 3
+    bridge.nav_status, bridge.mode = "active", "nav"
+
+    assert bridge.cancel_goal_if_current(3, pending=pending) == 4
+
+    assert bridge._goal_generation == 4
+    assert bridge.nav_status == status
+    assert bridge.mode == "idle"
+    bridge.pub_cmd.publish.assert_called_once()
+
+
+def test_sim_status_and_pending_writes_refuse_after_unknown_quiet(sim_module):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 3
+    bridge.nav_status = "active"
+    bridge._nav_quiet_unknown = True
+
+    assert bridge.set_nav_status_if_current(3, "failed") is False
+    assert bridge.set_goal_pending_if_current(3) is False
+    assert bridge.nav_status == "active"
+
+
+def test_sim_pending_goal_reports_idle(sim_module):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 3
+    bridge.nav_status = "failed"
+
+    assert bridge.set_goal_pending_if_current(2) is False
+    assert bridge.nav_status == "failed"
+    assert bridge.set_goal_pending_if_current(3) is True
+    assert bridge.nav_status == "idle"
+    assert bridge.set_nav_status_if_current(3, "active") is True
+    assert bridge.nav_status == "active"
+
+
+def test_sim_wait_goal_quiet_is_immediate_without_unsettled_cancels(sim_module):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 3
+
+    assert bridge.wait_goal_quiet(2, time.monotonic() + 1.0) is False
+    assert bridge.wait_goal_quiet(3, time.monotonic()) is True
+    bridge._nav_quiet_unknown = True
+    assert bridge.wait_goal_quiet(3, time.monotonic() + 1.0) is False
