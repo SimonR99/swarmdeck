@@ -103,7 +103,10 @@ class PlannerSupervisor:
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=3)
+            # ROS launch escalates unresponsive children to SIGTERM after
+            # five seconds. Allow that cleanup before forcing the whole group;
+            # MGG shares sim's /dev/shm, which outlives this planner.
+            process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
         # A crashed launch leader can already be reaped while its children

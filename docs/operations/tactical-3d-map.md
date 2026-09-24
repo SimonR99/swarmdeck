@@ -112,63 +112,13 @@ only when message headers omit the calibrated camera frame. Hardware camera
 frames use optical axes by default; set `SWARMDECK_COLOR_FRAME_CONVENTION=body`
 only for a forward/left/up camera frame with a corresponding calibrated TF.
 
-Both hardware adapters color registered LiDAR scans and accepted optimized
-keyframes. Botman, Aslan, and TARS enable this in their profiles:
-
-```yaml
-topics:
-  camera_compressed: /oak/rgb/image_raw/compressed
-  camera_color_info: /oak/rgb/camera_info
-map_color:
-  enabled: true
-  max_age_s: 0.05
-  history_s: 2.0
-  camera_frame: oak_rgb_camera_optical_frame
-```
-
-Use the **RGB** CameraInfo for the actual image pixels, not depth CameraInfo.
-The projector supports rectified pinhole images and raw `plumb_bob` /
-`rational_polynomial` distortion. A mismatched size/frame, unsupported lens
-model, missing capture-time TF, or stale image suppresses color while geometry
-continues. `camera_frame` is optional when both image and CameraInfo carry the
-same frame. It explicitly permits an empty CameraInfo frame (observed on OAK);
-it never overrides a conflicting nonempty frame.
-
-Registered scans on the live fleet arrived 0.37 to 0.69 seconds behind the newest
-image. A two-second JPEG history selects the image nearest the **scan capture
-time**, retaining the strict 50 ms join tolerance. Storage is capped at 60 frames
-and 16 MiB, plus one decoded image. Decode/projection occurs only at the display
-upload interval (four seconds by default) or after a keyframe passes motion and
-novelty gates. On the three robot CPUs, paired-sample projection including JPEG
-decode took 13 to 25 ms; cached-image projection took 2 to 4 ms for 5k to 12k display
-points. No camera frames are uploaded for this feature.
-
-Capture-time TF must resolve **camera optical ← map**. Camera body axes and
-optical axes are different: do not apply the optical rotation twice. Botman's
-ChArUco solve yields `os_lidar ← oak_rgb_camera_optical_frame`; deployment needs
-`botman_base_link ← oak-d-base-frame`. The calibration exporter now composes
-the raw LiDAR's pi yaw and removes the driver's body-to-optical edge. The
-2026-09-08 profile correction preserves the measured extrinsic; it is not a
-new calibration. Aslan's mount remains approximate and needs measured board
-calibration for precise texture alignment.
-
-| Robot | RGB image / CameraInfo prefix | Optical frame |
-| --- | --- | --- |
-| Botman / Aslan | `/oak/rgb/image_raw/compressed`, `/oak/rgb/camera_info` | `oak_rgb_camera_optical_frame` |
-| TARS (ROS 1) | `/d400_arm/color/image_raw/compressed`, `/d400_arm/color/camera_info` | `d400_arm_color_optical_frame` |
-
-Inspect a camera/LiDAR overlay or a calibration target to assess physical
-alignment.
-
-Only the nearest cloud surface per pixel is colored; unseen points remain
-neutral gray. Optimized keyframes carry an explicit visibility alpha mask.
-The server accumulates observed RGB and fills previously uncolored display
-voxels, retaining the first measured color. Historical global clouds are not
-painted using the current camera, and old XYZ-only optimized keyframes cannot
-be colored retroactively. Sparse LiDAR cannot guarantee occlusion rejection
-between its returns; the shared projector also accepts aligned metric depth
-for stronger visibility checking. In the 3D viewer, select **Camera** under
-coloring once RGB observations arrive.
+Hardware adapters no longer color or upload registered scans and optimized
+keyframes. The former `map_color` profile block and `camera_color_info` adapter
+topic do not enable map coloring. Configure the peer mapper's calibrated
+RGB/depth inputs above instead; hardware bring-up must qualify those inputs
+before measured Camera coloring is available. In the 3D viewer, select
+**Camera** once newly captured colored submaps arrive. Historical XYZ-only
+geometry is not colored retroactively.
 
 Onboard component replicas use an optional, versioned colored geometry chunk:
 `application/vnd.swarmdeck.xyzrgba-f32-u8.v1`. Its 16-byte header contains

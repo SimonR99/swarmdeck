@@ -1,5 +1,12 @@
 /** Browser-safe UUID and bounded JSON transport for simulation reset recovery. */
 
+/** Robot capabilities do not prove the host reset supervisor is running. */
+export function canResetSimulation(
+  status: { supervisor_available?: unknown } | undefined
+): boolean {
+  return status?.supervisor_available === true;
+}
+
 export function resetRequestId(
   randomValues: (array: Uint8Array<ArrayBuffer>) => void = (array) => {
     globalThis.crypto.getRandomValues(array);

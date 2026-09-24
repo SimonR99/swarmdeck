@@ -329,6 +329,44 @@ def test_unconfigured_robot_boundary_is_unavailable(deployment):
     assert not d.operations
 
 
+@pytest.mark.parametrize("exit_after", [0.1, 7, None])
+def test_planner_stop_allows_launch_escalation_before_forcing_group(
+    tmp_path, monkeypatch, exit_after
+):
+    import signal
+
+    elapsed = 0
+    signals = []
+    waits = []
+
+    def wait(*, timeout):
+        nonlocal elapsed
+        waits.append(timeout)
+        if len(waits) == 1:
+            if exit_after is None or exit_after > timeout:
+                elapsed += timeout
+                raise subprocess.TimeoutExpired("ros2 launch", timeout)
+            elapsed += exit_after
+        return 0
+
+    monkeypatch.setattr(
+        "deploy.mgg.supervisor.os.killpg",
+        lambda pid, sig: signals.append((pid, sig, elapsed)),
+    )
+    supervisor = PlannerSupervisor(
+        tmp_path / "reset", MISSION, ["robot_0"], tmp_path / "maps", acknowledge_source
+    )
+    supervisor.processes["robot_0"] = SimpleNamespace(pid=123, wait=wait)
+    supervisor.stop("robot_0")
+
+    assert waits == [10, 2]
+    assert signals == [
+        (123, signal.SIGINT, 0),
+        (123, signal.SIGKILL, 10 if exit_after is None else exit_after),
+    ]
+    assert not supervisor.processes
+
+
 def test_planner_control_and_epoch_change_preserve_other_process_groups(
     tmp_path, monkeypatch
 ):
