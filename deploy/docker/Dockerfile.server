@@ -20,8 +20,17 @@ COPY configs /app/configs
 RUN ln -s /app/configs /app/study
 COPY adapters /app/adapters
 COPY autonomy /app/autonomy
+COPY tools /app/tools
+# Only the ROS-free part of the peer package (RGB-D colouring, used by the
+# reconstruction tests); the rest of swarmdeck_peer needs the ROS peer image.
+COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/__init__.py \
+     swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/colorize.py \
+     /app/swarmdeck_peer/
 COPY scripts /app/scripts
 RUN mkdir -p /app/sessions
+# tools, autonomy and swarmdeck_peer import as top-level packages from /app,
+# as pytest.ini's pythonpath arranges in a checkout.
+ENV PYTHONPATH=/app
 
 WORKDIR /app/server
 RUN pip install -e /app/adapters/protocol -e ".[dev]"
