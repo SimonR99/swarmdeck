@@ -31,9 +31,7 @@ let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
 
-type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus & {
-  supervisor_available?: boolean;
-};
+type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus;
 const RESET_POLL_TIMEOUT_MS = 600_000;
 const RESET_FETCH_TIMEOUT_MS = 5_000;
 
