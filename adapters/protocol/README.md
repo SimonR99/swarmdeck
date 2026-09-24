@@ -98,8 +98,9 @@ The simulation session remaps Nav2's smoothed output to
 gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
 only an accepted, current route with an active status and fresh operator link
 can relay Nav2 output. Both adapters run the shared 20 Hz ROS watchdog separately
-from websocket telemetry: a stale link cancels active navigation, publishes
-a stop and reports `cancelled` rather than merely holding the velocity relay
+from websocket telemetry (20 Hz of simulation time in the sim, whose node runs on
+`use_sim_time`, so the rate follows the real-time factor): a stale link cancels
+active navigation, publishes a stop and reports `cancelled` rather than merely holding the velocity relay
 closed. The same watchdog
 consumes pending manual-drive commands and enforces their deadman timeout.
 Pending routes, cancellation, stop, and manual drive
@@ -119,6 +120,14 @@ action's terminal result. Generation checks still reject superseded commands.
 Simulation retains its separate conservative recovery rule: loss of action
 monitoring suppresses automatic reverse escape, but does not prevent a new
 owned route from being planned.
+
+Known gap: the simulation adapter asks `navigation_startup` to recover Nav2
+only while the controller's `FollowPath` action server cannot be discovered.
+Once `navigation_startup` has used up its automatic retries (see
+`deploy/dds/README.md`), a controller that is visible but not active, for
+example because its velocity smoother is missing, is never recovered
+automatically: the robot rejects every goal. The operator must restart the
+simulation.
 
 ### Goal lock and the ROS spin thread
 
