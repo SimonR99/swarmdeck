@@ -82,6 +82,15 @@ composition removes another four processes/participants. Actual discovery
 counts include adapters, media, launch loaders and transient diagnostics; count
 DDS GUID prefixes, not ROS node names, when comparing the fleet.
 
+## Isolated transport regression
+
+Run `python -m pytest -m docker -s tests/deployment/test_dds_transport_docker.py`
+with the prebuilt `swarmdeck-sim:local` image (or set `SWARMDECK_DDS_TEST_IMAGE`).
+The test compares reliable 1 MiB image delivery over UDP-only and SHM+UDP in
+throwaway containers with a private network/IPC namespace, checking actual
+loopback bytes and segment sizes. It skips if Docker/the image is unavailable
+and is outside the default pytest testpaths. It never joins the running fleet.
+
 ## Validate on a running fleet
 
 Compare an identical domain, fleet size and scenario before/after. Inspect
