@@ -519,6 +519,13 @@ class Bridge(Node):
         self.cloud_pub = self.create_publisher(PointCloud2, "normalized_cloud", 5)
         self.odom_pub = self.create_publisher(Odometry, "normalized_odom", 5)
         self.pending_cloud = None
+        self.pending_cloud_since = 0.0
+        self.normalize_retry_s = 0.05
+        self.normalize_retry_timer = None
+        self.capture_retry_timer = None
+        # Sensor callbacks run on a separate executor in split-domain mode.
+        # Wake the peer executor rather than consuming keyframes across threads.
+        self.capture_ready = self.create_guard_condition(self.flush_captures)
         self.last_sensor_at = 0.0
         self.last_normalized_pose = None
         self.last_normalized_at = 0.0
@@ -658,8 +665,6 @@ class Bridge(Node):
             self.inter_robot_closure,
             100,
         )
-        self.sensor_node.create_timer(0.05, self.normalize)
-        self.create_timer(0.1, self.flush_captures)
         if self.sensor_context is not None:
             self._configure_coordination_relays()
             self.sensor_executor = SingleThreadedExecutor(context=self.sensor_context)
@@ -924,7 +929,26 @@ class Bridge(Node):
         return handle
 
     def raw_cloud(self, cloud):
-        self.pending_cloud = cloud  # latest-only under sensor overload
+        self.pending_cloud = cloud  # latest-only while capture-time TF is missing
+        self.pending_cloud_since = time.monotonic()
+        self.normalize_retry_s = 0.05
+        self.normalize()
+
+    def _cancel_normalize_retry(self):
+        if self.normalize_retry_timer is not None:
+            self.normalize_retry_timer.cancel()
+            self.sensor_node.destroy_timer(self.normalize_retry_timer)
+            self.normalize_retry_timer = None
+
+    def _retry_normalize(self):
+        remaining = AUTHORITY_SENSOR_TTL_S - (
+            time.monotonic() - self.pending_cloud_since
+        )
+        delay = max(0.001, min(self.normalize_retry_s, remaining))
+        self.normalize_retry_clock, self.normalize_retry_timer = create_steady_timer(
+            self.sensor_node, delay, self.normalize
+        )
+        self.normalize_retry_s = min(1.0, 2 * self.normalize_retry_s)
 
     def raw_capture_provenance(self, message):
         try:
@@ -962,6 +986,7 @@ class Bridge(Node):
                 self.raw_capture_metadata[metadata.stamp_ns] = metadata
             while len(self.raw_capture_metadata) > MAX_RAW_CAPTURE_RECORDS:
                 self.raw_capture_metadata.pop(next(iter(self.raw_capture_metadata)))
+        self.capture_ready.trigger()
 
     def _cache_raw_capture(
         self,
@@ -1032,14 +1057,22 @@ class Bridge(Node):
                 self.raw_capture_collisions.pop(next(iter(self.raw_capture_collisions)))
 
     def normalize(self):
+        self._cancel_normalize_retry()
         cloud = self.pending_cloud
         if cloud is None:
+            return
+        if time.monotonic() - self.pending_cloud_since >= AUTHORITY_SENSOR_TTL_S:
+            self.pending_cloud = None
+            self.get_logger().warn(
+                "dropping cloud waiting for capture-time TF", throttle_duration_sec=5.0
+            )
             return
         stamp = Time.from_msg(cloud.header.stamp)
         try:
             mount = self.tf.lookup_transform(self.base, cloud.header.frame_id, stamp)
             local = self.tf.lookup_transform(self.odom_frame, self.base, stamp)
         except TransformException:
+            self._retry_normalize()
             return  # never substitute a latest transform for capture-time TF
         self.pending_cloud = None
         pose = (
@@ -1118,6 +1151,7 @@ class Bridge(Node):
             raw_points_sha256,
             raw_source_finite,
         )
+        self.capture_ready.trigger()
         self.odom_pub.publish(odom)
         self.cloud_pub.publish(out)
         self.last_normalized_pose = pose
@@ -1134,7 +1168,7 @@ class Bridge(Node):
             return
         self.clouds[msg.id] = msg.pointcloud
         self.pending_capture_since.setdefault(msg.id, time.monotonic())
-        self.consume(msg.id)
+        self.flush_captures()
 
     def key_odom(self, msg):
         if (
@@ -1144,11 +1178,24 @@ class Bridge(Node):
             return
         self.odoms[msg.id] = msg.odom
         self.pending_capture_since.setdefault(msg.id, time.monotonic())
-        self.consume(msg.id)
+        self.flush_captures()
 
     def flush_captures(self):
-        for seq in tuple(self.clouds.keys() & self.odoms.keys()):
+        if self.capture_retry_timer is not None:
+            self.capture_retry_timer.cancel()
+            self.destroy_timer(self.capture_retry_timer)
+            self.capture_retry_timer = None
+        for seq in tuple(self.clouds.keys() | self.odoms.keys()):
             self.consume(seq)
+        waiting = self.clouds.keys() & self.odoms.keys()
+        if waiting:
+            # Only the bounded raw/provenance join needs a deadline. New raw
+            # data wakes this method via capture_ready before that deadline.
+            deadline = min(self.pending_capture_since[seq] for seq in waiting)
+            delay = max(0.001, deadline + RAW_CAPTURE_JOIN_GRACE_S - time.monotonic())
+            self.capture_retry_clock, self.capture_retry_timer = create_steady_timer(
+                self, delay, self.flush_captures
+            )
 
     def _take_raw_capture(self, stamp, keyframe):
         with self._shared_lock:
@@ -1250,7 +1297,9 @@ class Bridge(Node):
             self.capture_count += 1
         for cache in (self.clouds, self.odoms):
             while len(cache) > 100:
-                cache.pop(min(cache))
+                expired = min(cache)
+                cache.pop(expired)
+                self.pending_capture_since.pop(expired, None)
                 self.dropped += 1
 
     def optimized(self, msg):
