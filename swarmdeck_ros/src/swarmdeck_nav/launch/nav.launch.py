@@ -4,7 +4,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.actions import ComposableNodeContainer, LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import ReplaceString, RewrittenYaml
@@ -94,7 +94,20 @@ def generate_launch_description() -> LaunchDescription:
         # the whole YAML in process arguments, not only component overrides.
         **common,
         condition=IfCondition(use_composition),
-        composable_node_descriptions=[
+    )
+    # One load action per node. Fast DDS drops a load_node reply when the
+    # container has not yet matched the launch client's reply reader ("client
+    # will not receive response"; seen on a freshly started container under
+    # fleet startup load). The node is loaded regardless, but launch_ros waits
+    # for that reply without a timeout before requesting the next node of the
+    # same action, so a batched container silently never got its smoother.
+    loads = [
+        LoadComposableNodes(
+            target_container=[namespace, "/nav_container"],
+            condition=IfCondition(use_composition),
+            composable_node_descriptions=[description],
+        )
+        for description in (
             ComposableNode(
                 package="nav2_controller",
                 plugin="nav2_controller::ControllerServer",
@@ -111,8 +124,8 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=common["parameters"],
                 remappings=smoother_remappings,
             ),
-        ],
-    )
+        )
+    ]
     controller = Node(
         package="nav2_controller",
         executable="controller_server",
@@ -195,6 +208,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("output_cmd_vel_topic", default_value="cmd_vel"),
             container,
+            *loads,
             controller,
             velocity_smoother,
             lifecycle,

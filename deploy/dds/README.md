@@ -81,6 +81,13 @@ unchanged. Simulation routes velocity through `cmd_vel_nav` → smoother →
 The bounded simulation startup process still exits after activation. Hardware callers keep
 `use_composition:=false` by default and retain their separate processes.
 
+Each composed node is requested by its own `LoadComposableNodes` action. Fast
+DDS can drop a `load_node` reply while a freshly started container has not yet
+matched the launch client ("failed to send response ... client will not receive
+response"); the node is loaded anyway, but launch_ros waits for that reply with
+no timeout before sending the next request of the same action. Batched, one lost
+reply left the robot without a velocity smoother and so without Nav2.
+
 With four robots, static batching removes 15 processes/participants and Nav2
 composition removes another four processes/participants. Actual discovery
 counts include adapters, media, launch loaders and transient diagnostics; count

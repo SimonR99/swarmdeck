@@ -45,7 +45,7 @@ def _launch_module(monkeypatch, package, filename):
         "launch.launch_description_sources": {"PythonLaunchDescriptionSource": _Action},
         "launch_ros": {},
         "launch_ros.actions": dict.fromkeys(
-            ["ComposableNodeContainer", "Node"], _Action
+            ["ComposableNodeContainer", "LoadComposableNodes", "Node"], _Action
         ),
         "launch_ros.descriptions": dict.fromkeys(
             ["ComposableNode", "ParameterFile"], _Action
@@ -123,8 +123,12 @@ def test_nav_remaps_both_composed_and_standalone_smoothers_without_changing_defa
     assert defaults["output_cmd_vel_topic"] == "cmd_vel"
     assert defaults["controller_cmd_vel_topic"] == "cmd_vel_nav"
     nodes = [action for action in entities if hasattr(action, "name")]
-    container = next(node for node in nodes if node.name == "nav_container")
-    for collection in (nodes, container.composable_node_descriptions):
+    composed = [
+        description
+        for action in entities
+        for description in getattr(action, "composable_node_descriptions", [])
+    ]
+    for collection in (nodes, composed):
         smoother = next(node for node in collection if node.name == "velocity_smoother")
         remaps = dict(smoother.remappings)
         assert (
