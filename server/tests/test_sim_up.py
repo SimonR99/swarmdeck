@@ -14,8 +14,7 @@ def arguments(*values):
     return launch.parser().parse_args(list(values))
 
 
-def test_default_stack_has_one_backend_and_all_products(monkeypatch):
-    monkeypatch.delenv("SWARMDECK_SLAM_BACKEND", raising=False)
+def test_default_stack_has_one_backend_and_all_products():
     spec = launch.build_spec(arguments("--drift", "--no-build"), "test")
     assert spec["version"] == 2
     assert "backend" not in spec
@@ -27,16 +26,10 @@ def test_default_stack_has_one_backend_and_all_products(monkeypatch):
     environment = launch.process_environment(
         spec, {"SWARMDECK_MISSION_ID": "mission", "SWARMDECK_TEST_DOMAIN": "42"}
     )
-    assert environment["SWARMDECK_SLAM_BACKEND"] == "cslam"
+    assert "SWARMDECK_SLAM_BACKEND" not in environment
     assert environment["SWARMDECK_MOLA_PLANNER_MAPS"] == "true"
     assert "SWARMDECK_MGG_MAP_BACKEND" not in environment
     assert json.loads(environment["SWARMDECK_PEER_NAMES"]) == spec["robot_names"]
-
-
-def test_unknown_backend_fails_closed(monkeypatch):
-    monkeypatch.setenv("SWARMDECK_SLAM_BACKEND", "rtabmap")
-    with pytest.raises(ValueError, match="SWARMDECK_SLAM_BACKEND"):
-        launch.build_spec(arguments("--drift"), "test")
 
 
 def test_removed_mapping_flags_are_not_accepted():

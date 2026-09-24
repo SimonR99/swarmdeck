@@ -40,7 +40,7 @@ the reset supervisor, and persists the exact Compose service set for `--status`,
 ```
 
 The mapping worker is persistent and native. The launcher sets
-`SWARMDECK_SLAM_BACKEND=cslam` and `SWARMDECK_MOLA_PLANNER_MAPS=true`. The
+`SWARMDECK_MOLA_PLANNER_MAPS=true`. The
 folded base Compose file also sets the simulation capture provider to
 `simulation`, creates a fresh mission/domain epoch, and keeps a reset
 supervisor for lifecycle recovery. MGG reads the native MOLA planner product

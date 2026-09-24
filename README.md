@@ -80,7 +80,7 @@ receives REST and WebSocket state and obtains camera media from MediaMTX.
 
 ```mermaid
 flowchart LR
-    Sensors["ARGoS or robot sensors"] --> Peer["Swarm-SLAM peer<br/>SWARMDECK_SLAM_BACKEND=cslam"]
+    Sensors["ARGoS or robot sensors"] --> Peer["Swarm-SLAM peer"]
     Peer --> MOLA["MOLA occupancy products"]
     MOLA --> MGG["MGG planner<br/>frame = robot/odom"]
     MGG --> Controller["Nav2 controller<br/>FollowPath + local costmap"]

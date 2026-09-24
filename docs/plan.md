@@ -214,7 +214,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     multi-robot component, and no planner reads the display raster.
 20. Navigation frame equals the robot's continuous odometry frame. Corrections
     are data (`T_component_navigation`), never a TF edge.
-21. One 3D backend is selected by `SWARMDECK_SLAM_BACKEND=cslam`: peer
+21. There is one 3D backend: peer
     Swarm-SLAM supplies corrected poses and MOLA supplies occupancy products.
 22. Nav2 is the controller only. MGG is the sole planner and sends trajectories
     to `FollowPath`.

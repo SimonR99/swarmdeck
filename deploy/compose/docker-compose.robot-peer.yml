@@ -23,7 +23,6 @@ services:
       SWARMDECK_CLOUD_TOPIC: "${SWARMDECK_CLOUD_TOPIC:?Set the sensor-frame cloud topic}"
       SWARMDECK_BASE_FRAME: "${SWARMDECK_BASE_FRAME:?Set the physical base frame}"
       SWARMDECK_ODOM_FRAME: "${SWARMDECK_ODOM_FRAME:?Set the continuous odometry frame}"
-      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_TF_TOPIC: "${SWARMDECK_TF_TOPIC:-/tf}"
       SWARMDECK_TF_STATIC_TOPIC: "${SWARMDECK_TF_STATIC_TOPIC:-/tf_static}"
       SWARMDECK_COLOR_TOPIC: "${SWARMDECK_COLOR_TOPIC:-}"

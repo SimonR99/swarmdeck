@@ -91,7 +91,7 @@ SwarmDeck standardizes coordinate frames across heterogeneous robots:
 - **Corrections**: Peer Swarm-SLAM publishes `T_component_navigation` as data;
   it never creates a competing map-to-odometry TF edge.
 - **Products**: MOLA consumes peer snapshots and publishes the occupancy
-  products queried by MGG. `SWARMDECK_SLAM_BACKEND=cslam` is the only backend.
+  products queried by MGG. Swarm-SLAM is the only backend.
 
 
 ### Safety boundary
