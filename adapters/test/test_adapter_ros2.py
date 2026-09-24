@@ -1199,6 +1199,42 @@ def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
     assert bridge.wait_goal_quiet(3, 0.0) is True
 
 
+@pytest.mark.parametrize("terminal", ["success", "abort", "failure"])
+def test_hardware_terminal_result_stops_an_open_gate_once(mod, monkeypatch, terminal):
+    bridge = _route_bridge(mod)
+    generation, handle = _submit_route(bridge, _route_plan())
+    velocities = []
+    bridge.pub_cmd = SimpleNamespace(publish=velocities.append)
+    command = SimpleNamespace(linear=SimpleNamespace(x=0.3))
+    bridge._on_nav_cmd_vel(command)
+    assert velocities == [command]
+    velocities.clear()
+    statuses = SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5)
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", statuses)
+    monkeypatch.setattr(
+        sys.modules["geometry_msgs.msg"],
+        "Twist",
+        lambda: SimpleNamespace(linear=SimpleNamespace(), angular=SimpleNamespace()),
+    )
+    outcome = {
+        "success": SimpleNamespace(status=4),
+        "abort": SimpleNamespace(status=6),
+        "failure": RuntimeError("result channel failed"),
+    }[terminal]
+    future = MagicMock()
+    if isinstance(outcome, Exception):
+        future.result.side_effect = outcome
+    else:
+        future.result.return_value = outcome
+    bridge._on_goal_result(future, generation, handle)
+    assert len(velocities) == 1
+    assert vars(velocities[0].linear) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert vars(velocities[0].angular) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    bridge._on_goal_result(future, generation, handle)
+    bridge._on_nav_cmd_vel(command)
+    assert len(velocities) == 1
+
+
 def test_hardware_state_probes_link_quality_towards_the_backend(mod, monkeypatch):
     import adapters.runtime as runtime
 

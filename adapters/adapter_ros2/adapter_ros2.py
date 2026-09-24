@@ -1601,7 +1601,7 @@ class HardwareBridge(
         return after <= tolerance or after <= before - minimum
 
     def _finish_goal(self, status: str, *, reason: str | None = None) -> None:
-        self._nav_execution_enabled = False
+        self._finish_goal_motion()
         self._nav_enable_on_accept = False
         self.nav_status = status
         self._nav_failure_reason = reason if status == "failed" else None

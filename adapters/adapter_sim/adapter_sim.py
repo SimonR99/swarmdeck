@@ -712,7 +712,7 @@ class RobotBridge(
     ) -> None:
         if generation != self._goal_generation:
             return
-        self._hold_goal_motion()
+        self._finish_goal_motion()
         self._goal_handle = None
         self.goal = None
         self.planned_path = []

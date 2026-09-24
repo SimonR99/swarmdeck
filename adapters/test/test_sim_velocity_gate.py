@@ -1,5 +1,6 @@
 """Simulated Nav2 output must pass the same ownership gate as hardware."""
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +27,10 @@ def _accept(bridge, generation):
     return handle
 
 
-def test_sim_velocity_waits_for_acceptance_and_stops_on_terminal(sim_module):
+@pytest.mark.parametrize("terminal", ["success", "abort", "failure"])
+def test_sim_velocity_waits_for_acceptance_and_stops_on_terminal(
+    sim_module, monkeypatch, terminal
+):
     bridge = _bridge(sim_module)
     messages = _capture(bridge)
     command = _twist()
@@ -39,11 +43,23 @@ def test_sim_velocity_waits_for_acceptance_and_stops_on_terminal(sim_module):
     handle = _accept(bridge, generation)
     bridge._on_nav_cmd_vel(command)
     assert messages == [command]
-    outcome = SimpleNamespace(status=sim_module.GoalStatus.STATUS_SUCCEEDED)
-    bridge._goal_result(_ImmediateFuture(outcome), generation, handle)
+    outcome = {
+        "success": SimpleNamespace(status=sim_module.GoalStatus.STATUS_SUCCEEDED),
+        "abort": SimpleNamespace(status=sim_module.GoalStatus.STATUS_ABORTED),
+        "failure": RuntimeError("result channel failed"),
+    }[terminal]
+    bridge._arm_escape = MagicMock()
+    monkeypatch.setattr(sys.modules["geometry_msgs.msg"], "Twist", _twist)
     messages.clear()
+    bridge._goal_result(_ImmediateFuture(outcome), generation, handle)
+    assert len(messages) == 1
+    assert vars(messages[0].linear) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert vars(messages[0].angular) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    # Another terminal notification or late smoother sample cannot publish
+    # a second stop (or revive motion) after the gate has closed.
+    bridge._goal_result(_ImmediateFuture(outcome), generation, handle)
     bridge._on_nav_cmd_vel(command)
-    assert messages == []
+    assert len(messages) == 1
 
 
 @pytest.mark.parametrize("operation", ["cancel_goal", "stop", "drive", "pending"])

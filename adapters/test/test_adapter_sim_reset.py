@@ -25,6 +25,7 @@ def make_bridge(sim):
     bridge._goal_handle = None
     bridge._goal_generation = 0
     bridge._goal_lock = threading.RLock()
+    bridge._nav_execution_enabled = False
     bridge._nav_quiet_unknown = False
     bridge._last_drive_at = 12.0
     bridge._service_clients = {}

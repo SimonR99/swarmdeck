@@ -99,7 +99,11 @@ gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
 only an accepted, current route with an active status and fresh operator link
 can relay Nav2 output. Pending routes, cancellation, stop, and manual drive
 close the relay; manual drive and recovery still publish directly through the
-adapter. This adds one DDS hop after the smoother, not another smoothing stage.
+adapter. On sim and hardware, a terminal result that closes an open relay also
+publishes one zero velocity, so the driver cannot retain the last moving
+command while the smoother's delayed stop is blocked. An already closed relay
+does not publish another zero. This adds one DDS hop after the smoother, not
+another smoothing stage.
 Bring up the updated session launch and adapter together; a legacy Nav2 launch
 publishing directly to `cmd_vel` bypasses this gate. The generic Nav2 launch
 and hardware launch defaults are unchanged.

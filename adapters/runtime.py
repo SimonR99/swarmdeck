@@ -536,6 +536,23 @@ class AdapterGoalOwnershipMixin:
         """Close the velocity relay before ownership returns to a planner."""
         self._nav_execution_enabled = False
 
+    def _finish_goal_motion(self) -> None:
+        """Replace the last relayed velocity when a terminal result closes the gate.
+
+        The smoother's stop may arrive after the action result and be dropped
+        by the closed gate. Do not leave the driver holding its last velocity.
+        """
+        with self._goal_lock:
+            was_executing = self._nav_execution_enabled
+            self._hold_goal_motion()
+            if was_executing and self.pub_cmd is not None:
+                from geometry_msgs.msg import Twist
+
+                zero = Twist()
+                zero.linear.x = zero.linear.y = zero.linear.z = 0.0
+                zero.angular.x = zero.angular.y = zero.angular.z = 0.0
+                self.pub_cmd.publish(zero)
+
     def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
         """Cancel only the command owning ``expected_generation``."""
         with self._goal_lock:
