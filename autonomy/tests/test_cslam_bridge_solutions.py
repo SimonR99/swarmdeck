@@ -1268,3 +1268,301 @@ def test_an_unserializable_candidate_never_evicts_the_last_good_authority(
 
     message, cache = heartbeat(invalid, None, **kwargs)
     assert message["state"] == "resetting" and cache is None
+
+
+def event_bridge(module, monkeypatch):
+    bridge = object.__new__(module.Bridge)
+    bridge.pending_cloud = None
+    bridge.pending_cloud_since = 0.0
+    bridge.normalize_retry_s = 0.05
+    bridge.sensor_node = NS()
+    bridge.timers = []
+    bridge._shared_lock = threading.Lock()
+    bridge.capture_tf_lookup_misses = 0
+    bridge.capture_wakes = []
+    bridge.capture_ready = NS(trigger=lambda: bridge.capture_wakes.append(True))
+
+    class Timer:
+        def __init__(self, period, callback):
+            self.timer_period_ns = int(period * 1_000_000_000)
+            self.callback = callback
+            self.cancelled = False
+
+        @property
+        def period(self):
+            return self.timer_period_ns / 1_000_000_000
+
+        def cancel(self):
+            self.cancelled = True
+
+        def reset(self):
+            self.cancelled = False
+
+    def timer(node, period, callback):
+        handle = Timer(period, callback)
+        bridge.timers.append(handle)
+        return None, handle
+
+    monkeypatch.setattr(module, "create_steady_timer", timer)
+    _, bridge.normalize_retry_timer = timer(bridge, 0.05, bridge.normalize)
+    _, bridge.capture_retry_timer = timer(bridge, 0.5, bridge.flush_captures)
+    bridge.normalize_retry_timer.cancel()
+    bridge.capture_retry_timer.cancel()
+    bridge.get_logger = lambda: NS(warn=lambda *args, **kwargs: None)
+    return bridge
+
+
+def test_raw_cloud_normalizes_without_periodic_poll(bridge_module, monkeypatch):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    normalized = []
+    bridge.normalize = lambda: normalized.append(bridge.pending_cloud)
+    cloud = object()
+    bridge.raw_cloud(cloud)
+    assert normalized == [cloud]
+    assert len(bridge.timers) == 2 and all(t.cancelled for t in bridge.timers)
+
+
+def test_missing_tf_retries_only_while_pending_and_expires(bridge_module, monkeypatch):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    now = [10.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
+    bridge.base, bridge.odom_frame = "base", "odom"
+
+    def missing(*args):
+        raise bridge_module.TransformException()
+
+    bridge.tf = NS(lookup_transform=missing)
+    cloud = NS(header=NS(stamp=NS(sec=0, nanosec=0), frame_id="lidar"))
+    bridge.raw_cloud(cloud)
+    assert bridge.normalize_retry_timer.period == 0.05
+    first = bridge.normalize_retry_timer
+    now[0] += 0.05
+    first.callback()
+    assert bridge.normalize_retry_timer is first and not first.cancelled
+    assert bridge.normalize_retry_timer.period == 0.1
+    assert bridge.capture_tf_lookup_misses == 2
+    now[0] += bridge_module.AUTHORITY_SENSOR_TTL_S
+    bridge.normalize_retry_timer.callback()
+    assert bridge.pending_cloud is None
+    assert bridge.normalize_retry_timer.cancelled
+    assert all(timer.cancelled for timer in bridge.timers)
+
+
+def test_keyframe_join_flushes_on_events_and_arms_only_pending_deadline(
+    bridge_module, monkeypatch
+):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    now = [10.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
+    bridge.core = NS(mission_id="m", map_epoch=0)
+    bridge.clouds, bridge.odoms, bridge.pending_capture_since = {}, {}, {}
+    ready = [False]
+    consumed = []
+
+    def consume(seq):
+        if seq in bridge.clouds and seq in bridge.odoms and ready[0]:
+            bridge.clouds.pop(seq)
+            bridge.odoms.pop(seq)
+            bridge.pending_capture_since.pop(seq)
+            consumed.append(seq)
+
+    bridge.consume = consume
+    bridge.key_cloud(NS(mission_id="m", map_epoch=0, id=1, pointcloud="cloud"))
+    assert len(bridge.timers) == 2 and all(t.cancelled for t in bridge.timers)
+    bridge.key_odom(NS(mission_id="m", map_epoch=0, id=1, odom="odom"))
+    assert bridge.capture_retry_timer.period == bridge_module.RAW_CAPTURE_JOIN_GRACE_S
+    waiting = bridge.capture_retry_timer
+    ready[0] = True
+    # This is also invoked by the raw-capture guard condition on the peer executor.
+    bridge.flush_captures()
+    assert consumed == [1]
+    assert waiting.cancelled
+    assert bridge.capture_retry_timer.cancelled
+    bridge.flush_captures()
+    assert len(bridge.timers) == 2
+
+
+def test_tf_recovery_cancels_retry_even_for_parked_cloud(bridge_module, monkeypatch):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    now = [10.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
+    bridge.base, bridge.odom_frame = "base", "odom"
+    ready = [False]
+    transform = NS(translation=NS(x=0.0, y=0.0, z=0.0), rotation=NS(x=0, y=0, z=0, w=1))
+
+    def lookup(*args):
+        if not ready[0]:
+            raise bridge_module.TransformException()
+        return NS(transform=transform)
+
+    bridge.tf = NS(lookup_transform=lookup)
+    bridge.last_normalized_pose = (0, 0, 0, 0, 0, 0, 1)
+    bridge.last_normalized_at = 9.0
+    bridge.captures_skipped_parked = 0
+    bridge._shared_lock = threading.Lock()
+    cloud = NS(header=NS(stamp=NS(sec=0, nanosec=0), frame_id="lidar"))
+    bridge.raw_cloud(cloud)
+    retry = bridge.normalize_retry_timer
+    ready[0] = True
+    now[0] += 0.05
+    retry.callback()
+    assert bridge.pending_cloud is None
+    assert bridge.normalize_retry_timer.cancelled
+    assert retry.cancelled
+    assert bridge.captures_skipped_parked == 1
+    assert bridge.last_sensor_at == now[0]
+
+
+def test_raw_capture_join_deadline_preserves_grace_and_cleans_timer(
+    bridge_module, monkeypatch
+):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    now = [10.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
+    bridge._shared_lock = threading.Lock()
+    bridge.raw_capture_enabled = True
+    bridge.raw_captures, bridge.raw_capture_metadata = {}, {}
+    bridge.raw_capture_collisions = {}
+    bridge.raw_capture_source_reset = False
+    bridge.capture_calibrations = {}
+    bridge.core = NS(mission_id="m", map_epoch=0)
+    bridge.clouds, bridge.odoms, bridge.pending_capture_since = {}, {}, {}
+    bridge.dropped = 0
+    bridge.key_cloud(NS(mission_id="m", map_epoch=0, id=1, pointcloud="cloud"))
+    odom = NS(header=NS(stamp=NS(sec=3, nanosec=0)))
+    bridge.key_odom(NS(mission_id="m", map_epoch=0, id=1, odom=odom))
+    assert bridge.clouds and bridge.odoms
+    deadline = bridge.capture_retry_timer
+    now[0] += bridge_module.RAW_CAPTURE_JOIN_GRACE_S
+    deadline.callback()
+    assert not bridge.clouds and not bridge.odoms
+    assert not bridge.pending_capture_since
+    assert bridge.dropped == 1  # no calibration: existing fail-closed behavior
+    assert deadline.cancelled
+    assert bridge.capture_retry_timer.cancelled
+
+
+def test_tf_retry_never_schedules_beyond_sensor_freshness_limit(
+    bridge_module, monkeypatch
+):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: 12.8)
+    bridge.pending_cloud_since = 10.0
+    bridge.normalize_retry_s = 1.0
+    bridge._retry_normalize()
+    assert bridge.normalize_retry_timer.period == pytest.approx(0.2)
+
+
+def test_trimming_one_keyframe_cache_keeps_other_halfs_join_deadline(
+    bridge_module, monkeypatch
+):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    bridge.clouds = {seq: object() for seq in range(101)}
+    bridge.odoms = {0: object()}
+    bridge.pending_capture_since = {seq: 10.0 for seq in range(101)}
+    bridge.dropped = 0
+    bridge.consume(100)  # unmatched input still trims the overfull cloud cache
+    assert 0 not in bridge.clouds and 0 in bridge.odoms
+    assert bridge.pending_capture_since[0] == 10.0
+    assert bridge.dropped == 1
+
+
+@pytest.mark.parametrize("kind", ["normalize", "capture"])
+def test_capture_retry_reuses_timer_object(bridge_module, monkeypatch, kind):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: 10.0)
+    if kind == "normalize":
+        bridge.pending_cloud_since = 10.0
+        arm = bridge._retry_normalize
+        timer_name = "normalize_retry_timer"
+    else:
+        bridge.clouds, bridge.odoms = {1: object()}, {1: object()}
+        bridge.pending_capture_since = {1: 10.0}
+        bridge.consume = lambda seq: None
+        arm = bridge.flush_captures
+        timer_name = "capture_retry_timer"
+    arm()
+    timer = getattr(bridge, timer_name)
+    arm()
+    assert getattr(bridge, timer_name) is timer
+
+
+def test_bridge_init_has_no_periodic_capture_polls():
+    import ast
+
+    bridge = next(
+        node
+        for node in ast.parse(BRIDGE_SOURCE.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "Bridge"
+    )
+    init = next(
+        node for node in bridge.body if getattr(node, "name", None) == "__init__"
+    )
+    calls = [node for node in ast.walk(init) if isinstance(node, ast.Call)]
+    assert not [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "create_timer"
+    ]
+    callbacks = [
+        call.args[2].attr
+        for call in calls
+        if isinstance(call.func, ast.Name) and call.func.id == "create_steady_timer"
+    ]
+    assert sorted(callbacks) == ["flush_captures", "normalize", "snapshot"]
+    canceled = {
+        call.func.value.attr
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "cancel"
+        and isinstance(call.func.value, ast.Attribute)
+    }
+    assert {"normalize_retry_timer", "capture_retry_timer"} <= canceled
+
+
+def test_raw_capture_provenance_wakes_peer_executor(bridge_module, monkeypatch):
+    from autonomy.tests.test_capture_providers import raw_metadata
+
+    bridge = event_bridge(bridge_module, monkeypatch)
+    bridge.core = NS(capture_provider=NS(spec=NS(name="simulation")))
+    bridge.raw_capture_source_reset = False
+    bridge.raw_capture_source = None
+    bridge.raw_capture_metadata, bridge.raw_capture_collisions = {}, {}
+    bridge.raw_capture_provenance(NS(data=raw_metadata()))
+    assert bridge.raw_capture_metadata[123].provider == "simulation"
+    assert bridge.capture_wakes == [True]
+
+
+def test_normalized_cloud_wakes_peer_executor(bridge_module, monkeypatch):
+    import numpy as np
+
+    bridge = event_bridge(bridge_module, monkeypatch)
+    transform = NS(translation=NS(x=0.0, y=0.0, z=0.0), rotation=NS(x=0, y=0, z=0, w=1))
+    bridge.tf = NS(lookup_transform=lambda *args: NS(transform=transform))
+    bridge.base, bridge.odom_frame = "base", "odom"
+    bridge.last_normalized_pose, bridge.last_normalized_at = None, 0.0
+    bridge.raw_capture_enabled = False
+    bridge.max_range, bridge.peer_mask = 40.0, None
+    bridge.capture_calibrations, bridge.normalized_count = {}, 0
+    monkeypatch.setattr(
+        bridge_module,
+        "transform_pose",
+        lambda t: NS(position=t.translation, orientation=t.rotation),
+    )
+    monkeypatch.setattr(bridge_module, "Header", NS)
+    monkeypatch.setattr(bridge_module, "Odometry", lambda: NS(pose=NS(pose=None)))
+    points = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    monkeypatch.setattr(
+        bridge_module.point_cloud2, "read_points_numpy", lambda *a, **k: points
+    )
+    monkeypatch.setattr(
+        bridge_module.point_cloud2, "create_cloud_xyz32", lambda h, p: NS(points=p)
+    )
+    published = []
+    bridge.cloud_pub = NS(publish=published.append)
+    bridge.odom_pub = NS(publish=lambda msg: None)
+    cloud = NS(header=NS(stamp=NS(sec=3, nanosec=0), frame_id="lidar"))
+    bridge.raw_cloud(cloud)
+    assert bridge.normalized_count == 1
+    np.testing.assert_array_equal(published[0].points, points)
+    assert bridge.capture_wakes == [True]
