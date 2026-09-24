@@ -25,6 +25,37 @@ cannot share `/dev/shm`. Override `FASTRTPS_DEFAULT_PROFILES_FILE` with its moun
 path for such probes; `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` alone does not override
 an XML profile with `useBuiltinTransports=false`.
 
+## Per-robot reset and forced planner stops
+
+Unlike a fleet reset, a per-robot reset keeps sim's shared `/dev/shm` alive.
+The peer stop has a five-second grace period, and MGG's planner supervisor can
+SIGKILL its process group after three seconds. Either forced stop can leave
+Fast DDS segments/ports behind. The short-lived `robot_reset.py` quiesce and
+readiness probes therefore explicitly use the UDP-only XML.
+
+The host reset supervisor runs `fastdds shm clean` in sim after each acknowledged
+MGG stop (the acknowledgement does not say whether SIGKILL was needed) and after
+each peer stop. Each attempt is bounded to three seconds, within the reset's
+remaining deadline, including an in-container timeout. Failures are ignored;
+results are logged at most once per 30 seconds per outcome. Fast DDS 2.14.6's
+cleaner checks file locks (`flock`), retaining live owners even in another PID
+namespace; it does not guess ownership from process IDs or delete all SHM files.
+
+MGG stops outside this host reset path still need mitigation in its own
+supervisor: allow more graceful shutdown time and/or perform bounded,
+best-effort `fastdds shm clean` after killing the owned process group. That
+separate supervisor change is pending controller integration. Do not replace
+lock-aware cleanup with `rm /dev/shm/fastrtps*`.
+
+Live leak check: with the same fleet running, record `du -sh /dev/shm` and
+`find /dev/shm -maxdepth 1 -name 'fastrtps_*' | wc -l` inside sim. Run **N=10**
+per-robot resets serially (wait for readiness after each, without recreating
+sim), then repeat both measurements. Check after each reset too: usage/file
+counts should return to a bounded steady level, not grow with reset count.
+Repeat while exercising a forced planner stop, and inspect cleanup warnings.
+Check cloud/image delivery and other robots throughout, to detect accidental
+removal of a live participant's resources.
+
 ## Simulation static mounts
 
 `session.launch.py` starts one `sensor_mounts` process for the whole fleet,

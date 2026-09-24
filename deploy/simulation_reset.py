@@ -172,6 +172,7 @@ class Supervisor:
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
         self._status_lock = Lock()
+        self._shm_cleanup_log_times: dict[bool, float] = {}
         self.robot_services = {
             robot: f"peer{index}" for index, robot in enumerate(robot_ids or [])
         }
@@ -463,6 +464,41 @@ class Supervisor:
             timeout=self.remaining(deadline),
         )
 
+    def clean_shm(self, environment: dict, deadline: float) -> None:
+        """Best effort: Fast DDS removes only objects without live flock owners."""
+        completed = False
+        try:
+            result = self.robot_command(
+                [
+                    "exec",
+                    "-T",
+                    "sim",
+                    "timeout",
+                    "--kill-after=1",
+                    "2",
+                    "bash",
+                    "-lc",
+                    "source /opt/ros/jazzy/setup.bash && exec fastdds shm clean",
+                ],
+                environment,
+                min(deadline, time.monotonic() + 3),
+            )
+            completed = True
+            detail = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
+            detail = str(exc)
+        # A missing tool/daemon must not fail reset or flood the supervisor log.
+        now = time.monotonic()
+        with self._status_lock:
+            previous = self._shm_cleanup_log_times.get(completed, float("-inf"))
+            if now - previous >= 30:
+                self._shm_cleanup_log_times[completed] = now
+                outcome = "completed" if completed else "failed (ignored)"
+                print(
+                    f"DDS SHM cleanup {outcome}: {' '.join(detail.split())[:512]}",
+                    file=sys.stderr,
+                )
+
     def planner_state(self, request: dict, state: str, deadline: float) -> None:
         directory = self.root / "robots" / request["robot_id"]
         atomic_json(
@@ -522,6 +558,8 @@ class Supervisor:
             [
                 "exec",
                 "-T",
+                "-e",
+                "FASTRTPS_DEFAULT_PROFILES_FILE=/app/deploy/dds/fastdds_udp_only.xml",
                 "mgg",
                 "bash",
                 "-lc",
@@ -570,6 +608,8 @@ class Supervisor:
                 # End only this robot's planner publishers before cancelling
                 # its old Nav2 actions; no missing PCI service can block recovery.
                 self.planner_state(request, "stopped", deadline)
+                # The acknowledgement does not distinguish graceful vs SIGKILL.
+                self.clean_shm(environment, deadline)
                 if not status.get("quiesced"):
                     self.robot_ros(request, "quiesce", environment, deadline)
                     status = self.robot_status(
@@ -578,6 +618,7 @@ class Supervisor:
                 self.robot_command(
                     ["stop", "--timeout", "5", service], environment, deadline
                 )
+                self.clean_shm(environment, deadline)
                 status = self.robot_status(request, status, "starting")
             if status["phase"] == "starting":
                 # Idempotent across supervisor crashes. Unlike restart or
