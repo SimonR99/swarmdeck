@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { CanvasViewport, type CanvasView } from './canvasViewport';
   import { CanvasInteraction, qualifiedNavigateTargets } from './canvasInteraction';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
@@ -8,7 +8,6 @@
     RasterRobotProjectionCache,
     RasterTrailProjectionCache
   } from './mapFrames';
-  import { localRobotOf, membersOnMap } from '../map/mapMembership';
   import {
     Box,
     Compass,
@@ -35,6 +34,7 @@
   });
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { mapRobots } from '$lib/stores/mapRobots.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import { session } from '$lib/stores/session.svelte';
   import { trails } from '$lib/stores/trails.svelte';
@@ -73,7 +73,7 @@
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
-  // Open the tactical map directly; switching back to 2D leaves replica mode.
+  // Open the tactical map directly; both dimensions retain the same source.
   // Preserve the explicit 2D URL override for lightweight saved views.
   let show3D = $state(
     typeof location === 'undefined' || new URLSearchParams(location.search).get('view') !== '2d'
@@ -103,6 +103,7 @@
       if (seenMapEpochs.get(robotId) === epoch) continue;
       seenMapEpochs.set(robotId, epoch);
       trails.clear(robotId);
+      mapRobots.clear();
     }
   });
 
@@ -123,11 +124,8 @@
 
   /** The robots this map has, shared with the 3D scene, before the raster places them. */
   function membersOfMap() {
-    return membersOnMap(fleet.robots, {
-      localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
-      members: mapStore.globalMapMembers,
-      isEnabled: (id) => fleet.isEnabled(id)
-    });
+    const ids = mapRobots.ids;
+    return fleet.robots.filter((robot) => ids.includes(robot.robot_id));
   }
 
   function robotsOnMap() {
@@ -365,6 +363,7 @@
   $effect(() => {
     // Everything the canvas is drawn from.
     void show3D;
+    void mapRobots.ids;
     void mapStore.revision;
     void mapStore.seq;
     void mapStore.ready;
@@ -419,6 +418,30 @@
   // The map's HTTP polling: one timer for the raster catalogue, the merge
   // status and the raster image, each at its own cadence, none of it while the
   // tab is hidden and no raster image while the 3D view is covering the canvas.
+  // One live-frame poll survives dimension switches, including a 2D-only URL.
+  $effect(() => {
+    replicaTactical.selection;
+    replicaTactical.preference;
+    untrack(() => {
+      mapRobots.select();
+      if (!document.hidden) mapRobots.refresh();
+    });
+  });
+  onMount(() => {
+    const tick = () => { if (!document.hidden) mapRobots.refresh(); };
+    const timer = window.setInterval(tick, 1000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+      mapRobots.dispose();
+    };
+  });
+  $effect(() => {
+    mapStore.selectedRasterScope;
+    if (!show3D) untrack(() => void mapStore.refreshGlobalOptimizedView({ indexLoaded: true }));
+  });
+
   const mapPoll = new MapPollScheduler();
   $effect(() => {
     const visible = !show3D;
@@ -556,7 +579,7 @@
 </script>
 
 <div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-panel] border border-transparent bg-bg">
-  <ReplicaCatalogueAuto enabled={show3D} />
+  <ReplicaCatalogueAuto />
   <!--
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet

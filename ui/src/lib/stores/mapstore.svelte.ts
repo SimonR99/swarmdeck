@@ -8,6 +8,9 @@ import {
   type OptimizedScope
 } from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
+import { replicaCatalogue } from './replicaCatalogue.svelte';
+import { replicaTactical } from './replicaTactical.svelte';
+import { automaticCatalogueEntry } from '$lib/components/replicas/replicaCatalogue';
 import { keepIfUnchanged } from './sameFieldValue';
 import { globalMapMembers } from '$lib/components/map/mapMembership';
 import type { NetworkPatch, MapStatus, Pose, SlamGraph } from '$lib/types/protocol';
@@ -146,19 +149,29 @@ function clearNetworkLayer(robotId: string | null = null) {
   else networkLayers.delete(robotId);
 }
 
-/**
- * The raster on show: a robot's own map (`robot:<id>`, its component in its
- * own frame) in local mode, the fleet map otherwise. A local view never falls
- * back to a fleet raster: showing the global product under a local label is
- * worse than waiting for the selected robot's own publication.
- */
+/** Rank once for both dimensions, even before a raster has been published. */
+function selectedGlobalScope(): string | null {
+  return selectGlobalOptimizedScope(state.optimizedScopes)?.scope ??
+    (replicaCatalogue.catalogue
+      ? automaticCatalogueEntry(replicaCatalogue.catalogue, null, true, 2)?.component_id ?? null
+      : null);
+}
+
+/** Local never falls back to a fleet raster; inspection never crosses missions. */
 function shownScope(): OptimizedScope | undefined {
+  const inspection = replicaTactical.preference === 'component' ? replicaTactical.selection : null;
+  if (inspection) {
+    // Raster scopes are current-mission products, never historical geometry.
+    if (inspection.sessionId !== replicaCatalogue.catalogue?.active_session_id) return undefined;
+    const scope = inspection.scope === 'fleet' ? inspection.componentId : robotOptimizedScope(inspection.robotId);
+    return state.optimizedScopes.find((entry) => entry.scope === scope);
+  }
   if (state.viewMode === 'local' && state.viewRobot) {
     return state.optimizedScopes.find(
       (scope) => scope.scope === robotOptimizedScope(state.viewRobot!)
     );
   }
-  return selectGlobalOptimizedScope(state.optimizedScopes);
+  return state.optimizedScopes.find((entry) => entry.scope === selectedGlobalScope());
 }
 
 export const mapStore = {
@@ -176,6 +189,9 @@ export const mapStore = {
   get showingOptimizedGrid() { return true; },
   get optimizedScopes() { return state.optimizedScopes; },
   get globalOptimizedScope() { return state.globalOptimizedScope; },
+  /** Shared selection even while its raster is still loading or hidden. */
+  get selectedGlobalScope() { return selectedGlobalScope(); },
+  get selectedRasterScope() { return shownScope()?.scope ?? null; },
   get globalOptimizedRobots(): readonly string[] | undefined {
     const scope = state.globalOptimizedScope;
     return scope ? state.optimizedScopes.find((entry) => entry.scope === scope)?.robots : undefined;
@@ -184,7 +200,10 @@ export const mapStore = {
   get globalMapMembers(): readonly string[] | null {
     return globalMapMembers({
       showingOptimizedGrid: this.showingOptimizedGrid,
-      optimizedRobots: this.globalOptimizedRobots,
+      optimizedRobots: state.optimizedScopes.find((entry) => entry.scope === selectedGlobalScope())?.robots ??
+        replicaCatalogue.catalogue?.components.find((entry) =>
+          entry.session_id === replicaCatalogue.catalogue?.active_session_id &&
+          entry.component_id === selectedGlobalScope())?.robot_ids,
       transforms: state.info?.transforms,
       globalMembers: state.status?.global_members
     });
@@ -360,6 +379,10 @@ export const mapStore = {
         return;
       }
       const seqChanged = next.seq !== undefined && next.seq !== state.seq;
+      if (next.scope !== previous && state.ready) {
+        clearGrid();
+        state.revision++;
+      }
       if (next.scope !== previous || seqChanged || !state.ready) await this.loadGlobalOptimized();
     } finally {
       globalRefreshInFlight = false;

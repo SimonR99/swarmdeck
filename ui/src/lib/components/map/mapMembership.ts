@@ -1,12 +1,14 @@
 import type { FrameTransforms } from './overlayFrame.ts';
+import { liveReplicaMatchesSelection, liveRobotFreshness, type LiveReplicaSelection } from '../map3d/liveReplicaFrame.ts';
+import type { ReplicaTacticalSelection } from '../map3d/replicaTactical.ts';
 
 /**
  * Which robots a map draws: the one rule the 2D canvas and the 3D scene share.
  *
  * A robot is drawn when it is enabled and belongs to what the map shows. A
  * local view belongs to one robot. A global view shows the members of the
- * displayed map (`globalMapMembers`), the same for both views, and every robot
- * a live replica frame carries (`members: null`). With no merge information at
+ * displayed map (`globalMapMembers`), the same for both views. Live replicas
+ * additionally require coherent, fresh telemetry. With no merge information at
  * all, a global view shows every enabled robot: hiding robots from the
  * operator is the worse failure.
  */
@@ -30,6 +32,38 @@ export function membersOnMap<T extends { robot_id: string }>(
   membership: MapMembership
 ): T[] {
   return candidates.filter((robot) => isOnMap(robot.robot_id, membership));
+}
+
+export interface MapReplicaRegistration {
+  frameId: string;
+  solutionOrder: unknown;
+}
+
+/** One qualified member list for both dimensions, before raster placement. */
+export function qualifiedMapRobotIds(
+  candidates: readonly { robot_id: string }[],
+  source: MapMembership & {
+    selection: ReplicaTacticalSelection | null;
+    readOnly: boolean;
+    live: LiveReplicaSelection | null;
+    registration: MapReplicaRegistration | null;
+    now: number;
+  }
+): string[] {
+  if (source.readOnly) return [];
+  let members = membersOnMap(candidates, source);
+  if (source.selection) {
+    const { live, registration } = source;
+    if (!live || !registration ||
+        !liveReplicaMatchesSelection(live, source.selection, registration.solutionOrder) ||
+        live.frame.frame_id !== registration.frameId) return [];
+    const age = (source.now - live.receivedAt) / 1000;
+    const fresh = new Set(live.frame.robots
+      .filter((robot) => liveRobotFreshness(robot, age).pose)
+      .map((robot) => robot.robot_id));
+    members = members.filter((robot) => fresh.has(robot.robot_id));
+  }
+  return members.map((robot) => robot.robot_id);
 }
 
 /** The robot a map view belongs to: its robot in local mode, else none. */

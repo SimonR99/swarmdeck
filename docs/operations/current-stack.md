@@ -139,6 +139,22 @@ planner grid directly, without constructing an OctoMap tree. Independent
 raw-cloud mapping is disabled in MOLA mode; OctoMap belongs to the explicit
 legacy cloud backend.
 
+## Dashboard map membership
+
+The 2D raster and all 3D rendering modes share one Global scope: the largest
+verified component (then raster area and name break ties), falling back to the
+deployment composite. Selecting a robot does not switch Global to its smaller,
+disconnected component; use that robot's Local view instead. Both dimensions
+use the same enabled, scope-qualified robot list and live-frame freshness
+budget. Expired telemetry hides the robot in both, even after switching to 2D.
+A raster that cannot place an otherwise qualified robot still names it under
+**Not on this raster** rather than guessing its position.
+
+Explicit read-only or historical replica selections have no robot overlays in
+either dimension until **Live map** is restored. The raster follows the selected
+current-mission component where available; historical replicas have no matching
+current raster. A dimension switch alone does not return to live mode.
+
 ## Dashboard robot state
 
 The server sends each dashboard (`WS /ws`) a full snapshot when it connects: a
