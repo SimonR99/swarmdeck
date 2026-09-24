@@ -7,8 +7,23 @@ import {
 
 export type { FrameTransforms };
 
-export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {
+export function hasQualifiedRasterFrame(
+  robot: Pick<RobotState, 'robot_id' | 'navigation_transform'>,
+  frames: FrameTransforms
+): boolean {
   return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
+}
+
+/**
+ * Map members the displayed raster has no transform for. The 3D scene draws
+ * them but the canvas cannot, so it names them rather than dropping them
+ * silently.
+ */
+export function membersRasterCannotPlace(
+  members: readonly Pick<RobotState, 'robot_id' | 'navigation_transform'>[],
+  frames: FrameTransforms
+): string[] {
+  return members.filter((robot) => !hasQualifiedRasterFrame(robot, frames)).map((robot) => robot.robot_id);
 }
 
 /**

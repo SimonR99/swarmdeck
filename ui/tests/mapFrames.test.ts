@@ -6,6 +6,7 @@ import {
 } from '../src/lib/components/map3d/mapFrames.ts';
 import {
   hasQualifiedRasterFrame,
+  membersRasterCannotPlace,
   projectRobotToRaster,
   projectTrailToRaster,
   rasterProjection,
@@ -209,6 +210,20 @@ test('nothing known about the global map places every robot on it', () => {
     globalMapMembers({ showingOptimizedGrid: true, optimizedRobots: null, transforms: {}, globalMembers: null }),
     null
   );
+});
+
+test('the canvas names the members its raster cannot place, so the operator sees the gap', () => {
+  // The 3D scene draws these robots; the 2D canvas has no transform to put
+  // them on its raster, so it lists them instead of dropping them silently.
+  const origin = { x: 0, y: 0, yaw: 0 };
+  const members = [
+    { ...packet(origin, origin), robot_id: 'robot_0' },
+    { ...packet(origin, origin), robot_id: 'robot_2' },
+    { ...packet(origin, origin), robot_id: 'robot_3', navigation_transform: undefined }
+  ];
+  assert.deepEqual(membersRasterCannotPlace(members, rasterFrames), ['robot_2']);
+  assert.deepEqual(membersRasterCannotPlace(members, undefined), ['robot_0', 'robot_2']);
+  assert.deepEqual(membersRasterCannotPlace([], rasterFrames), []);
 });
 
 test('network heatmaps require transform provenance from the displayed raster header', () => {
