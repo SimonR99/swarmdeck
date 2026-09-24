@@ -4,8 +4,9 @@
 `deploy/docker/Dockerfile.cslam` order; do not apply them alphabetically.
 
 - `cslam-unchanged-graph.patch` still collects peer graphs, but skips the solver
-  when the complete aggregate factors (including priors), initial poses, map
-  epochs and origin exactly match a successful solve. A remote-only change
+  when the collected measurement factors, initial poses, map epochs and origin
+  exactly match a successful solve. Feedback-derived anchor/attitude priors are
+  added only after comparing this immutable key. A remote-only change
   invalidates the cache. Failed solves are retried. Unchanged rounds publish the
   cached successful result with a new solution clock, preserving deferred adoption
   and restarted-consumer recovery. The bridge authority heartbeat is unchanged.
