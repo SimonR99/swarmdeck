@@ -135,6 +135,27 @@ def test_stale_follow_path_result_cannot_publish_failure_reason(sim_module):
     assert getattr(bridge, "_nav_failure_reason", None) is None
 
 
+def test_sim_reports_controller_acceptance_and_terminal_to_exploration(sim_module):
+    bridge = _bridge(sim_module)
+    bridge.exploration = MagicMock()
+    bridge._goal_generation = 6
+    handle = MagicMock()
+    handle.accepted = True
+    response_future = MagicMock()
+    response_future.result.return_value = handle
+
+    bridge._goal_response(response_future, generation=6)
+
+    bridge.exploration.controller_accepted.assert_called_once_with(6)
+    bridge.exploration.controller_finished.assert_not_called()
+    outcome = SimpleNamespace(
+        status=sim_module.GoalStatus.STATUS_SUCCEEDED, result=SimpleNamespace()
+    )
+    bridge._goal_result(_ImmediateFuture(outcome), 6, handle)
+    assert bridge.nav_status == "succeeded"
+    bridge.exploration.controller_finished.assert_called_once_with()
+
+
 def _active_goal_cancel_state(sim_module):
     """Return a live goal plus callbacks needed to drive cancellation races."""
     bridge = _bridge(sim_module)

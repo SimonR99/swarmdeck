@@ -86,6 +86,8 @@ def test_sim_controller_accepts_platform_steps_for_explore_and_navigation(
 
     for call, platform in zip(factory.call_args_list, platforms, strict=True):
         step = sim_module.robot_spec(platform).max_step_height
+        # Simulated intentions never leave this process; hardware keeps 0.5 s.
+        assert call.kwargs["exploration_config"]["reservation_settle_s"] == 0.15
         for key in ("exploration_config", "planning_config"):
             config = call.kwargs[key]
             limits = {

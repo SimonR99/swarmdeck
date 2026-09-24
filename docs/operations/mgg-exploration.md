@@ -86,6 +86,24 @@ stale, partial, or wrong-mission authority cannot refresh it. A component change
 a materially changed component-to-navigation transform, an expired authority,
 or a conflicting lower-cost lease still invalidates it. Reservations use bounded
 receipt-relative leases and are renewed while the full path executes.
+A new claim is granted only after `exploration.reservation_settle_s` (default
+0.5 s, bounded to 0 to 5 s) without hearing a conflicting peer claim; the path
+is dispatched the moment that interval ends. The simulation sets 0.15 s, since
+its robots' intentions are published and received by one process. A claim that
+arrives after the grant still revokes it and stops the path.
+
+The adapter logs one `exploration timing:` line per path at info level, when
+the robot has moved 0.10 m from where it stood when the path was submitted, or
+when the path ends before that (superseded, rejected, stopped, controller
+terminal). Times are monotonic seconds from the path's arrival, taken before
+it is validated: `->validated` (path checks done), `->granted` (peer
+reservation), `->sent` (submitted to the controller), `->accepted` (the
+controller accepted it; the simulation bridge reports this) and `->moved`
+(sampled on the 0.2 s exploration tick, so an upper bound). `age` is the path's
+age on the node clock at arrival, `replan->path` the planner round trip and
+`terminal->replan` the delay from the previous controller result to the replan
+request. At most one line a second is written; skipped lines are counted in the
+next. A lost reservation's warning says how long after its grant it was lost.
 
 Each peer bridge sends its map authority every second. While a fresh authority
 cannot be built (stale sensor input, a failed transform, a lagging product, or a

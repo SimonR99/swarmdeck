@@ -14,6 +14,7 @@ import pytest
 
 from adapters.exploration import (
     MggExploration,
+    PlanTiming,
     is_physical_no_progress_failure,
     planner_path,
 )
@@ -116,6 +117,10 @@ def rig():
     explorer.stop_deadline = 0
     explorer.deadline = 0
     explorer.last_link = time.monotonic()
+    explorer.timing = PlanTiming()
+    explorer.wake_lock = RLock()
+    explorer.wake_due = None
+    explorer.wake_timer = None
     explorer.frame = "map"
     explorer.planar_tolerance_m = 0.05
     explorer.max_inclination_rad = math.radians(30.0)
@@ -1203,3 +1208,203 @@ def test_peer_rejection_after_arrival_preserves_waiting_goal_ownership():
     assert bridge._goal_generation == generation
     assert explorer.completed_goal_generation == generation
     bridge.cancel_goal.assert_not_called()
+
+
+def test_plan_timing_reports_each_stage_once_per_path():
+    now = [10.0]
+    timing = PlanTiming(clock=lambda: now[0])
+    timing.controller_finished()
+    now[0] = 10.1
+    timing.requested()
+    now[0] = 10.3
+    assert timing.received(7, 0.004) is None
+    now[0] = 10.8
+    timing.mark("granted")
+    now[0] = 10.81
+    timing.sent({"x": 1.0, "y": 1.0})
+    now[0] = 10.82
+    timing.mark("accepted")
+    now[0] = 11.2
+    assert timing.observe({"x": 1.05, "y": 1.05}) is None  # 0.07 m: parked
+    now[0] = 11.4
+    line = timing.observe({"x": 1.1, "y": 1.0})
+    assert line == (
+        "exploration timing: path 7 at t=10.300; age 0.004 s; "
+        "terminal->replan 0.100 s; replan->path 0.200 s; ->granted 0.500 s; "
+        "->sent 0.510 s; ->accepted 0.520 s; ->moved 1.100 s; moving"
+    )
+    assert timing.observe({"x": 5.0, "y": 5.0}) is None
+    assert timing.finish("controller succeeded") is None
+    assert timing.since_grant() == pytest.approx(0.6)
+
+
+def test_plan_timing_lines_are_rate_limited_and_count_suppressions():
+    now = [0.0]
+    timing = PlanTiming(clock=lambda: now[0])
+    timing.received(1, None)
+    assert timing.finish("stopped").endswith("; stopped")
+    now[0] = 0.5
+    timing.received(2, None)
+    assert timing.received(3, None) is None  # path 2 superseded within 1 s
+    now[0] = 1.5
+    line = timing.finish("reservation rejected")
+    assert line.startswith("exploration timing: path 3 ")
+    assert line.endswith("reservation rejected; 1 earlier line(s) suppressed")
+
+
+def test_exploration_logs_one_timing_line_when_the_robot_moves():
+    bridge, explorer = rig()
+    pose = {"x": 0.0, "y": 0.0}
+    bridge._route_progress_pose = Mock(side_effect=lambda frame: dict(pose))
+    info = bridge.node.get_logger.return_value.info
+    explorer.start()
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    bridge._route_progress_pose.assert_called_with("map")
+    explorer.controller_accepted(bridge._goal_generation)
+    explorer.tick()
+    assert not any("exploration timing" in str(c) for c in info.call_args_list)
+    pose["x"] = 0.2
+    explorer.tick()
+    explorer.tick()
+    lines = [c.args[0] for c in info.call_args_list if "timing" in c.args[0]]
+    assert len(lines) == 1
+    assert "->sent" in lines[0] and "->accepted" in lines[0]
+    assert "->moved" in lines[0] and lines[0].endswith("; moving")
+
+
+class WakeTimer:
+    def __init__(self):
+        self.timer_period_ns = None
+        self.resets = 0
+        self.cancels = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def cancel(self):
+        self.cancels += 1
+
+
+class SettlingCoordinator(Coordinator):
+    def __init__(self, *decisions, settle_remaining=0.3):
+        super().__init__(*decisions)
+        self.settle_remaining = settle_remaining
+
+    def settle_remaining_s(self):
+        return self.settle_remaining
+
+
+def test_pending_reservation_dispatches_at_its_settle_deadline(monkeypatch):
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    explorer.coordinator = SettlingCoordinator("pending", "granted")
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.on_path(path())
+    bridge.follow_path.assert_not_called()
+    assert explorer.wake_due == pytest.approx(100.3)
+    assert timer.timer_period_ns == 300_000_000 and timer.resets == 1
+
+    explorer.wake(0.5)  # A later wake keeps the earlier deadline.
+    assert explorer.wake_due == pytest.approx(100.3) and timer.resets == 1
+
+    now[0] = 100.1
+    explorer._on_wake()  # Early (a coarse fallback period): nothing yet.
+    bridge.follow_path.assert_not_called()
+    assert timer.cancels == 0
+
+    now[0] = 100.3
+    explorer._on_wake()
+    bridge.follow_path.assert_called_once()
+    assert explorer.status == "exploring"
+    assert explorer.wake_due is None and timer.cancels == 1
+
+
+def test_settled_or_unassigned_reservation_does_not_arm_a_wake():
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    explorer.coordinator = SettlingCoordinator(
+        "pending", "pending", settle_remaining=None
+    )
+    explorer.start()
+    explorer.on_path(path())
+    explorer.tick()
+    assert timer.resets == 0 and explorer.wake_due is None
+    bridge.follow_path.assert_not_called()
+
+
+def test_controller_success_replans_on_the_terminal_event(monkeypatch):
+    bridge, explorer = rig()
+    explorer.wake_timer = timer = WakeTimer()
+    now = [50.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.start_client.call_async.return_value.set_result(NS(success=True))
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    explorer.replan_client.call_async.assert_not_called()
+
+    bridge.nav_status = "succeeded"
+    explorer.controller_finished()
+    assert timer.resets == 1 and timer.timer_period_ns == 1_000_000
+    now[0] = 50.001
+    explorer._on_wake()
+    explorer.replan_client.call_async.assert_called_once()
+    assert explorer.executing_plan is None and explorer.status == "waiting"
+
+
+def test_controller_failure_wakes_for_the_recovery_backoff(monkeypatch):
+    bridge, explorer = rig()
+    explorer.controller_replan_backoff_s = 0.25
+    explorer.wake_timer = timer = WakeTimer()
+    now = [50.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    explorer.start()
+    explorer.start_client.call_async.return_value.set_result(NS(success=True))
+    explorer.on_path(path())
+
+    bridge.nav_status = "failed"
+    explorer.controller_finished()
+    now[0] = 50.001
+    explorer._on_wake()  # Records the failure and arms the backoff wake.
+    explorer.replan_client.call_async.assert_not_called()
+    assert explorer.wake_due == pytest.approx(50.251)
+    assert timer.timer_period_ns == 250_000_000
+
+    now[0] = 50.251
+    explorer._on_wake()
+    explorer.replan_client.call_async.assert_called_once()
+    assert explorer.controller_replan_attempts == 1
+
+
+def test_path_validation_time_is_its_own_stage_not_planner_round_trip(monkeypatch):
+    import adapters.exploration as exploration
+
+    bridge, explorer = rig()
+    now = [20.0]
+    explorer.timing = PlanTiming(clock=lambda: now[0])
+    pose = {"x": 0.0, "y": 0.0}
+    bridge._route_progress_pose = Mock(side_effect=lambda frame: dict(pose))
+    info = bridge.node.get_logger.return_value.info
+    validate = exploration.planner_path
+
+    def slow_planner_path(*args, **kwargs):
+        now[0] += 0.3  # Validation of a long path takes 0.3 s.
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(exploration, "planner_path", slow_planner_path)
+    explorer.start()  # The start request is the replan request for timing.
+    now[0] = 20.2
+    explorer.on_path(path())
+    bridge.follow_path.assert_called_once()
+    pose["x"] = 0.2
+    explorer.tick()
+
+    lines = [c.args[0] for c in info.call_args_list if "timing" in c.args[0]]
+    assert len(lines) == 1
+    assert "at t=20.200" in lines[0]
+    assert "replan->path 0.200 s" in lines[0]
+    assert "->validated 0.300 s" in lines[0]
+    assert "->sent 0.300 s" in lines[0]
