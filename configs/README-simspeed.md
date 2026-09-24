@@ -53,7 +53,8 @@ python3 argos/benchmark_simspeed.py --output /tmp/simspeed-results
 
 The script refuses other hostnames and any existing `swarmdeck` containers.
 It builds once, then alternates baseline / all-robot 5 Hz / parked-only 2 Hz
-three times, reversing the two options in the middle round. Each fresh launch
+three times in a Latin-square rotation, placing each option first, middle, and
+last once. Each fresh launch
 warms up for 60 wall seconds before a 60-second `/clock` probe. The fleet is
 parked; this is a renderer-throughput comparison, not exploration acceptance.
 It stops its own stack after every window and on errors or interruption.

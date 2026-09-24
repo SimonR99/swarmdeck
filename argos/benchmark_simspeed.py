@@ -40,6 +40,14 @@ def benchmark_config(source: str, option: str) -> str:
     return source
 
 
+def benchmark_order(rounds: int) -> list[str]:
+    return [
+        option
+        for round_index in range(rounds)
+        for option in OPTIONS[round_index % 3 :] + OPTIONS[: round_index % 3]
+    ]
+
+
 def host_sample() -> dict:
     memory = {}
     for line in Path("/proc/meminfo").read_text().splitlines():
@@ -150,13 +158,7 @@ def main(argv=None) -> int:
     source = (REPO / "configs/4robot_subt_finals.yaml").read_text()
     probe = runpy.run_path(str(REPO / "scripts/profile_stack.py"))["real_time_factor"]
     launcher = [sys.executable, str(REPO / "deploy/simulation_launch.py")]
-    order = [
-        option
-        for round_index in range(args.rounds)
-        for option in (
-            OPTIONS if round_index % 2 == 0 else ("baseline", "parked2", "lidar5")
-        )
-    ]
+    order = benchmark_order(args.rounds)
     (args.output / "plan.json").write_text(
         json.dumps(
             {

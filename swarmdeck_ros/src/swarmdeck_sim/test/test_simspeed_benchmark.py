@@ -55,3 +55,21 @@ def test_benchmark_summarizes_gpu_utilization_and_rejects_missing_samples(tmp_pa
     samples.write_text("failed to initialize NVML\n")
     with pytest.raises(RuntimeError, match="GPU utilization"):
         benchmark["gpu_summary"](samples)
+
+
+def test_benchmark_order_balances_every_position_over_three_rounds():
+    benchmark = runpy.run_path(str(SCRIPT))
+    order = benchmark["benchmark_order"](3)
+    assert order == [
+        "baseline",
+        "lidar5",
+        "parked2",
+        "lidar5",
+        "parked2",
+        "baseline",
+        "parked2",
+        "baseline",
+        "lidar5",
+    ]
+    for position in range(3):
+        assert set(order[position::3]) == {"baseline", "lidar5", "parked2"}
