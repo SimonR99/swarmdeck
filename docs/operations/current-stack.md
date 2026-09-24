@@ -144,8 +144,9 @@ legacy cloud backend.
 The server sends each dashboard (`WS /ws`) a full snapshot when it connects: a
 `fleet_change` message with every robot's complete `robot_state`, then the
 session, settings, review and alert state (`gui_snapshot` in
-`server/swarmdeck_server/api/app.py`). After that, the 5 Hz state loop sends a
-robot's `robot_state` only when it has changed, plus a keep-alive of the
+`server/swarmdeck_server/api/gui_socket.py`). After that, the 5 Hz state loop
+in `server/swarmdeck_server/api/state.py` sends a robot's `robot_state` only
+when it has changed, plus a keep-alive of the
 unchanged state once a second per robot (`STATE_KEEPALIVE_S`). Change detection
 ignores clocks (`t_mono`, `t_wall`, `t_sess`, `unattended_s` and
 `live_mapping.authority_age_s`) and float noise (floats are compared rounded
