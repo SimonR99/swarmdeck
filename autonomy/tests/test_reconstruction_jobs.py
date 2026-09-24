@@ -15,7 +15,7 @@ import uuid
 import numpy as np
 import pytest
 
-from autonomy.reconstruction import (
+from tools.reconstruction import (
     DurableJobRunner,
     InputManifest,
     JobState,
@@ -410,7 +410,7 @@ def test_separate_cli_cancel_and_restart_do_not_reset_live_worker(tmp_path):
         [
             sys.executable,
             "-m",
-            "autonomy.reconstruction",
+            "tools.reconstruction",
             "cancel",
             "--store",
             str(tmp_path / "jobs"),

@@ -148,6 +148,7 @@ the trusted network.
 | [`autonomy/`](autonomy/) | ROS-free capture, peer coordination, mapping products, and replication contracts |
 | [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, onboard peer runtime (`swarmdeck_peer`), mapping, navigation, and bring-up packages |
 | [`configs/`](configs/) · [`deploy/`](deploy/) | Session configs, Compose files, and robot profiles |
+| [`tools/`](tools/) | Operator tools on the autonomy contracts: reconstruction jobs, replica maintenance |
 | [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools, the plan, and detailed guides |
 
 ## Current validation and limits

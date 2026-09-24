@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from starlette.requests import Request
 from swarmdeck_peer.colorize import colorize_points
-from autonomy.reconstruction import (
+from tools.reconstruction import (
     BackendCapabilities,
     DurableJobRunner,
     InputManifest,
