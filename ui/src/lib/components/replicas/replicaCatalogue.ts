@@ -138,12 +138,18 @@ export function automaticCatalogueEntry(
   preferredRobotId?: string | null,
   fallbackToSingle = false,
   minimumRobotCount = 1,
-  allowComposite = true
+  allowComposite = true,
+  globalScope?: string | null
 ): ReplicaCatalogueEntry | null {
   if (!catalogue.active_session_id) return null;
   let candidates = catalogue.components
     .filter((item) => item.available && item.status === 'ready' && item.session_id === catalogue.active_session_id &&
       item.robot_ids.length >= minimumRobotCount && (allowComposite || !item.composite))
+  // Global map selection is owned by the shared map scope, not fleet focus.
+  // An unavailable scope waits rather than silently choosing another frame.
+  if (globalScope !== undefined) {
+    return candidates.find((item) => item.component_id === globalScope) ?? null;
+  }
   if (preferredRobotId) {
     const matching = candidates.filter((item) => item.robot_ids.includes(preferredRobotId));
     if (matching.length) candidates = matching;

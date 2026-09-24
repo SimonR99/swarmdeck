@@ -761,7 +761,7 @@ real-time factor 1.00 throughout.
 | MGG plan cycle, median | 692 ms | 192 ms | 168-187 ms |
 | Plan log to 0.1 m of motion, median (proxy) | - | 1.38-1.44 s | 0.80-1.47 s (0.90-1.00 s typical) |
 | Nav2 startup, robots active per launch | - | - | 4/4 in 9 of 9 launches (base: 19/20 robots) |
-| `robot_state` at idle | 20 msg/s, 49 KB/s | 20 msg/s | 4.0 msg/s, 8.5 KB/s |
+| `robot_state` at idle | 20 msg/s, 49 KB/s | 4.1 msg/s, 9.9 KB/s | 4.0 msg/s, 8.5 KB/s |
 
 - The adapter's own per-path timing shows the reservation granted 0.15 s after
   the path, Nav2 accepting 0.15 s after it, and the next plan requested within

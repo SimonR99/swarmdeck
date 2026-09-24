@@ -19,6 +19,7 @@
   import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { mapRobots } from '$lib/stores/mapRobots.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
@@ -35,20 +36,16 @@
   } from './replicaTactical';
   import { ReplicaCloudLoad } from './replicaCloudLoad';
   import {
-    liveRobotFreshness,
     liveRobotToMapRobot,
-    liveReplicaMatchesSelection,
     postLiveReplicaGoal
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { LiveReplicaPoll } from './liveReplicaPoll';
   import { GaussianFetch } from './gaussianFetch';
   import { RenderLoop } from './renderLoop';
   import { SceneInteraction, type InteractionScene, type NDC } from './sceneInteraction';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map/mapRobot';
-  import { localRobotOf, membersOnMap } from '../map/mapMembership';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
 
   let {
@@ -116,53 +113,27 @@
   let dragging = $state(false);
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
-  // The live robot telemetry over a replica, polled by liveReplicaPoll.ts.
-  // Its frame is read by the draw but not reactive: every poll brings new
-  // freshness ages, so liveReplicaRevision advances only when what is drawn
-  // changed.
-  let liveReplicaRevision = $state(0);
-  const liveReplicaPoll = new LiveReplicaPoll({
-    // Called from effects too, which must not come to depend on the counter.
-    onDrawChange: () => (liveReplicaRevision = untrack(() => liveReplicaRevision) + 1),
-    // A drawn replica pose, goal or path disappears when it goes stale, which
-    // no input change announces: polls that fail or return 404 adopt no frame.
-    onExpire: () => {
-      renderLoop.invalidateFreshness();
-      requestRender();
-    },
-    stillWanted: () => liveTactical && Boolean(replicaTactical.selection)
+  // Membership and live telemetry belong to the map, not this dimension.
+  $effect(() => {
+    const selection = tacticalReplica;
+    mapRobots.setCloud(active, selection ? replicaSelectionKey(selection) : '',
+      replicaCloud?.view.solution_order_known === true && replicaCloud.view.selected &&
+      replicaCloud.view.session_id === selection?.sessionId &&
+      replicaCloud.view.component_id === selection?.componentId
+        ? { frameId: replicaCloud.view.selected.frame_id, solutionOrder: replicaCloud.view.solution_order }
+        : null);
   });
 
-  function refreshLiveReplica() {
-    const selection = tacticalReplica;
-    if (!active || !liveTactical || !selection) return;
-    void liveReplicaPoll.refresh(selection);
-  }
-
   function robotsOnMap(): MapRobot[] {
+    const ids = mapRobots.ids;
     if (tacticalReplica) {
-      const liveReplica = liveReplicaPoll.current;
-      if (!liveTactical || !liveReplica) return [];
-      if (replicaCloud?.view.solution_order_known !== true) return [];
+      const liveReplica = mapRobots.live;
+      if (!liveReplica) return [];
       const age = (performance.now() - liveReplica.receivedAt) / 1000;
-      if (!liveReplicaMatchesSelection(
-        liveReplica,
-        tacticalReplica,
-        replicaCloud?.view.solution_order
-      )) return [];
-      if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
-      const fresh = liveReplica.frame.robots.filter((robot) => liveRobotFreshness(robot, age).pose);
-      return membersOnMap(fresh, {
-        localRobot: tacticalReplica.scope === 'robot' ? tacticalReplica.robotId : null,
-        members: null,
-        isEnabled: (id) => fleet.isEnabled(id)
-      }).map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
+      return liveReplica.frame.robots.filter((robot) => ids.includes(robot.robot_id))
+        .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
     }
-    return membersOnMap(fleet.robots, {
-      localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
-      members: mapStore.globalMapMembers,
-      isEnabled: (id) => fleet.isEnabled(id)
-    });
+    return fleet.robots.filter((robot) => ids.includes(robot.robot_id));
   }
 
   // Public camera control methods for ViewControls toolbar
@@ -285,7 +256,6 @@
       robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
       cloudLoad.forgetRevision(true);
       gaussianFetch.forget();
-      liveReplicaPoll.set(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
@@ -471,15 +441,6 @@
     if (tacticalReplica) cloudLoad.requireRebuild();
     void fetchCloud();
   }
-
-  $effect(() => {
-    const selection = tacticalReplica;
-    const key = liveTactical && selection ? replicaSelectionKey(selection) : '';
-    mounted;
-    active;
-    liveReplicaPoll.select(key);
-    if (key && mounted && active) refreshLiveReplica();
-  });
 
   $effect(() => {
     const currentScope = sourceScope();
@@ -701,7 +662,7 @@
     void sceneDrawInputs(
       { fleet, settings, trails: trailStore, mapStore, review, replicaTactical },
       {
-        liveReplicaRevision,
+        liveReplicaRevision: mapRobots.revision,
         replicaCloud,
         follow,
         showGrid,
@@ -716,7 +677,16 @@
         pointSize
       }
     );
+    void mapRobots.ids;
     if (mounted && active) untrack(() => requestRender(true));
+  });
+
+  $effect(() => {
+    void mapRobots.freshnessRevision;
+    if (mounted && active) untrack(() => {
+      renderLoop.invalidateFreshness();
+      requestRender();
+    });
   });
 
   $effect(() => {
@@ -766,7 +736,6 @@
       if (cloudLoad.due()) {
         void fetchCloud();
       }
-      refreshLiveReplica();
     }, 1000);
 
     const ro = new ResizeObserver(() => {
@@ -782,7 +751,7 @@
     return () => {
       mounted = false;
       cloudLoad.cancel();
-      liveReplicaPoll.dispose();
+      mapRobots.setCloud(false, '', null);
       gaussianFetch.abort();
       worker?.terminate();
       worker = null;

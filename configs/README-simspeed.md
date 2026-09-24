@@ -81,9 +81,14 @@ launch/stop logs, pre-teardown ARGoS logs (`.argos.log`), and revision/order met
 are retained, including cleanup after failed windows. `--no-build` is for
 an already rebuilt image, not an old image that ignores parked-lidar settings.
 
-**Pending qualification:** native image rebuild/runtime probe, alternating tuf
-measurements, and moving/parked cadence verification. RTX 4070 throughput and GPU
-utilization indicate relative work saved; they do not prove Iris Xe RTF ≥ 0.8.
+The rebuilt-image runtime probe and alternating tuf measurements are complete:
+scan cadences of 10/5/2 Hz were confirmed. See the
+[tuf results](../docs/operations/performance.md#reading-clean-up-waves-2-and-3-final-992272b)
+for measured parked-fleet throughput.
+
+**Pending qualification:** moving/parked cadence transitions and weak-GPU
+performance. RTX 4070 throughput and GPU utilization indicate relative work
+saved; they do not prove Iris Xe RTF ≥ 0.8.
 All-moving fleets receive no parked-throttling benefit. Distance culling is not
 added: the pinned renderer already uses the lidar's far plane, and lowering it
 would reduce the moving robot's range. Collision-only lidar rendering remains
