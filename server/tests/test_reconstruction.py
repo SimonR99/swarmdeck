@@ -10,8 +10,8 @@ import struct
 import numpy as np
 import pytest
 from starlette.requests import Request
-from adapters.colorize import colorize_points
-from autonomy.reconstruction import (
+from swarmdeck_peer.colorize import colorize_points
+from tools.reconstruction import (
     BackendCapabilities,
     DurableJobRunner,
     InputManifest,
@@ -381,7 +381,7 @@ def test_job_publication_is_served_with_source_metadata_and_stale_rejection(
 
 def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
     from types import SimpleNamespace as NS
-    from adapters.colorize import colorize_ros_rgbd
+    from swarmdeck_peer.colorize import colorize_ros_rgbd
 
     rgb = np.zeros((3, 3, 3), np.uint8)
     rgb[1, 1] = [240, 10, 20]

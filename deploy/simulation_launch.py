@@ -327,7 +327,6 @@ def process_environment(
             platforms, separators=(",", ":"), sort_keys=True
         ),
         SWARMDECK_CAPTURE_PROVIDER="simulation",
-        SWARMDECK_SLAM_BACKEND="cslam",
         SWARMDECK_MOLA_PLANNER_MAPS="true",
         # The detector is optional; an empty URL runs the adapters without it.
         SWARMDECK_DETECTOR_URL=(
@@ -588,8 +587,6 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
 def build_spec(args: argparse.Namespace, project: str) -> dict:
     if args.dev:
         args.scenario, args.render, args.odometry = "3robot", "dri", "drift"
-    if os.getenv("SWARMDECK_SLAM_BACKEND", "cslam") != "cslam":
-        raise ValueError("SWARMDECK_SLAM_BACKEND must be cslam")
     if args.targets < 0 or args.explore < 0:
         raise ValueError("targets and exploration seconds must be nonnegative")
     source = scenario_path(args.scenario)

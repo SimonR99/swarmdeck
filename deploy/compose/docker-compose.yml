@@ -265,7 +265,6 @@ services:
       SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
       RUNTIME_DIR: /run/swarmdeck
       ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
-      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       # MGG is the only planner; the adapter dispatches its routes to the
       # Nav2 controller and plans in the continuous odometry frame.
@@ -395,7 +394,6 @@ services:
     network_mode: service:sim
     ipc: service:sim
     environment:
-      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       FASTRTPS_DEFAULT_PROFILES_FILE: /app/deploy/dds/fastdds_large_data.xml
       SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
@@ -440,18 +438,17 @@ services:
       SWARMDECK_PEER_BODY_MASK: "${SWARMDECK_PEER_BODY_MASK:-false}"
       SWARMDECK_PEER_PLATFORMS: "${SWARMDECK_PEER_PLATFORMS:-}"
       SWARMDECK_INTER_ROBOT_CLOSURES: "${SWARMDECK_INTER_ROBOT_CLOSURES:-false}"
-      SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
       SWARMDECK_SERVER_URL: http://server:8080
       SWARMDECK_MISSION_GC_KEEP_RECENT: "${SWARMDECK_MISSION_GC_KEEP_RECENT:-3}"
       SWARMDECK_MISSION_GC_DRY_RUN: "${SWARMDECK_MISSION_GC_DRY_RUN:-false}"
     volumes:
       - ../../autonomy:/app/autonomy:ro
-      - ../autonomy:/app/deploy/autonomy:ro
+      - ../../swarmdeck_ros/src/swarmdeck_peer:/cslam_ws/src/swarmdeck_peer:ro
       - ../dds:/app/deploy/dds:ro
       - peer_maps:/maps
       - ../../sessions/simulation-reset:/run/swarmdeck-reset:ro
-    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch swarmdeck_peer peer.launch.py"]
     depends_on:
       sim:
         condition: service_started
@@ -481,7 +478,6 @@ services:
       SWARMDECK_MAPS_ROOT: /maps
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_MOLA_IMPORTER: /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
-      SWARMDECK_MOLA_MODE: persistent
       SWARMDECK_MOLA_PLANNER_MAPS: "${SWARMDECK_MOLA_PLANNER_MAPS:-true}"
       SWARMDECK_MOLA_TIMEOUT_S: "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
       SWARMDECK_MOLA_POLL_S: "${SWARMDECK_MOLA_POLL_S:-1}"
@@ -493,8 +489,6 @@ services:
       - peer_maps:/maps
     command:
       - swarmdeck-mola-worker
-      - --mode
-      - persistent
       - --maps-root
       - /maps
       - --timeout

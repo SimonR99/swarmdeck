@@ -111,7 +111,7 @@ Each peer bridge sends its map authority every second. While a fresh authority
 cannot be built (stale sensor input, a failed transform, a lagging product, or a
 stalled snapshot tick) it re-sends the last fresh one, so a short stall does not
 expire MGG's snapshot. The re-send stops 10 seconds after the last fresh build
-(`AUTHORITY_RESEND_MAX_S` in `deploy/autonomy/cslam_bridge.py`); the bridge then
+(`AUTHORITY_RESEND_MAX_S` in `swarmdeck_peer/cslam_bridge.py`); the bridge then
 sends `resetting`, so a robot whose sensors, TF or bridge snapshot stay dead
 loses map authority. The operator sees this as the server refusing Explore and
 Home with `robot mapping authority is missing or stale`; the peer's

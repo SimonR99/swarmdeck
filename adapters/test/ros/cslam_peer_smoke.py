@@ -208,7 +208,7 @@ def main():
             streams.append(stream)
             processes.append(
                 subprocess.Popen(
-                    ["ros2", "launch", "/app/deploy/autonomy/peer.launch.py"],
+                    ["ros2", "launch", "swarmdeck_peer", "peer.launch.py"],
                     env=env,
                     stdout=stream,
                     stderr=subprocess.STDOUT,

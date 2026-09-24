@@ -13,7 +13,13 @@ pytest.importorskip(
 )
 
 SRC = Path(__file__).resolve().parents[2]
-LAUNCH_FILES = sorted(SRC.rglob("launch/*.launch.py"))
+# swarmdeck_peer's launch file claims a map epoch under /maps and needs the
+# Swarm-SLAM image; tests/deployment/test_peer_launch.py covers it.
+LAUNCH_FILES = sorted(
+    path
+    for path in SRC.rglob("launch/*.launch.py")
+    if "swarmdeck_peer" not in path.parts
+)
 
 
 def _load(path: Path):

@@ -80,7 +80,7 @@ receives REST and WebSocket state and obtains camera media from MediaMTX.
 
 ```mermaid
 flowchart LR
-    Sensors["ARGoS or robot sensors"] --> Peer["Swarm-SLAM peer<br/>SWARMDECK_SLAM_BACKEND=cslam"]
+    Sensors["ARGoS or robot sensors"] --> Peer["Swarm-SLAM peer"]
     Peer --> MOLA["MOLA occupancy products"]
     MOLA --> MGG["MGG planner<br/>frame = robot/odom"]
     MGG --> Controller["Nav2 controller<br/>FollowPath + local costmap"]
@@ -145,9 +145,10 @@ the trusted network.
 | [`server/`](server/) | ROS-free API, fleet state, sessions, maps, and replicas |
 | [`slam/`](slam/) | Collaborative pose graph, registration, and map rendering |
 | [`adapters/`](adapters/) | Wire protocol, robot bridges, media, and perception |
-| [`autonomy/`](autonomy/) | Capture, peer coordination, mapping products, and replication contracts |
-| [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, mapping, navigation, and bring-up packages |
+| [`autonomy/`](autonomy/) | ROS-free capture, peer coordination, mapping products, and replication contracts |
+| [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, onboard peer runtime (`swarmdeck_peer`), mapping, navigation, and bring-up packages |
 | [`configs/`](configs/) · [`deploy/`](deploy/) | Session configs, Compose files, and robot profiles |
+| [`tools/`](tools/) | Operator tools on the autonomy contracts: reconstruction jobs, replica maintenance |
 | [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools, the plan, and detailed guides |
 
 ## Current validation and limits

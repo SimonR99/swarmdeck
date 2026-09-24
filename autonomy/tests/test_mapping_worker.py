@@ -13,7 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-MODULE_PATH = Path(__file__).parents[2] / "deploy/autonomy/mola_worker.py"
+MODULE_PATH = (
+    Path(__file__).parents[2]
+    / "swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_worker.py"
+)
 SPEC = importlib.util.spec_from_file_location("swarmdeck_mola_worker", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 worker_module = importlib.util.module_from_spec(SPEC)
@@ -22,6 +25,9 @@ SPEC.loader.exec_module(worker_module)
 MolaWorker = worker_module.MolaWorker
 WorkerError = worker_module.WorkerError
 bounded_file_bytes = worker_module._bounded_file_bytes
+# The mission every test peer lives under: the worker discovers only
+# <maps_root>/<mission>/<robot>/snapshot.json for one canonical mission UUID.
+MISSION = "12345678-1234-5678-9234-567812345678"
 
 
 def manifest(
@@ -217,6 +223,10 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                 }}
                 if {first_failure!r} == "wrong_output_size_second" and request_number == 2:
                     response["output_size_bytes"] = len(artifact) + 1
+                if {first_failure!r} == "marker_hashes":
+                    # Well formed but not the bytes' hash: shows whether the
+                    # worker published the reported hash or recomputed one.
+                    response["output_sha256"] = "e" * 64
                 if "planner_output_path" in request:
                     planner = b"planner|" + artifact
                     Path(request["planner_output_path"]).write_bytes(planner)
@@ -224,6 +234,8 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                     response["planner_output_sha256"] = hashlib.sha256(planner).hexdigest()
                     if {first_failure!r} == "wrong_planner_size_second" and request_number == 2:
                         response["planner_output_size_bytes"] = len(planner) + 1
+                    if {first_failure!r} == "marker_hashes":
+                        response["planner_output_sha256"] = "d" * 64
                 with (root / "applies.log").open("a") as stream:
                     stream.write(json.dumps({{
                         "pid": os.getpid(),
@@ -269,6 +281,33 @@ def sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def in_process_worker(maps_root: Path, build, *, mission_id=MISSION, **kwargs):
+    """A worker whose native runtime is ``build(command, timeout_s)``.
+
+    Tests that must act inside a build (replace the snapshot, reset the
+    epoch, block, fail) run it in-process instead of in the fake subprocess
+    runtime. ``command`` is the importer command line (importer, component
+    snapshot, chunks, output); ``build`` writes the output or raises.
+    """
+
+    worker = MolaWorker(maps_root, mission_id=mission_id, **kwargs)
+    use_in_process_build(worker, build)
+    return worker
+
+
+def use_in_process_build(worker, build) -> None:
+    """Replace ``worker``'s native runtime; see `in_process_worker`."""
+
+    def persistent_import(*, input_path, chunks, output_path, **_request):
+        command = (str(worker.importer), str(input_path), str(chunks))
+        build((*command, str(output_path)), worker.timeout_s)
+        # The size and hash the native runtime reports for what it wrote.
+        written = output_path.read_bytes()
+        return {"output_size_bytes": len(written), "output_sha256": sha256(written)}
+
+    worker._persistent_import = persistent_import
+
+
 @pytest.fixture
 def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
     """Record every publication of source.json and index.json in order.
@@ -300,12 +339,13 @@ def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
 
 
 def test_planner_products_reuse_unchanged_components_and_prune_pairs(tmp_path):
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first = manifest("component:a", 0)
     second = manifest("component:b", 0)
     write_snapshot(peer, "a" * 64, [first, second])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path),
         planner_maps=True,
         keep_generations=1,
@@ -338,10 +378,11 @@ def test_invalid_planner_product_keeps_previous_generation(tmp_path):
     it actually wrote is still rejected: the worker trusts a fresh output's
     reported hash, but `stat`s its size rather than trusting that blindly.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
         planner_maps=True,
         timeout_s=1,
@@ -360,15 +401,23 @@ def test_invalid_planner_product_keeps_previous_generation(tmp_path):
 
 
 def test_enabling_planner_products_upgrades_a_cached_metric_map(tmp_path):
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
     executable = fake_runtime(tmp_path)
-    previous = MolaWorker(tmp_path, importer=executable, timeout_s=1)
+    previous = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=executable, timeout_s=1
+    )
     try:
         previous.process_peer(peer)
     finally:
         previous.close()
-    upgraded = MolaWorker(tmp_path, importer=executable, planner_maps=True, timeout_s=1)
+    upgraded = MolaWorker(
+        tmp_path,
+        mission_id=MISSION,
+        importer=executable,
+        planner_maps=True,
+        timeout_s=1,
+    )
     try:
         assert not upgraded.run_once()
         assert len(runtime_requests(tmp_path)) == 2
@@ -382,9 +431,11 @@ def test_run_once_skips_rehashing_an_unchanged_snapshot(tmp_path, monkeypatch) -
     """snapshot.json is stat'd, not re-read and re-hashed, once its build
     has been published and its identity (size, inode, mtime) recurs.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         assert worker.run_once() == {}
         reads = []
@@ -412,11 +463,13 @@ def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None
     (module docstring), so a later poll trusts the index's own sha256
     instead of re-reading a component that may be several megabytes.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first = manifest("component:a", 0)
     second = manifest("component:b", 0)
     write_snapshot(peer, "a" * 64, [first, second])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         worker.process_peer(peer)
         index = json.loads((peer / "mola/index.json").read_text())
@@ -440,7 +493,7 @@ def test_reusing_a_published_artifact_trusts_its_recorded_hash(tmp_path) -> None
 
 
 def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     """A component the persistent native runtime just wrote is published by
     trusting its reported hash, not by re-hashing the file: the process that
@@ -448,46 +501,39 @@ def test_persistent_mode_trusts_a_fresh_native_output_hash_without_rehashing(
     catches a size disagreement (a truncated or wrong write). The planner
     map branch (`planner_maps=True`) is covered separately below.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
 
-    def forbidden(*a, **k):
-        raise AssertionError("_sha256_file must not be called in persistent mode")
-
-    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path,
+        mission_id=MISSION,
+        importer=fake_runtime(tmp_path, "marker_hashes"),
+        timeout_s=1,
+    )
     try:
         result = worker.process_peer(peer)
         assert result.published
         index = json.loads((peer / "mola/index.json").read_text())
-        artifact = index["artifacts"][0]
-        artifact_path = peer / "mola" / artifact["path"]
-        # The published sha256 is exactly what the fake runtime reported,
-        # which happens to be correct here; the point is it was never
-        # locally recomputed to get there (`forbidden` never raised above).
-        assert (
-            artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-        )
+        # The published sha256 is exactly the marker the fake runtime
+        # reported, not a hash recomputed from the file.
+        assert index["artifacts"][0]["sha256"] == "e" * 64
     finally:
         worker.close()
 
 
 def test_persistent_mode_still_rejects_a_size_mismatch_without_rehashing(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     """Trusting the native runtime's reported hash does not mean trusting an
     unrelated file: a response whose claimed output size disagrees with what
     is actually on disk is rejected by `stat` alone, never by hashing.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
 
-    def forbidden(*a, **k):
-        raise AssertionError("_sha256_file must not be called in persistent mode")
-
-    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "wrong_output_size_second"),
         timeout_s=1,
     )
@@ -502,59 +548,48 @@ def test_persistent_mode_still_rejects_a_size_mismatch_without_rehashing(
 
 
 def test_persistent_mode_trusts_a_fresh_planner_output_hash_without_rehashing(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     """The planner map branch of the same trust: with `planner_maps=True`,
     neither the component nor its `.sdpg` planner map is re-hashed locally;
     both trust the native runtime's own reported hash, `stat`-checked only
     for size.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
 
-    def forbidden(*a, **k):
-        raise AssertionError("_sha256_file must not be called in persistent mode")
-
-    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
     worker = MolaWorker(
-        tmp_path, importer=fake_runtime(tmp_path), planner_maps=True, timeout_s=1
+        tmp_path,
+        mission_id=MISSION,
+        importer=fake_runtime(tmp_path, "marker_hashes"),
+        planner_maps=True,
+        timeout_s=1,
     )
     try:
         result = worker.process_peer(peer)
         assert result.published
         index = json.loads((peer / "mola/index.json").read_text())
         artifact = index["artifacts"][0]
-        component_path = peer / "mola" / artifact["path"]
-        planner = artifact["planner"]
-        planner_path = peer / "mola" / planner["path"]
-        # Both published hashes are exactly what the fake runtime reported
-        # (`forbidden` never raised above, for either artifact).
-        assert (
-            artifact["sha256"]
-            == hashlib.sha256(component_path.read_bytes()).hexdigest()
-        )
-        assert (
-            planner["sha256"] == hashlib.sha256(planner_path.read_bytes()).hexdigest()
-        )
+        # Both published hashes are exactly the markers the fake runtime
+        # reported, not hashes recomputed from the files.
+        assert artifact["sha256"] == "e" * 64
+        assert artifact["planner"]["sha256"] == "d" * 64
     finally:
         worker.close()
 
 
 def test_persistent_mode_still_rejects_a_planner_size_mismatch_without_rehashing(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     """The planner map branch of the size-mismatch rejection: `stat` alone,
     never a hash, still catches a wrong claimed planner output size.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
 
-    def forbidden(*a, **k):
-        raise AssertionError("_sha256_file must not be called in persistent mode")
-
-    monkeypatch.setattr(worker_module, "_sha256_file", forbidden)
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "wrong_planner_size_second"),
         planner_maps=True,
         timeout_s=1,
@@ -591,7 +626,7 @@ def test_bounded_read_stops_a_file_that_grows_after_stat() -> None:
 
 
 def test_worker_imports_each_component_and_coalesces_same_snapshot(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(
         peer, "a" * 64, [manifest("component:a", 3), manifest("component:b", 4)]
     )
@@ -601,12 +636,8 @@ def test_worker_imports_each_component_and_coalesces_same_snapshot(tmp_path) -> 
         calls.append((tuple(command), timeout))
         Path(command[3]).write_bytes(b"real-metric-map")
 
-    worker = MolaWorker(
-        tmp_path,
-        importer=Path("/bin/importer"),
-        timeout_s=7,
-        mode="oneshot",
-        runner=importer,
+    worker = in_process_worker(
+        tmp_path, importer, importer=Path("/bin/importer"), timeout_s=7
     )
     assert worker.run_once() == {}
     assert len(calls) == 2
@@ -627,7 +658,7 @@ def test_worker_imports_each_component_and_coalesces_same_snapshot(tmp_path) -> 
 def test_publication_writes_exact_source_bytes_before_index(
     tmp_path, publication_writes
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     # write_snapshot is not canonical JSON, so a re-serialised source.json
     # would hash differently from the bytes the worker read.
@@ -637,7 +668,7 @@ def test_publication_writes_exact_source_bytes_before_index(
     def successful(command, _timeout):
         Path(command[3]).write_bytes(b"metric-map-v1")
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    worker = in_process_worker(tmp_path, successful)
     result = worker.process_peer(peer)
 
     assert result.published
@@ -661,7 +692,7 @@ def test_publication_writes_exact_source_bytes_before_index(
 def test_snapshot_replaced_during_build_publishes_earlier_bytes_then_newer(
     tmp_path, publication_writes
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     earlier = (peer / "snapshot.json").read_bytes()
     calls = 0
@@ -674,7 +705,7 @@ def test_snapshot_replaced_during_build_publishes_earlier_bytes_then_newer(
             # The bridge lands a newer snapshot while the build is running.
             write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=changing_import)
+    worker = in_process_worker(tmp_path, changing_import)
     assert worker.run_once() == {}
     newer = (peer / "snapshot.json").read_bytes()
     assert newer != earlier
@@ -710,13 +741,13 @@ def test_snapshot_replaced_during_build_publishes_earlier_bytes_then_newer(
 
 
 def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
 
     def successful(command, _timeout):
         Path(command[3]).write_bytes(b"metric-map-v1")
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    worker = in_process_worker(tmp_path, successful)
     assert worker.process_peer(peer).published
     prior = (peer / "mola/index.json").read_bytes()
     prior_source = (peer / "mola/source.json").read_bytes()
@@ -725,7 +756,7 @@ def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
     def failed(_command, _timeout):
         raise WorkerError("native failure")
 
-    worker.runner = failed
+    use_in_process_build(worker, failed)
     with pytest.raises(WorkerError, match="native failure"):
         worker.process_peer(peer)
     assert (peer / "mola/index.json").read_bytes() == prior
@@ -735,7 +766,7 @@ def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
 def test_worker_rejects_unbounded_or_invalid_snapshot_before_subprocess(
     tmp_path,
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     value = json.loads((peer / "snapshot.json").read_text())
     value["snapshot_id"] = "../bad"
@@ -746,7 +777,7 @@ def test_worker_rejects_unbounded_or_invalid_snapshot_before_subprocess(
         nonlocal called
         called = True
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=importer)
+    worker = in_process_worker(tmp_path, importer)
     with pytest.raises(WorkerError, match="snapshot_id"):
         worker.process_peer(peer)
     assert not called
@@ -755,11 +786,13 @@ def test_worker_rejects_unbounded_or_invalid_snapshot_before_subprocess(
 def test_persistent_runtime_reuses_exact_components_and_applies_pose_only(
     tmp_path,
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first_a = manifest("component:a", 1)
     first_b = manifest("component:b", 1)
     write_snapshot(peer, "a" * 64, [first_a, first_b])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         assert worker.process_peer(peer).published
         first_index = json.loads((peer / "mola/index.json").read_text())
@@ -818,11 +851,13 @@ def test_persistent_runtime_reuses_exact_components_and_applies_pose_only(
 
 
 def test_removed_component_is_released_from_native_runtime(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first_a = manifest("component:a", 1)
     first_b = manifest("component:b", 1)
     write_snapshot(peer, "a" * 64, [first_a, first_b])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         assert worker.process_peer(peer).published
         write_snapshot(peer, "b" * 64, [first_a])
@@ -840,9 +875,11 @@ def test_removed_component_is_released_from_native_runtime(tmp_path) -> None:
 
 
 def test_disappeared_peer_closes_its_native_runtime(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         assert worker.run_once() == {}
         process = worker._runtimes[peer]._process
@@ -861,11 +898,13 @@ def test_disappeared_peer_closes_its_native_runtime(tmp_path) -> None:
 
 
 def test_source_race_publishes_build_and_keeps_native_state(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first = manifest("component:a", 1)
     write_snapshot(peer, "a" * 64, [first])
     earlier = (peer / "snapshot.json").read_bytes()
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     original_import = worker._persistent_import
 
     def changing_import(**kwargs):
@@ -909,10 +948,11 @@ def test_source_race_publishes_build_and_keeps_native_state(tmp_path) -> None:
 def test_persistent_runtime_failure_is_reaped_and_next_attempt_restarts(
     tmp_path, failure
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, failure),
         timeout_s=0.5,
         retry_s=0,
@@ -934,10 +974,12 @@ def test_persistent_runtime_failure_is_reaped_and_next_attempt_restarts(
 
 
 def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first = manifest("component:a", 1)
     write_snapshot(peer, "a" * 64, [first])
-    worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
+    worker = MolaWorker(
+        tmp_path, mission_id=MISSION, importer=fake_runtime(tmp_path), timeout_s=1
+    )
     try:
         assert worker.process_peer(peer).published
         # Simulate a child lost between polling cycles.
@@ -960,14 +1002,15 @@ def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -
 def test_native_artifact_claim_mismatch_keeps_last_complete_index(tmp_path) -> None:
     """A native response whose claimed output size disagrees with the file it
     actually wrote is still rejected: the worker trusts a fresh output's
-    reported hash (deploy/autonomy/mola_worker.py `_stat_matches`), but
+    reported hash (swarmdeck_peer/mola_worker.py `_stat_matches`), but
     `stat`s its size rather than trusting that blindly too.
     """
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     first = manifest("component:a", 1)
     write_snapshot(peer, "a" * 64, [first])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "wrong_output_size_second"),
         timeout_s=1,
     )
@@ -989,10 +1032,11 @@ def test_native_artifact_claim_mismatch_keeps_last_complete_index(tmp_path) -> N
 def test_repeated_runtime_failures_do_not_leak_process_file_descriptors(
     tmp_path, failure
 ) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, failure),
         timeout_s=0.2,
         retry_s=0,
@@ -1015,17 +1059,18 @@ def test_discovery_can_be_restricted_to_one_canonical_mission(tmp_path) -> None:
     other_peer = tmp_path / "87654321-4321-8765-9234-567812345678" / "robot_1"
     write_snapshot(selected_peer, "a" * 64, [])
     write_snapshot(other_peer, "b" * 64, [])
-    worker = MolaWorker(tmp_path, mode="oneshot", mission_id=selected)
+    worker = MolaWorker(tmp_path, mission_id=selected)
     assert worker.discover() == (selected_peer,)
     with pytest.raises(ValueError, match="canonical UUID"):
-        MolaWorker(tmp_path, mode="oneshot", mission_id="old-mission")
+        MolaWorker(tmp_path, mission_id="old-mission")
 
 
 def test_persistent_runtime_receives_configured_resource_limits(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path),
         timeout_s=1,
         max_points_per_map=1234,
@@ -1064,11 +1109,12 @@ def test_worker_status_reports_the_last_attempt_and_logs_a_failure_once(
     changes and once more when the peer publishes again.
     """
 
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     (tmp_path / "over-budget").touch()
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "budget"),
         timeout_s=1,
         retry_s=0,
@@ -1132,10 +1178,10 @@ def test_worker_status_reports_the_last_attempt_and_logs_a_failure_once(
 
 
 def test_worker_status_records_an_unreadable_snapshot(tmp_path) -> None:
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     (peer / "snapshot.json").write_bytes(b"x" * (worker_module.MAX_SNAPSHOT_BYTES + 1))
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=lambda *_: None)
+    worker = MolaWorker(tmp_path, mission_id=MISSION)
     errors = worker.run_once()
     assert set(errors) == {peer} and "byte limit" in errors[peer]
     status = json.loads((peer / "mola/worker.json").read_text())
@@ -1148,7 +1194,7 @@ def test_worker_status_records_an_unreadable_snapshot(tmp_path) -> None:
 
 
 def two_peers(tmp_path: Path) -> list[Path]:
-    peers = [tmp_path / "mission" / f"robot_{index}" for index in range(2)]
+    peers = [tmp_path / MISSION / f"robot_{index}" for index in range(2)]
     for index, peer in enumerate(peers):
         write_snapshot(peer, f"{index + 1:064x}", [manifest("component:a", 1)])
     return peers
@@ -1167,7 +1213,7 @@ def test_parallel_peers_build_different_peers_at_the_same_time(tmp_path) -> None
         Path(command[3]).write_bytes(b"metric-map")
         intervals.append((started, time.monotonic()))
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=slow_import, parallel_peers=2)
+    worker = in_process_worker(tmp_path, slow_import, parallel_peers=2)
     assert worker.run_once() == {}
     assert len(intervals) == 2
     latest_start = max(started for started, _ in intervals)
@@ -1200,7 +1246,7 @@ def test_parallel_peers_one_builds_peers_in_order_on_the_calling_thread(
             )
         )
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=slow_import, parallel_peers=1)
+    worker = in_process_worker(tmp_path, slow_import, parallel_peers=1)
     assert worker.run_once() == {}
     assert [peer for peer, _, _, _ in builds] == peers
     first, second = builds
@@ -1212,6 +1258,7 @@ def test_parallel_peers_use_one_native_runtime_each(tmp_path) -> None:
     peers = two_peers(tmp_path)
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "slow"),
         timeout_s=2,
         parallel_peers=2,
@@ -1236,8 +1283,8 @@ def test_parallel_peers_use_one_native_runtime_each(tmp_path) -> None:
 
 
 def test_native_failure_restarts_only_the_failing_peers_runtime(tmp_path) -> None:
-    failing = tmp_path / "mission" / "robot_0"
-    healthy = tmp_path / "mission" / "robot_1"
+    failing = tmp_path / MISSION / "robot_0"
+    healthy = tmp_path / MISSION / "robot_1"
     first = manifest("component:a", 1)
     write_snapshot(failing, "a" * 64, [first])
     write_snapshot(healthy, "b" * 64, [first])
@@ -1245,6 +1292,7 @@ def test_native_failure_restarts_only_the_failing_peers_runtime(tmp_path) -> Non
     # runtime is process 1: it dies on its second apply request.
     worker = MolaWorker(
         tmp_path,
+        mission_id=MISSION,
         importer=fake_runtime(tmp_path, "death_second"),
         timeout_s=1,
         retry_s=0,
@@ -1297,7 +1345,11 @@ def test_native_failure_restarts_only_the_failing_peers_runtime(tmp_path) -> Non
 def test_close_stops_every_peer_runtime(tmp_path) -> None:
     peers = two_peers(tmp_path)
     worker = MolaWorker(
-        tmp_path, importer=fake_runtime(tmp_path), timeout_s=1, parallel_peers=2
+        tmp_path,
+        mission_id=MISSION,
+        importer=fake_runtime(tmp_path),
+        timeout_s=1,
+        parallel_peers=2,
     )
     assert worker.run_once() == {}
     processes = [worker._runtimes[peer]._process for peer in peers]
@@ -1346,7 +1398,61 @@ def test_cli_parses_parallel_peers_flag_and_environment_default(
     assert len(created) == 3
 
     with pytest.raises(ValueError, match="parallel_peers"):
-        MolaWorker(Path("/maps"), mode="oneshot", parallel_peers=0)
+        MolaWorker(Path("/maps"), mission_id=MISSION, parallel_peers=0)
+
+
+def test_cli_requires_one_mission_and_rejects_all_missions(monkeypatch) -> None:
+    created: list[dict[str, object]] = []
+
+    class RecordingWorker:
+        def __init__(self, maps_root, **kwargs):
+            created.append(kwargs)
+
+        def run_forever(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "MolaWorker", RecordingWorker)
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--all-missions"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    assert created == []
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--mission-id", MISSION])
+    worker_module.main()
+    assert created[-1]["mission_id"] == MISSION
+
+
+def test_cli_accepts_the_deprecated_persistent_mode_and_rejects_oneshot(
+    monkeypatch, capsys
+) -> None:
+    created: list[dict[str, object]] = []
+
+    class RecordingWorker:
+        def __init__(self, maps_root, **kwargs):
+            created.append(kwargs)
+
+        def run_forever(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "MolaWorker", RecordingWorker)
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", "12345678-1234-5678-9234-567812345678")
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--mode", "persistent"])
+    worker_module.main()
+    assert len(created) == 1 and "mode" not in created[0]
+    assert "--mode is deprecated" in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker"])
+    worker_module.main()
+    assert "deprecated" not in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--mode", "oneshot"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    assert len(created) == 2
 
 
 def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
@@ -1376,7 +1482,7 @@ def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
         Path(command[-1]).write_bytes(b"old native product")
         claim_map_epoch(tmp_path, mission, "robot_0")
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=resetting_import)
+    worker = in_process_worker(tmp_path, resetting_import)
     with pytest.raises(WorkerError, match="epoch advanced"):
         worker.process_peer(peer)
     assert not (peer / "mola/index.json").exists()
@@ -1408,7 +1514,7 @@ def test_process_peer_reads_and_fsyncs_outside_the_map_epoch_lock(
     import os
     import stat
 
-    peer = tmp_path / "mission" / "robot_0"
+    peer = tmp_path / MISSION / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     probes: list[tuple[str, bool]] = []
 
@@ -1431,7 +1537,7 @@ def test_process_peer_reads_and_fsyncs_outside_the_map_epoch_lock(
     def successful(command, _timeout):
         Path(command[3]).write_bytes(b"metric-map-v1")
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    worker = in_process_worker(tmp_path, successful)
     assert worker.process_peer(peer).published
     assert ("read snapshot", True) in probes
     assert ("fsync file", True) in probes
@@ -1468,7 +1574,7 @@ def test_epoch_advance_failure_tears_the_runtime_down_after_releasing_the_lock(
         Path(command[-1]).write_bytes(b"old native product")
         claim_map_epoch(tmp_path, mission, "robot_0")
 
-    worker = MolaWorker(tmp_path, mode="oneshot", runner=resetting_import)
+    worker = in_process_worker(tmp_path, resetting_import)
     probes: list[bool] = []
     original = worker._invalidate_runtime
 

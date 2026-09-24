@@ -33,8 +33,8 @@ def test_mapping_image_builds_and_smokes_the_persistent_runtime():
     assert "swarmdeck-mola-import" in dockerfile
     assert "swarmdeck-mola-import --serve" in dockerfile
     assert (
-        "COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py"
-        in dockerfile
+        "COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_process.py"
+        " /usr/local/bin/mola_process.py" in dockerfile
     )
     assert "COPY swarmdeck_ros/src/swarmdeck_mola src/swarmdeck_mola" in dockerfile
     assert "--packages-select swarmdeck_mapping swarmdeck_mola" in dockerfile
@@ -64,8 +64,9 @@ def test_central_mapping_worker_is_mission_pinned_and_bounded():
         "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
     )
     assert "--all-missions" not in service["command"]
+    assert "--mode" not in service["command"]
     assert env["SWARMDECK_MOLA_IMPORTER"] == IMPORTER
-    assert env["SWARMDECK_MOLA_MODE"] == "persistent"
+    assert "SWARMDECK_MOLA_MODE" not in env
     for key, value in BOUNDED_OPTIONS.items():
         assert env[key] == value
     # The fleet worker builds every robot's product; peers are built
@@ -74,8 +75,6 @@ def test_central_mapping_worker_is_mission_pinned_and_bounded():
     assert service["image"] == "swarmdeck-mapping:mola-native"
     assert service["command"] == [
         "swarmdeck-mola-worker",
-        "--mode",
-        "persistent",
         "--maps-root",
         "/maps",
         "--timeout",
@@ -101,8 +100,9 @@ def test_robot_peer_worker_is_pinned_to_one_robot_and_uses_the_native_runtime():
         "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
     )
     assert "--all-missions" not in service["command"]
+    assert "--mode" not in service["command"]
     assert env["SWARMDECK_MOLA_IMPORTER"] == IMPORTER
-    assert env["SWARMDECK_MOLA_MODE"] == "persistent"
+    assert "SWARMDECK_MOLA_MODE" not in env
     for key, value in BOUNDED_OPTIONS.items():
         assert env[key] == value
     # A hardware peer builds only its own product: one build at a time.
@@ -110,8 +110,6 @@ def test_robot_peer_worker_is_pinned_to_one_robot_and_uses_the_native_runtime():
     assert service["image"] == "swarmdeck-mapping:mola-native"
     assert service["command"] == [
         "swarmdeck-mola-worker",
-        "--mode",
-        "persistent",
         "--maps-root",
         "/maps",
         "--timeout",

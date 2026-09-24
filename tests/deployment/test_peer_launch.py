@@ -11,7 +11,9 @@ def _action(*args, **kwargs):
     return SimpleNamespace(args=args, **kwargs)
 
 
-def _load(monkeypatch, relative="deploy/autonomy/peer.launch.py"):
+def _load(
+    monkeypatch, relative="swarmdeck_ros/src/swarmdeck_peer/launch/peer.launch.py"
+):
     for name, attributes in {
         "launch": {"LaunchDescription": list},
         "launch.actions": {

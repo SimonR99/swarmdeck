@@ -40,9 +40,9 @@ hard constraints, enforced as edge admissibility while the graphs are built.
 | Concern | Authority | Source |
 | --- | --- | --- |
 | Continuous local motion estimate | One selected odometry frontend per robot and session | `adapters/`, estimator containers |
-| Collaborative keyframe poses and component membership | Peer Swarm-SLAM solution adapter | `deploy/cslam/`, `deploy/autonomy/` |
+| Collaborative keyframe poses and component membership | Peer Swarm-SLAM solution adapter | `deploy/cslam/`, `swarmdeck_ros/src/swarmdeck_peer/` |
 | Occupancy, surface geometry, map revisions | Native MOLA mapper | `swarmdeck_ros/src/swarmdeck_mapping/` |
-| Snapshot contracts and coordination | Peer mapping layer | `autonomy/`, `deploy/autonomy/` |
+| Snapshot contracts and coordination | Peer mapping layer | `autonomy/`, `swarmdeck_ros/src/swarmdeck_peer/` |
 | Robot feasibility | Shared traversal model, used by both planners and the controller | `deploy/mgg/` |
 | Exploration routes and navigation goals | MGG graph and grid planning | `deploy/mgg/` |
 | Actuator commands and cancellation | Onboard command arbiter in the adapter | `adapters/` |
@@ -214,7 +214,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     multi-robot component, and no planner reads the display raster.
 20. Navigation frame equals the robot's continuous odometry frame. Corrections
     are data (`T_component_navigation`), never a TF edge.
-21. One 3D backend is selected by `SWARMDECK_SLAM_BACKEND=cslam`: peer
+21. There is one 3D backend: peer
     Swarm-SLAM supplies corrected poses and MOLA supplies occupancy products.
 22. Nav2 is the controller only. MGG is the sole planner and sends trajectories
     to `FollowPath`.

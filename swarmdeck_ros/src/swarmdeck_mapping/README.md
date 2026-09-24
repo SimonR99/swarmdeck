@@ -44,7 +44,7 @@ point count, and finite XYZ value, constructs the MOLA keyframe map, observes th
 `MapSourceBase` publication, and serializes an MRPT metric-map artifact. Inputs
 are bounded to 64 MiB manifests and 8 MiB per geometry chunk.
 
-`deploy/autonomy/mola_worker.py` is the continuous onboard consumer. It watches
+`swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_worker.py` is the continuous onboard consumer. It watches
 `/maps/<mission>/<robot>/snapshot.json`, invokes the importer once per component,
 and, after all generation-specific products finish, publishes
 `/maps/<mission>/<robot>/mola/source.json` (the exact snapshot bytes it built

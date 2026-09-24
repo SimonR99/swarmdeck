@@ -12,12 +12,11 @@ from builtin_interfaces.msg import Time as TimeMsg
 import numpy as np
 import rclpy
 
-from adapters import reconstruction  # cslam_bridge imports colorize from here
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
-from deploy.autonomy import cslam_bridge
-from deploy.autonomy.cslam_bridge import Bridge
+from swarmdeck_peer import colorize, cslam_bridge
+from swarmdeck_peer.cslam_bridge import Bridge
 from rclpy.clock import ClockType
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
@@ -106,8 +105,8 @@ def verify_capture_time_color_transform() -> None:
         observed["transform"] = camera_from_points
         return np.asarray([[9, 8, 7, 255]], dtype=np.uint8)
 
-    original = reconstruction.colorize_ros_rgbd
-    reconstruction.colorize_ros_rgbd = fake_colorize
+    original = colorize.colorize_ros_rgbd
+    colorize.colorize_ros_rgbd = fake_colorize
     try:
         points = np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32)
         colors = Bridge._capture_colors(
@@ -116,7 +115,7 @@ def verify_capture_time_color_transform() -> None:
             NS(stamp=cloud_stamp, frame_id="lidar"),
         )
     finally:
-        reconstruction.colorize_ros_rgbd = original
+        colorize.colorize_ros_rgbd = original
 
     assert colors.tolist() == [[9, 8, 7, 255]]
     assert observed["points"] is points

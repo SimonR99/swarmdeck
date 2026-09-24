@@ -29,7 +29,7 @@ from autonomy.contracts import (
     KeyframeId,
 )
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
-from deploy.autonomy.mola_process import PersistentImporter
+from swarmdeck_peer.mola_process import PersistentImporter
 
 
 def main() -> None:

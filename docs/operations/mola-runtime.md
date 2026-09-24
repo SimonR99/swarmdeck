@@ -36,7 +36,7 @@ volume are not selected implicitly. Commands are in
 invocations in the archived
 [decentralized autonomy record](../archive/decentralized-autonomy.md).
 
-Each peer launch (`deploy/autonomy/peer.launch.py`) first reclaims old mission
+Each peer launch (`swarmdeck_ros/src/swarmdeck_peer/launch/peer.launch.py`) first reclaims old mission
 directories under the map store (`SWARMDECK_MAP_STORE`, default `/maps`). It
 keeps the active mission and the `SWARMDECK_MISSION_GC_KEEP_RECENT` most
 recently modified others (default 3) and deletes the rest. Set
@@ -289,11 +289,11 @@ temporary map data and have networking disabled.
 
 ### Reproduce the correction benchmark
 
-Run it with the repository on `PYTHONPATH` and the native importer's installed
-path:
+Run it with the repository and `swarmdeck_ros/src/swarmdeck_peer` on
+`PYTHONPATH` and the native importer's installed path:
 
 ```bash
-PYTHONPATH=. python3 tests/deployment/mola_benchmark.py \
+PYTHONPATH=.:swarmdeck_ros/src/swarmdeck_peer python3 tests/deployment/mola_benchmark.py \
   --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
 ```
 

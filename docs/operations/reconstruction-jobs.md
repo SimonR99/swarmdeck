@@ -5,7 +5,7 @@ the geometric mapper remain usable when the worker, CUDA runtime, or private
 UMAMI installation is unavailable. The worker consumes a fixed pose snapshot;
 it does not publish TF, update Swarm-SLAM, or change navigation frames.
 
-The durable runner is `autonomy.reconstruction`. It stores one JSON journal per
+The durable runner is `tools.reconstruction`. It stores one JSON journal per
 job, a content hash for every captured NPZ frame, the capture metadata, the pose
 revision, and a backend capability declaration. A job whose input or pose
 revision changes before publication becomes `stale`; its artifact cannot replace
@@ -98,7 +98,7 @@ private repository or read SSH credentials.
 Submit a fixed-pose batch job:
 
 ```bash
-python3 -m autonomy.reconstruction submit \
+python3 -m tools.reconstruction submit \
   --store /data/reconstruction-journal \
   /data/run-rgbd \
   --umami /opt/UMAMI-SLAM \
@@ -132,7 +132,7 @@ affected submaps remain later milestones.
 The command prints a `job_id`. Query it while a worker is running:
 
 ```bash
-python3 -m autonomy.reconstruction status \
+python3 -m tools.reconstruction status \
   --store /data/reconstruction-journal <job_id>
 ```
 
@@ -140,7 +140,7 @@ Start the worker from a machine with the native UMAMI executable and its CUDA
 environment:
 
 ```bash
-python3 -m autonomy.reconstruction run \
+python3 -m tools.reconstruction run \
   --store /data/reconstruction-journal <job_id> \
   --umami /opt/UMAMI-SLAM \
   --config /opt/UMAMI-SLAM/cfg/colmap/gaussian_splatting.yaml
@@ -191,7 +191,7 @@ reconstruction directory.
 Cancel from another terminal or process:
 
 ```bash
-python3 -m autonomy.reconstruction cancel \
+python3 -m tools.reconstruction cancel \
   --store /data/reconstruction-journal <job_id>
 ```
 

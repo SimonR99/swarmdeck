@@ -85,7 +85,7 @@ def main() -> None:
         }
         command = [
             "/usr/bin/python3",
-            "/app/deploy/autonomy/cslam_bridge.py",
+            "/cslam_ws/install/swarmdeck_peer/lib/swarmdeck_peer/cslam_bridge.py",
             "--ros-args",
             "-r",
             "__ns:=/r0",

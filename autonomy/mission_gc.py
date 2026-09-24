@@ -3,7 +3,7 @@
 Missions accumulate under ``<store_root>/<mission_id>/`` for as long as
 nothing ever retires them; one deployment carried about 500 MB across 8 old
 missions, none revisited after the fleet moved on. Nothing here runs itself:
-``deploy/autonomy/peer.launch.py`` calls `garbage_collect_missions` and
+``swarmdeck_peer``'s ``launch/peer.launch.py`` calls `garbage_collect_missions` and
 `checkpoint_wal` once per peer launch, the "run at startup" point named in
 the plan, before any node opens this peer's stores.
 """

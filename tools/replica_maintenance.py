@@ -3,7 +3,7 @@
 import argparse
 import json
 
-from .replication import ReplicaStore
+from autonomy.replication import ReplicaStore
 
 
 def main():

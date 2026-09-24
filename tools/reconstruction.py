@@ -29,7 +29,12 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .contracts import ComponentRevision, GraphSolution, KeyframeId, validate_se3
+from autonomy.contracts import (
+    ComponentRevision,
+    GraphSolution,
+    KeyframeId,
+    validate_se3,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts" / "reconstruction"
 DEFAULT_UMAMI_SCRIPT = SCRIPT_DIR / "umami.py"

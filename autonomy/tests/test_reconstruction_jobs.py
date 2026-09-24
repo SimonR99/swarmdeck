@@ -15,7 +15,7 @@ import uuid
 import numpy as np
 import pytest
 
-from autonomy.reconstruction import (
+from tools.reconstruction import (
     DurableJobRunner,
     InputManifest,
     JobState,
@@ -244,7 +244,7 @@ def test_bridge_source_contract_has_dynamic_keyframe_and_atomic_solution_outputs
     source = (
         Path(__file__)
         .parents[2]
-        .joinpath("deploy", "autonomy", "cslam_bridge.py")
+        .joinpath("swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/cslam_bridge.py")
         .read_text()
     )
     assert 'f"/{self.robot}/keyframes"' in source
@@ -410,7 +410,7 @@ def test_separate_cli_cancel_and_restart_do_not_reset_live_worker(tmp_path):
         [
             sys.executable,
             "-m",
-            "autonomy.reconstruction",
+            "tools.reconstruction",
             "cancel",
             "--store",
             str(tmp_path / "jobs"),

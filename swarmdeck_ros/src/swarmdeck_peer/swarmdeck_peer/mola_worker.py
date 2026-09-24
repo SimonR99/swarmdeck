@@ -14,8 +14,9 @@ complete generation is published as a self-described product under
 3. ``index.json``: atomically replaced last; its ``source_sha256`` and
    ``source_snapshot_id`` describe ``source.json``.
 
-Readers (``autonomy/mola_mapping.py`` for the indexed map server and the MGG
-planner's ``MolaMap`` loader) read ``index.json`` and then ``source.json`` and
+Readers (``autonomy/product_authority.py``'s ``read_published_product``,
+which gates the bridge's map authority, and the MGG planner's ``MolaMap``
+loader) read ``index.json`` and then ``source.json`` and
 require ``sha256(source.json bytes) == index.source_sha256`` and
 ``source.snapshot_id == index.source_snapshot_id``. A mismatch means the pair
 is mid-replacement and the reader retries briefly. Readers never read
@@ -60,12 +61,11 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 from autonomy.map_epochs import (
     map_epoch_lock,
     read_map_epoch,
@@ -75,8 +75,8 @@ from autonomy.map_epochs import (
 
 try:
     from mola_process import MolaProcessError, NativeRequestError, PersistentImporter
-except ModuleNotFoundError:  # Imported as deploy.autonomy.mola_worker in tests.
-    from deploy.autonomy.mola_process import (
+except ModuleNotFoundError:  # Imported as swarmdeck_peer.mola_worker in tests.
+    from swarmdeck_peer.mola_process import (
         MolaProcessError,
         NativeRequestError,
         PersistentImporter,
@@ -105,28 +105,6 @@ WORKER_STATUS_MAX_ERROR_CHARS = 2000
 
 class WorkerError(RuntimeError):
     """The source contract or native importer failed."""
-
-
-Runner = Callable[[Sequence[str], float], None]
-
-
-def _default_runner(command: Sequence[str], timeout_s: float) -> None:
-    try:
-        subprocess.run(
-            command,
-            check=True,
-            timeout=timeout_s,
-            stdout=subprocess.DEVNULL,
-            # Inherit diagnostics so the compatibility path cannot deadlock or
-            # accumulate an unbounded captured stderr payload.
-            stderr=None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise WorkerError(f"MOLA import exceeded {timeout_s:g}s") from exc
-    except subprocess.CalledProcessError as exc:
-        raise WorkerError(
-            f"native importer failed with status {exc.returncode}"
-        ) from exc
 
 
 def _strict_nonnegative_int(value: object, name: str) -> int:
@@ -262,9 +240,7 @@ def _stat_matches(path: Path, expected_size: object, maximum: int) -> bool:
     nothing else to build, or a second time right after the process that
     wrote it already hashed it, costs as much as the import itself for a
     hash that would only ever match; `stat` still catches a missing,
-    truncated or oversized file either way. Local hashing
-    (`_sha256_file`) remains only for the legacy non-persistent runner mode,
-    which has no reported hash to trust.
+    truncated or oversized file either way.
     """
 
     if not isinstance(expected_size, int) or not 0 < expected_size <= maximum:
@@ -274,26 +250,6 @@ def _stat_matches(path: Path, expected_size: object, maximum: int) -> bool:
     except OSError:
         return False
     return size == expected_size
-
-
-def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
-    expected_size = path.stat().st_size
-    if expected_size <= 0 or expected_size > maximum:
-        raise WorkerError(f"native artifact has invalid size {expected_size}")
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        while size <= maximum:
-            block = stream.read(min(1024 * 1024, maximum + 1 - size))
-            if not block:
-                break
-            size += len(block)
-            digest.update(block)
-    if size <= 0 or size > maximum or size != expected_size:
-        raise WorkerError(f"native artifact has invalid size {size}")
-    if path.stat().st_size != size:
-        raise WorkerError("native artifact changed while hashing")
-    return size, digest.hexdigest()
 
 
 def _write_fsynced(path: Path, payload: bytes) -> None:
@@ -349,6 +305,7 @@ class MolaWorker:
         self,
         maps_root: Path,
         *,
+        mission_id: str,
         importer: Path = Path(
             "/mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import"
         ),
@@ -360,10 +317,7 @@ class MolaWorker:
         max_resident_points: int = DEFAULT_MAX_RESIDENT_POINTS,
         max_maps: int = DEFAULT_MAX_MAPS,
         keep_generations: int = 2,
-        mode: str = "persistent",
         planner_maps: bool = False,
-        mission_id: str | None = None,
-        runner: Runner = _default_runner,
         parallel_peers: int = DEFAULT_PARALLEL_PEERS,
     ):
         if timeout_s <= 0 or poll_s <= 0 or retry_s < 0:
@@ -382,10 +336,6 @@ class MolaWorker:
             or parallel_peers < 1
         ):
             raise ValueError("parallel_peers must be a positive integer")
-        if mode not in ("persistent", "oneshot"):
-            raise ValueError("worker mode must be persistent or oneshot")
-        if planner_maps and mode != "persistent":
-            raise ValueError("planner maps require the persistent native runtime")
         self.maps_root = Path(maps_root)
         self.importer = Path(importer)
         self.timeout_s = timeout_s
@@ -396,12 +346,8 @@ class MolaWorker:
         self.max_resident_points = max_resident_points
         self.max_maps = max_maps
         self.keep_generations = keep_generations
-        self.mode = mode
         self.planner_maps = planner_maps
-        self.mission_id = (
-            _canonical_mission_id(mission_id) if mission_id is not None else None
-        )
-        self.runner = runner
+        self.mission_id = _canonical_mission_id(mission_id)
         self.parallel_peers = parallel_peers
         # Per-peer native state: one ``swarmdeck-mola-import --serve`` client
         # per peer root, created on the peer's first native build and closed
@@ -430,15 +376,11 @@ class MolaWorker:
         self._logged_errors: dict[Path, str] = {}
 
     def discover(self) -> tuple[Path, ...]:
-        """Return peer roots matching /maps/<mission>/<robot>/snapshot.json."""
+        """Return this mission's peer roots, /maps/<mission>/<robot>/snapshot.json."""
 
-        if self.mission_id is not None:
-            mission_root = self.maps_root / self.mission_id
-            return tuple(
-                sorted(path.parent for path in mission_root.glob("*/snapshot.json"))
-            )
+        mission_root = self.maps_root / self.mission_id
         return tuple(
-            sorted(path.parent for path in self.maps_root.glob("*/*/snapshot.json"))
+            sorted(path.parent for path in mission_root.glob("*/snapshot.json"))
         )
 
     @staticmethod
@@ -776,48 +718,33 @@ class MolaWorker:
                     and prior.get("geometry_fingerprint") == geometry_fingerprint
                     else "replace"
                 )
-                response: dict[str, object] | None = None
-                if self.mode == "persistent":
-                    response = self._persistent_import(
-                        peer_root=peer_root,
-                        mode=request_mode,
-                        map_id=map_id,
-                        input_path=input_path,
-                        input_sha=input_sha,
-                        chunks=chunks,
-                        output_path=output_path,
-                        planner_output_path=planner_path,
-                        snapshot_id=snapshot_id,
-                        manifest=manifest,
-                    )
-                else:
-                    self.runner(
-                        (
-                            str(self.importer),
-                            str(input_path),
-                            str(chunks),
-                            str(output_path),
-                        ),
-                        self.timeout_s,
-                    )
-                if response is not None:
-                    # `_validate_runtime_response` already checked
-                    # `output_size_bytes` and `output_sha256` are well-formed;
-                    # the native runtime computed that hash itself from the
-                    # exact bytes it wrote, so trust it rather than re-reading
-                    # and re-hashing what may be a multi-megabyte artifact
-                    # only to compare against a hash that came from the same
-                    # process in the first place. `stat` still catches a
-                    # truncated, missing or oversized write.
-                    size, digest = (
-                        response["output_size_bytes"],
-                        response["output_sha256"],
-                    )
-                    if not _stat_matches(output_path, size, self.max_output_bytes):
-                        self._invalidate_runtime(peer_root)
-                        raise WorkerError("native artifact does not match its response")
-                else:
-                    size, digest = _sha256_file(output_path, self.max_output_bytes)
+                response = self._persistent_import(
+                    peer_root=peer_root,
+                    mode=request_mode,
+                    map_id=map_id,
+                    input_path=input_path,
+                    input_sha=input_sha,
+                    chunks=chunks,
+                    output_path=output_path,
+                    planner_output_path=planner_path,
+                    snapshot_id=snapshot_id,
+                    manifest=manifest,
+                )
+                # `_validate_runtime_response` already checked
+                # `output_size_bytes` and `output_sha256` are well-formed;
+                # the native runtime computed that hash itself from the
+                # exact bytes it wrote, so trust it rather than re-reading
+                # and re-hashing what may be a multi-megabyte artifact
+                # only to compare against a hash that came from the same
+                # process in the first place. `stat` still catches a
+                # truncated, missing or oversized write.
+                size, digest = (
+                    response["output_size_bytes"],
+                    response["output_sha256"],
+                )
+                if not _stat_matches(output_path, size, self.max_output_bytes):
+                    self._invalidate_runtime(peer_root)
+                    raise WorkerError("native artifact does not match its response")
                 final_path = components_root / filename
                 staged.append((output_path, final_path))
                 artifacts.append(
@@ -834,7 +761,6 @@ class MolaWorker:
                     }
                 )
                 if planner_path is not None:
-                    assert response is not None
                     # `_validate_runtime_response` does not cover the planner
                     # fields (only sent when planner_maps is on), so their
                     # shape is checked here before trusting them the same way.
@@ -1171,12 +1097,9 @@ def main() -> None:
         type=int,
         default=int(os.getenv("SWARMDECK_MOLA_MAX_MAPS", DEFAULT_MAX_MAPS)),
     )
-    parser.add_argument(
-        "--mode",
-        choices=("persistent", "oneshot"),
-        default=os.getenv("SWARMDECK_MOLA_MODE", "persistent"),
-        help="native importer lifecycle; oneshot is the explicit compatibility mode",
-    )
+    # Deprecated: the native runtime is always persistent. `--mode persistent`
+    # is still accepted so compose files written for older images keep working.
+    parser.add_argument("--mode", choices=("persistent",), help=argparse.SUPPRESS)
     parser.add_argument(
         "--parallel-peers",
         type=_positive_int,
@@ -1194,15 +1117,15 @@ def main() -> None:
         default=os.getenv("SWARMDECK_MISSION_ID"),
         help="canonical mission UUID to process (defaults to SWARMDECK_MISSION_ID)",
     )
-    parser.add_argument(
-        "--all-missions",
-        action="store_true",
-        help="explicitly enable legacy discovery across every mission directory",
-    )
     args = parser.parse_args()
-    if args.all_missions and args.mission_id is not None:
-        parser.error("--all-missions conflicts with --mission-id/SWARMDECK_MISSION_ID")
-    if not args.all_missions and args.mission_id is None:
+    if args.mode is not None:
+        print(
+            "swarmdeck-mola-worker: --mode is deprecated; the runtime is always "
+            "persistent",
+            file=sys.stderr,
+            flush=True,
+        )
+    if args.mission_id is None:
         parser.error("--mission-id or SWARMDECK_MISSION_ID is required")
     MolaWorker(
         args.maps_root,
@@ -1215,9 +1138,8 @@ def main() -> None:
         max_points_per_map=args.max_points_per_map,
         max_resident_points=args.max_resident_points,
         max_maps=args.max_maps,
-        mode=args.mode,
         planner_maps=args.planner_maps,
-        mission_id=None if args.all_missions else args.mission_id,
+        mission_id=args.mission_id,
         parallel_peers=args.parallel_peers,
     ).run_forever()
 

@@ -81,8 +81,8 @@ class PeerBody:
 
 # The simulated fleet's platforms, mirroring ROBOT_PROFILES in
 # swarmdeck_ros/src/swarmdeck_sim/scenario/spawn_fleet.py. The peer container
-# mounts autonomy/ and deploy/autonomy/ only, so it cannot import the
-# simulation package; autonomy/tests/test_peer_mask.py imports both tables and
+# mounts autonomy/ and swarmdeck_ros/src/swarmdeck_peer/ only, so it cannot
+# import the simulation package; autonomy/tests/test_peer_mask.py imports both tables and
 # fails if they ever drift apart.
 #
 # top_height is max(deck_top, lidar_z) per platform: on all three the mapping
