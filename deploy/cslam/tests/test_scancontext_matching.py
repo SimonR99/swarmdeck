@@ -81,3 +81,16 @@ def test_ringkey_candidates_match_full_tree_after_resize():
                 np.testing.assert_array_equal(
                     matcher._candidate_indices(query), expected
                 )
+
+
+def test_duplicate_keys_across_cached_tree_and_tail_keep_full_tree_tie_order():
+    rng = np.random.default_rng(388)
+    for _ in range(100):
+        matcher = ScanContextMatching(num_candidates=1)
+        for index in range(10):
+            matcher.add_item(rng.random(1200), index)
+        query = rng.random(20)
+        nearest = matcher._candidate_indices(query)[0]
+        matcher.add_item(matcher.scancontexts[nearest].ravel(), 10)
+        expected = spatial.KDTree(matcher.ringkeys[:11]).query(query, k=1)[1]
+        assert matcher._candidate_indices(query)[0] == expected

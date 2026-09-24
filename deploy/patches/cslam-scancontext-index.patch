@@ -48,7 +48,7 @@
          rk = sc_utils.sc2rk(sc)
  
          self.scancontexts[self.nb_items] = sc
-@@ -42,6 +47,34 @@
+@@ -42,6 +47,38 @@
          self.items[self.nb_items] = item
  
          self.nb_items = self.nb_items + 1
@@ -76,14 +76,18 @@
 +        # KDTree's equal-distance tie order depends on its full tree layout.
 +        # Preserve the old candidates (and therefore scores) for those ties.
 +        nearest = distances[order[: count + 1]]
-+        if len(nearest) > 1 and np.any(nearest[1:] == nearest[:-1]):
++        # NumPy tail norms and KDTree norms may differ by a few ulps even
++        # for identical ring keys. Conservatively rebuild for near ties too.
++        if len(nearest) > 1 and np.any(
++            np.isclose(nearest[1:], nearest[:-1], rtol=1e-14, atol=0.0)
++        ):
 +            tree = spatial.KDTree(self.ringkeys[: self.nb_items])
 +            return np.atleast_1d(tree.query(ringkey_query, k=count)[1])
 +        return indices[order[:count]]
  
      def search(self, query, k):
          """Search for nearest neighbors
-@@ -57,33 +90,31 @@
+@@ -57,33 +94,31 @@
              return [None], [None]
  
          # step 1
@@ -127,7 +131,7 @@
          return [self.items[nn_idx]], [similarity]
  
      def search_best(self, query):
-@@ -98,7 +129,7 @@
+@@ -98,7 +133,7 @@
          """
          if self.nb_items < 1:
              return None, None
