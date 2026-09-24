@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 from contextlib import nullcontext
 
-from adapters.live_mapping import live_state
+from adapters.navigation_display import live_state
 
 from adapters.runtime import (
     RECONNECT_BACKOFF_S,

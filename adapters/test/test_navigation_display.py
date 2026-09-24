@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import numpy as np
 
-from adapters.live_mapping import live_state
+from adapters.navigation_display import live_state
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.map_epochs import robot_run_id
 
