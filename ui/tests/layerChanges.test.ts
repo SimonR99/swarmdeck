@@ -7,7 +7,7 @@ import {
   pathDependencies,
   trailDependencies
 } from '../src/lib/components/map3d/layerChanges.ts';
-import type { MapRobot } from '../src/lib/components/map2d/mapLayers.ts';
+import type { MapRobot } from '../src/lib/components/map/mapRobot.ts';
 
 function robot(overrides: Partial<MapRobot> = {}): MapRobot {
   return {

@@ -1,4 +1,4 @@
-import type { MapRobot } from '../map2d/mapLayers.ts';
+import type { MapRobot } from '../map/mapRobot.ts';
 import type { ReplicaTacticalSelection } from './replicaTactical.ts';
 import { sameDrawnValue } from '../../stores/sameFieldValue.ts';
 

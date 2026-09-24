@@ -1,19 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { RefreshCw } from 'lucide-svelte';
+  import { replicaCatalogue } from '$lib/stores/replicaCatalogue.svelte';
   import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
-  import {
-    catalogueLabel,
-    catalogueSelection,
-    fetchReplicaCatalogue,
-    type ReplicaCatalogue,
-    type ReplicaCatalogueEntry
-  } from './replicaCatalogue';
+  import { catalogueLabel, catalogueSelection, type ReplicaCatalogueEntry } from './replicaCatalogue';
 
-  let entries = $state<ReplicaCatalogueEntry[]>([]);
-  let loading = $state(false);
-  let error = $state('');
-  let refreshController: AbortController | null = null;
+  const entries = $derived(replicaCatalogue.catalogue?.components ?? []);
+  // Keep the last verified catalogue and current map selection visible
+  // through a transient catalogue failure.
+  const error = $derived(replicaCatalogue.error);
+  const loading = $derived(replicaCatalogue.loading);
 
   function selectionValue(entry: ReplicaCatalogueEntry) {
     return `${entry.session_id}\u0000${entry.component_id}`;
@@ -25,26 +21,6 @@
     if (!selection) return 'live';
     if (selection.scope === 'fleet') return `${selection.sessionId}\u0000${selection.componentId}`;
     return 'robot-inspection';
-  }
-
-  async function refresh() {
-    if (loading) return;
-    loading = true;
-    const controller = new AbortController();
-    refreshController = controller;
-    try {
-      const catalogue = await fetchReplicaCatalogue(undefined, controller.signal);
-      entries = catalogue.components;
-      error = '';
-    } catch (reason) {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      // Keep the last verified catalogue and current map selection visible
-      // through a transient catalogue failure.
-      error = reason instanceof Error ? reason.message : 'Component catalogue unavailable';
-    } finally {
-      if (refreshController === controller) refreshController = null;
-      loading = false;
-    }
   }
 
   function choose(value: string) {
@@ -59,14 +35,7 @@
     }
   }
 
-  onMount(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 10_000);
-    return () => {
-      window.clearInterval(timer);
-      refreshController?.abort();
-    };
-  });
+  onMount(() => replicaCatalogue.subscribe());
 </script>
 
 <div class="mt-2 rounded-[--radius-control] bg-surface-2/60 px-1.5 py-1.5">
@@ -77,7 +46,7 @@
       title="Refresh verified map components"
       aria-label="Refresh verified map components"
       disabled={loading}
-      onclick={() => void refresh()}
+      onclick={() => void replicaCatalogue.refresh()}
     ><RefreshCw class="h-3 w-3 {loading ? 'animate-spin' : ''}" /></button>
   </div>
   <select

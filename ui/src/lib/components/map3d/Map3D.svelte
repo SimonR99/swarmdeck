@@ -29,28 +29,26 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
   import {
-    ReplicaTacticalLoader,
-    ReplicaRevisionTracker,
-    acceptsReplicaResult,
     replicaSelectionKey,
-    type ReplicaTacticalCloud
+    type ReplicaTacticalCloud,
+    type ReplicaTacticalSelection
   } from './replicaTactical';
+  import { ReplicaCloudLoad } from './replicaCloudLoad';
   import {
-    fetchLiveReplicaFrame,
-    liveReplicaDrawChanged,
-    liveReplicaFreshnessDeadline,
     liveRobotFreshness,
     liveRobotToMapRobot,
     liveReplicaMatchesSelection,
-    postLiveReplicaGoal,
-    type LiveReplicaSelection
+    postLiveReplicaGoal
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
-  import { DeadlineWakeup, MOTION_LINGER_MS, RenderScheduler } from './renderScheduler';
-  import { LayerUpdateGate } from './layerUpdateGate';
+  import { LiveReplicaPoll } from './liveReplicaPoll';
+  import { GaussianFetch } from './gaussianFetch';
+  import { RenderLoop } from './renderLoop';
+  import { SceneInteraction, type InteractionScene, type NDC } from './sceneInteraction';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
-  import type { MapRobot } from '../map2d/mapLayers';
+  import type { MapRobot } from '../map/mapRobot';
+  import { localRobotOf, membersOnMap, slamMergeMembers } from '../map/mapMembership';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
 
   let {
@@ -114,41 +112,36 @@
   let ceilingMin = $state(0.0);
   let ceilingCutoff = $state(2.3); // Initial cutoff: open interior view
 
-  // Interaction State
+  // Interaction State: the gestures themselves live in sceneInteraction.ts.
   let dragging = $state(false);
-  let isPanning = false;
-  let pointerOrigin: { x: number; y: number } | null = null;
-  let pointerDownPos: { x: number; y: number } | null = null;
-  let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
-  // Read by the frame but not reactive: every poll brings new freshness ages,
-  // so setLiveReplica() bumps liveReplicaRevision only when what is drawn changed.
-  let liveReplica: LiveReplicaSelection | null = null;
+  // The live robot telemetry over a replica, polled by liveReplicaPoll.ts.
+  // Its frame is read by the draw but not reactive: every poll brings new
+  // freshness ages, so liveReplicaRevision advances only when what is drawn
+  // changed.
   let liveReplicaRevision = $state(0);
-  let liveReplicaPending: AbortController | null = null;
-  let liveReplicaKey = '';
-
-  // A drawn replica pose, goal or path disappears when it goes stale, which
-  // no input change announces: polls that fail or return 404 adopt no frame.
-  const freshnessWakeup = new DeadlineWakeup(
-    (now) => liveReplicaFreshnessDeadline(liveReplica, now),
-    () => {
-      layerUpdates.invalidateFreshness();
-      requestRender();
-    }
-  );
-
-  function setLiveReplica(next: LiveReplicaSelection | null) {
-    const redraw = liveReplicaDrawChanged(liveReplica, next, performance.now());
-    liveReplica = next;
-    freshnessWakeup.arm();
+  const liveReplicaPoll = new LiveReplicaPoll({
     // Called from effects too, which must not come to depend on the counter.
-    if (redraw) liveReplicaRevision = untrack(() => liveReplicaRevision) + 1;
+    onDrawChange: () => (liveReplicaRevision = untrack(() => liveReplicaRevision) + 1),
+    // A drawn replica pose, goal or path disappears when it goes stale, which
+    // no input change announces: polls that fail or return 404 adopt no frame.
+    onExpire: () => {
+      renderLoop.invalidateFreshness();
+      requestRender();
+    },
+    stillWanted: () => liveTactical && Boolean(replicaTactical.selection)
+  });
+
+  function refreshLiveReplica() {
+    const selection = tacticalReplica;
+    if (!active || !liveTactical || !selection) return;
+    void liveReplicaPoll.refresh(selection);
   }
 
   function robotsOnMap(): MapRobot[] {
     if (tacticalReplica) {
+      const liveReplica = liveReplicaPoll.current;
       if (!liveTactical || !liveReplica) return [];
       if (replicaCloud?.view.solution_order_known !== true) return [];
       const age = (performance.now() - liveReplica.receivedAt) / 1000;
@@ -158,24 +151,18 @@
         replicaCloud?.view.solution_order
       )) return [];
       if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
-      return liveReplica.frame.robots
-        .filter((robot) => liveRobotFreshness(robot, age).pose)
-        .filter((robot) => fleet.isEnabled(robot.robot_id))
-        .filter((robot) => tacticalReplica.scope !== 'robot' || robot.robot_id === tacticalReplica.robotId)
-        .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
+      const fresh = liveReplica.frame.robots.filter((robot) => liveRobotFreshness(robot, age).pose);
+      return membersOnMap(fresh, {
+        localRobot: tacticalReplica.scope === 'robot' ? tacticalReplica.robotId : null,
+        members: null,
+        isEnabled: (id) => fleet.isEnabled(id)
+      }).map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
     }
-    if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
-      if (!fleet.isEnabled(mapStore.viewRobot)) return [];
-      const robot = fleet.get(mapStore.viewRobot);
-      return robot ? [robot] : [];
-    }
-    const members = mapStore.status?.global_members;
-    if (members && members.length > 0) {
-      return fleet.robots.filter(
-        (robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id)
-      );
-    }
-    return fleet.robots.filter((robot) => fleet.isEnabled(robot.robot_id));
+    return membersOnMap(fleet.robots, {
+      localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
+      members: slamMergeMembers(mapStore.status?.global_members),
+      isEnabled: (id) => fleet.isEnabled(id)
+    });
   }
 
   // Public camera control methods for ViewControls toolbar
@@ -271,20 +258,15 @@
   }
 
   let worker: Worker | null = null;
-  let pending: AbortController | null = null;
-  let generation = 0;
   let lastScope: string | null = null;
   let mounted = $state(false);
-  const replicaLoader = new ReplicaTacticalLoader();
-  const replicaRevision = new ReplicaRevisionTracker();
-  let replicaNeedsRebuild = false;
-  // A composite's revision advances with every member keyframe, which during
-  // exploration is about once a second across the fleet. Rebuilding the
-  // terrain that often flickers and wastes the worker; geometry-only
-  // revisions are picked up on this cadence, while a selection or frame
-  // change still rebuilds at once through the direct fetchCloud() calls.
-  const REPLICA_REVISION_POLL_MS = 5000;
-  let lastCloudBuildAt = 0;
+  // The replica point cloud, loaded by replicaCloudLoad.ts. A selection or
+  // frame change rebuilds at once through the direct fetchCloud() calls;
+  // geometry-only revisions are picked up on its slower cadence.
+  const cloudLoad = new ReplicaCloudLoad(
+    { selection: () => tacticalReplica, hasScene: () => scene !== null },
+    prepareCloud
+  );
   let renderedOwnerIds: string[] = [];
   const seenMapEpochs = new Map<string, string>();
   $effect(() => {
@@ -293,9 +275,7 @@
       if (seenMapEpochs.get(robotId) === epoch) continue;
       seenMapEpochs.set(robotId, epoch);
       const owner = renderedOwnerIds.indexOf(robotId);
-      generation++;
-      pending?.abort();
-      pending = null;
+      cloudLoad.cancel();
       if (owner >= 0) {
         scene?.terrain.removeOwner(owner, quality);
         scene?.gaussians.clear();
@@ -303,16 +283,14 @@
       points = scene?.terrain.pointCount ?? 0;
       voxels = scene?.terrain.voxelCount ?? 0;
       robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
-      replicaRevision.clear();
-      replicaNeedsRebuild = true;
-      gaussianEtag = '';
-      setLiveReplica(null);
+      cloudLoad.forgetRevision(true);
+      gaussianFetch.forget();
+      liveReplicaPoll.set(null);
       scene?.layers.invalidate();
       requestRender();
       void fetchCloud();
     }
   });
-  let gaussianEtag = '';
   let firstCloud = true;
 
   function gaussianScope() {
@@ -326,31 +304,6 @@
       return 'blocked:global-waiting-for-component';
     }
     return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : 'replica:none';
-  }
-
-  async function refreshLiveReplica() {
-    const selection = tacticalReplica;
-    if (!active || !liveTactical || !selection || liveReplicaPending) return;
-    const key = replicaSelectionKey(selection);
-    const controller = new AbortController();
-    const startedAt = performance.now();
-    const timeout = window.setTimeout(() => controller.abort(), 1500);
-    liveReplicaPending = controller;
-    try {
-      const frame = await fetchLiveReplicaFrame(selection, controller.signal);
-      if (key !== liveReplicaKey || !liveTactical || !replicaTactical.selection) return;
-      if (frame) setLiveReplica({ frame, receivedAt: startedAt });
-      // A 404/409 retains the last verified overlay until its three-second
-      // freshness budget expires; this avoids blinking during a frame swap.
-    } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
-        // Keep the last coherent live telemetry through a transient response
-        // failure; the freshness budget hides it once it is no longer current.
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (liveReplicaPending === controller) liveReplicaPending = null;
-    }
   }
 
   const waitingForGlobalComponent = $derived(
@@ -376,7 +329,7 @@
 
   function prepareCloud(
     id: number,
-    controller: AbortController,
+    signal: AbortSignal,
     positions: Float32Array,
     owners: Uint8Array,
     rgb?: Uint8Array
@@ -389,7 +342,7 @@
           e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.data);
       };
       worker!.onerror = () => reject(new Error('Map preparation failed'));
-      controller.signal.addEventListener(
+      signal.addEventListener(
         'abort',
         () => reject(new DOMException('Aborted', 'AbortError')),
         { once: true }
@@ -432,75 +385,59 @@
   }
 
   async function fetchCloud() {
-    if (!scene || !worker || !active || document.hidden || pending || !tacticalReplica) return;
+    if (!scene || !worker || !active || document.hidden || cloudLoad.busy || !tacticalReplica) return;
     if (waitingForGlobalComponent) return;
-    const controller = new AbortController();
-    pending = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 20000);
-    const id = ++generation;
-    const selection = { ...tacticalReplica };
-    const currentScope = replicaSelectionKey(selection);
+    const result = await cloudLoad.load();
+    if (!result) return;
+    if (result.kind === 'current') {
+      error = null;
+      return;
+    }
+    if (result.kind === 'failed') {
+      error = result.message;
+      return;
+    }
+    const { data, cloud, resetView } = result;
     try {
-      const loaded = await replicaLoader.load(
-        selection,
-        controller.signal,
-        replicaNeedsRebuild ? null : replicaRevision.current
-      );
-      if (!loaded) {
-        if (acceptsReplicaResult(currentScope, tacticalReplica, id, generation)) error = null;
-        return;
-      }
-      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
-      const transition = replicaRevision.transition(loaded);
-      const data = await prepareCloud(id, controller, loaded.positions, loaded.owners, loaded.rgb);
-      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
-      displayTerrain(data, loaded.ownerIds, Boolean(loaded.rgb), transition === 'selection' || transition === 'frame');
-      replicaRevision.commit(loaded);
-      replicaCloud = { view: loaded.view, partial: loaded.partial, frameKey: loaded.frameKey };
-      replicaNeedsRebuild = false;
-      lastCloudBuildAt = performance.now();
+      displayTerrain(data, cloud.ownerIds, Boolean(cloud.rgb), resetView);
+      cloudLoad.commit(cloud);
+      replicaCloud = { view: cloud.view, partial: cloud.partial, frameKey: cloud.frameKey };
       error = null;
     } catch (cause) {
-      if (!controller.signal.aborted && id === generation) {
-        error = cause instanceof Error ? cause.message : String(cause);
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (pending === controller) pending = null;
+      error = cause instanceof Error ? cause.message : String(cause);
     }
   }
 
-  let gaussianPending: AbortController | null = null;
+  const gaussianFetch = new GaussianFetch({ scope: gaussianScope, hasScene: () => scene !== null });
+
+  function showGaussianFailure(message: string) {
+    const cached = gaussianCount > 0;
+    scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
+    requestRender();
+    gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${message}`;
+  }
+
   async function fetchGaussians() {
-    if (!scene || !active || document.hidden || gaussianPending) return;
-    const currentScope = gaussianScope(),
-      controller = new AbortController();
-    gaussianPending = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    if (!scene || !active || document.hidden || gaussianFetch.busy) return;
+    const result = await gaussianFetch.fetch();
+    if (!result || result.kind === 'unchanged') return;
+    if (result.kind === 'failed') {
+      showGaussianFailure(result.message);
+      return;
+    }
+    if (!scene) return;
+    if (result.kind === 'missing') {
+      scene.gaussians.clear();
+      gaussianCount = 0;
+      gaussianBuffer = null;
+      scene.terrain.setGaussianProxy(renderMode === 'gaussians');
+      gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
+      requestRender();
+      return;
+    }
     try {
-      const response = await fetch(`/api/map/gaussians${currentScope}`, {
-        signal: controller.signal,
-        headers: gaussianEtag ? { 'If-None-Match': gaussianEtag } : {}
-      });
-      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
-      if (response.status === 304) return;
-      if (response.status === 404) {
-        scene.gaussians.clear();
-        gaussianCount = 0;
-        gaussianBuffer = null;
-        gaussianEtag = '';
-        scene.terrain.setGaussianProxy(renderMode === 'gaussians');
-        gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
-        requestRender();
-        return;
-      }
-      if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
-      if (Number(response.headers.get('Content-Length')) > 112000016)
-        throw new Error('Reconstruction exceeds download limit');
-      const buffer = await response.arrayBuffer();
-      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
       const firstModel = scene.gaussians.count === 0;
-      scene.gaussians.load(buffer, QUALITY[quality].splats);
+      scene.gaussians.load(result.buffer, QUALITY[quality].splats);
       scene.terrain.setGaussianProxy(false);
       if (!points && firstModel && scene.gaussians.count) {
         ceilingMin = scene.gaussians.bounds.min.z;
@@ -509,21 +446,13 @@
         scene.setCeiling(ceilingCutoff);
         scene.fitMap();
       }
-      gaussianBuffer = buffer;
-      gaussianEtag = response.headers.get('ETag') ?? '';
+      gaussianBuffer = result.buffer;
+      gaussianFetch.accept(result.etag);
       gaussianCount = scene.gaussians.count;
       gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
       requestRender();
     } catch (e) {
-      if (!controller.signal.aborted && currentScope === gaussianScope()) {
-        const cached = gaussianCount > 0;
-        scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
-        requestRender();
-        gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${e instanceof Error ? e.message : String(e)}`;
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (gaussianPending === controller) gaussianPending = null;
+      showGaussianFailure(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -538,9 +467,8 @@
         gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
       }
     }
-    pending?.abort();
-    pending = null;
-    if (tacticalReplica) replicaNeedsRebuild = true;
+    cloudLoad.abort();
+    if (tacticalReplica) cloudLoad.requireRebuild();
     void fetchCloud();
   }
 
@@ -549,13 +477,8 @@
     const key = liveTactical && selection ? replicaSelectionKey(selection) : '';
     mounted;
     active;
-    if (key !== liveReplicaKey) {
-      liveReplicaKey = key;
-      liveReplicaPending?.abort();
-      liveReplicaPending = null;
-      setLiveReplica(null);
-    }
-    if (key && mounted && active) void refreshLiveReplica();
+    liveReplicaPoll.select(key);
+    if (key && mounted && active) refreshLiveReplica();
   });
 
   $effect(() => {
@@ -563,15 +486,11 @@
     if (!mounted || !active) return;
     if (currentScope === lastScope) return;
     lastScope = currentScope;
-    generation++;
-    pending?.abort();
-    pending = null;
-    replicaRevision.clear();
+    cloudLoad.cancel();
+    cloudLoad.forgetRevision(false);
     replicaCloud = null;
-    replicaNeedsRebuild = false;
-    gaussianPending?.abort();
-    gaussianPending = null;
-    gaussianEtag = '';
+    gaussianFetch.abort();
+    gaussianFetch.forget();
     gaussianBuffer = null;
     scene?.terrain.clear();
     scene?.gaussians.clear();
@@ -583,72 +502,77 @@
   });
 
   // Pointer & RTS Mouse Interaction
-  function getNDC(e: PointerEvent): THREE.Vector2 {
-    if (!canvas) return new THREE.Vector2(0, 0);
+  function getNDC(e: PointerEvent): NDC {
+    if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const y = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
-    return new THREE.Vector2(x, y);
+    return { x, y };
   }
+
+  const ndcVector = (ndc: NDC) => new THREE.Vector2(ndc.x, ndc.y);
+
+  /** Map3DScene as pointer handling sees it. */
+  function interactionScene(): InteractionScene | null {
+    const current = scene;
+    if (!current) return null;
+    return {
+      get yaw() { return current.yaw; },
+      set yaw(value) { current.yaw = value; },
+      get pitch() { return current.pitch; },
+      set pitch(value) { current.pitch = value; },
+      panBy: (dx, dy) => current.panBy(dx, dy),
+      groundAt: (ndc) => current.raycastGround(ndcVector(ndc)),
+      robotAt: (ndc) => current.raycastRobot(ndcVector(ndc)),
+      detectionAt: (ndc) => current.layers.raycastDetection(ndcVector(ndc), current.camera),
+      reticle: current.layers.cursorReticle
+    };
+  }
+
+  const interaction = new SceneInteraction<ReplicaTacticalSelection>({
+    scene: interactionScene,
+    requestRender: () => requestRender(),
+    cameraMoved: () => onCameraInteraction?.(),
+    setDragging: (value) => (dragging = value),
+    setCursor: (point, planar) => {
+      cursor3D = point ? { x: point.x, y: point.y, z: point.z } : null;
+      onCursorChange?.(planar);
+    },
+    goalMode: () => navigation.goalMode,
+    replicaShown: () => Boolean(tacticalReplica),
+    liveReplica: () =>
+      tacticalReplica && liveTactical
+        ? {
+            selection: tacticalReplica,
+            solutionOrder: replicaCloud?.view.solution_order,
+            solutionOrderKnown: replicaCloud?.view.solution_order_known === true
+          }
+        : null,
+    drawnRobotIds: () => robotsOnMap().map((robot) => robot.robot_id),
+    selected: () => fleet.selected,
+    canNavigate: (id) => fleet.can(id, 'navigate'),
+    sendGoal: (live, id, goal) =>
+      postLiveReplicaGoal(live.selection, id, live.solutionOrder ?? null, goal, undefined, navigation.exploreIfUnknown),
+    goalFailed: (message) => (error = message),
+    cancelGoalMode: () => navigation.cancelGoalMode(),
+    finishGoal: (goal) => navigation.finishGoal(goal),
+    selectRobot: (id, additive) => {
+      fleet.select(id, additive);
+      actions.selectRobots(fleet.selected);
+    },
+    selectDetection: (id) => review.select(id),
+    detectionSelected: () => review.selected
+  });
 
   function onPointerDown(e: PointerEvent) {
     if (!canvas) return;
     canvas.setPointerCapture(e.pointerId);
-    pointerDownPos = { x: e.clientX, y: e.clientY };
-    pointerOrigin = pointerDownPos;
-    dragged = false;
-    dragging = true;
-    isPanning = e.button === 2 || e.button === 1 || e.shiftKey;
+    interaction.pointerDown({ x: e.clientX, y: e.clientY }, e.button, e.shiftKey);
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!scene || !canvas) return;
-    const ndc = getNDC(e);
-
-    if (dragging && pointerDownPos) {
-      const dx = e.clientX - pointerDownPos.x;
-      const dy = e.clientY - pointerDownPos.y;
-      if (
-        pointerOrigin &&
-        Math.hypot(e.clientX - pointerOrigin.x, e.clientY - pointerOrigin.y) > 5
-      ) {
-        dragged = true;
-        onCameraInteraction?.();
-      }
-
-      if (isPanning) {
-        scene.panBy(-dx * 0.8, -dy * 0.8);
-      } else {
-        scene.yaw -= dx * 0.007;
-        scene.pitch = Math.max(0.12, Math.min(1.48, scene.pitch + dy * 0.007));
-      }
-      pointerDownPos = { x: e.clientX, y: e.clientY };
-      requestRender();
-    } else {
-      // Hover raycasting
-      const reticle = scene.layers.cursorReticle;
-      const wasVisible = reticle.visible;
-      const groundHit = scene.raycastGround(ndc);
-      if (groundHit) {
-        cursor3D = { x: groundHit.x, y: groundHit.y, z: groundHit.z };
-        onCursorChange?.(tacticalReplica ? null : { x: groundHit.x, y: groundHit.y });
-
-        // Update 3D goal cursor reticle position
-        if (navigation.goalMode && Boolean(tacticalReplica && liveTactical)) {
-          reticle.visible = true;
-          reticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
-        } else {
-          reticle.visible = false;
-        }
-      } else {
-        cursor3D = null;
-        reticle.visible = false;
-        onCursorChange?.(null);
-      }
-      // Only the reticle follows the pointer; hovering an otherwise still
-      // scene is not a reason to redraw it.
-      if (reticle.visible || wasVisible) requestRender();
-    }
+    interaction.pointerMove({ x: e.clientX, y: e.clientY }, getNDC(e));
   }
 
   function onPointerUp(e: PointerEvent) {
@@ -656,86 +580,7 @@
     try {
       canvas.releasePointerCapture(e.pointerId);
     } catch {}
-    dragging = false;
-    if (!dragged && e.button === 0 && e.type !== 'pointercancel') {
-      handleClick(e);
-    }
-    pointerDownPos = null;
-    dragged = false;
-  }
-
-  async function handleClick(e: PointerEvent) {
-    if (!scene || !canvas) return;
-    const ndc = getNDC(e);
-    const selection = tacticalReplica;
-    const liveSelection = liveTactical;
-    const displayedSolutionOrder = replicaCloud?.view.solution_order;
-    if (selection && !liveSelection) return;
-
-    // 1. Goal Navigation Targeting (left click on ground)
-    if (navigation.goalMode && e.button === 0) {
-      const hit = scene.raycastGround(ndc);
-      if (hit) {
-        if (liveSelection && selection) {
-          if (replicaCloud?.view.solution_order_known !== true ||
-              displayedSolutionOrder === undefined) {
-            navigation.cancelGoalMode();
-            return;
-          }
-          const liveIds = new Set(robotsOnMap().map((robot) => robot.robot_id));
-          const eligible = fleet.selected.filter((id) => liveIds.has(id) && fleet.can(id, 'navigate'));
-          if (!eligible.length) {
-            navigation.cancelGoalMode();
-            return;
-          }
-          try {
-            for (const id of eligible) {
-              await postLiveReplicaGoal(
-                selection,
-                id,
-                displayedSolutionOrder,
-                { x: hit.x, y: hit.y, z: hit.z, yaw: 0 },
-                undefined,
-                navigation.exploreIfUnknown
-              );
-            }
-            navigation.finishGoal({ x: hit.x, y: hit.y });
-          } catch (reason) {
-            error = reason instanceof Error ? reason.message : String(reason);
-            navigation.cancelGoalMode();
-          }
-          scene.layers.cursorReticle.visible = false;
-          requestRender();
-          return;
-        }
-        navigation.cancelGoalMode();
-        scene.layers.cursorReticle.visible = false;
-        requestRender();
-        return;
-      }
-    }
-
-    // 2. Robot Selection (raycast robot meshes)
-    const clickedRobotId = scene.raycastRobot(ndc);
-    if (clickedRobotId) {
-      fleet.select(clickedRobotId, e.shiftKey);
-      actions.selectRobots(fleet.selected);
-      requestRender();
-      return;
-    }
-
-    // 3. Object Detection Picking
-    const detHit = scene.layers.raycastDetection(ndc, scene.camera);
-    if (detHit) {
-      review.select(detHit);
-      requestRender();
-      return;
-    }
-
-    // Clicking empty space deselects detection
-    if (review.selected) {
-      review.select(null);
-    }
+    void interaction.pointerUp(e.button, e.type === 'pointercancel', () => getNDC(e), e.shiftKey);
   }
 
   function onWheel(e: WheelEvent) {
@@ -750,34 +595,29 @@
     e.preventDefault(); // Prevent browser right-click menu
   }
 
-  // Animation & Rendering Loop
-  let rafId = 0;
-  const layerUpdates = new LayerUpdateGate();
-  const scheduler = new RenderScheduler();
-  /** Wall clock until which telemetry counts as movement. */
-  let movingUntil = 0;
+  // Animation & Rendering Loop: render on demand, see renderLoop.ts.
+  const renderLoop = new RenderLoop({
+    canStart: () => mounted && active && !document.hidden,
+    frameInputs: () =>
+      scene && active
+        ? {
+            hidden: document.hidden,
+            // A robot held through a gap in its source frame needs frames to keep
+            // coming, or its grace period never expires and it is drawn for ever.
+            decorating: scene.robotManager.animating || scene.robotManager.retaining,
+            fps: QUALITY[quality].fps
+          }
+        : null,
+    draw: drawFrame
+  });
 
   /** Draw on the next animation frame, starting the loop if it had stopped. */
   function requestRender(moving = false) {
-    if (moving) movingUntil = performance.now() + MOTION_LINGER_MS;
-    scheduler.markDirty();
-    if (!rafId && mounted && active && !document.hidden) rafId = requestAnimationFrame(tick);
+    renderLoop.request(moving);
   }
 
-  function tick(timestamp: number) {
-    rafId = 0;
-    if (!scene || !active) return;
-    const decision = scheduler.frame({
-      now: timestamp,
-      hidden: document.hidden,
-      moving: timestamp < movingUntil,
-      // A robot held through a gap in its source frame needs frames to keep
-      // coming, or its grace period never expires and it is drawn for ever.
-      decorating: scene.robotManager.animating || scene.robotManager.retaining,
-      fps: QUALITY[quality].fps
-    });
-    if (decision.render || decision.again) rafId = requestAnimationFrame(tick);
-    if (!decision.render) return;
+  function drawFrame(timestamp: number, updateLayers: boolean) {
+    if (!scene) return;
     const time = timestamp * 0.001;
 
     // Center on the currently displayed robots. Live component telemetry is
@@ -806,7 +646,7 @@
       }
     });
 
-    if (layerUpdates.take(timestamp)) {
+    if (updateLayers) {
       scene.layers.update({
         robots,
         trails,
@@ -839,15 +679,10 @@
   }
 
   function pauseScene() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = 0;
     // Whatever changed while the map was away is drawn once on return.
-    scheduler.markDirty();
-    generation++;
-    pending?.abort();
-    pending = null;
-    gaussianPending?.abort();
-    gaussianPending = null;
+    renderLoop.pause();
+    cloudLoad.cancel();
+    gaussianFetch.abort();
   }
 
   function resumeScene() {
@@ -928,10 +763,10 @@
     );
     const poll = window.setInterval(() => {
       if (!active) return;
-      if (replicaNeedsRebuild || performance.now() - lastCloudBuildAt >= REPLICA_REVISION_POLL_MS) {
+      if (cloudLoad.due()) {
         void fetchCloud();
       }
-      void refreshLiveReplica();
+      refreshLiveReplica();
     }, 1000);
 
     const ro = new ResizeObserver(() => {
@@ -946,16 +781,14 @@
 
     return () => {
       mounted = false;
-      generation++;
-      pending?.abort();
-      liveReplicaPending?.abort();
-      gaussianPending?.abort();
+      cloudLoad.cancel();
+      liveReplicaPoll.dispose();
+      gaussianFetch.abort();
       worker?.terminate();
       worker = null;
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
-      freshnessWakeup.cancel();
-      if (rafId) cancelAnimationFrame(rafId);
+      renderLoop.stop();
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
       scene?.dispose();

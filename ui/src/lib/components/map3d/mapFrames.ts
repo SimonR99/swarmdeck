@@ -1,3 +1,5 @@
+import { applyPlanarTransform, planarTransform } from '../map/overlayFrame.ts';
+
 export interface MapTransform { x: number; y: number; yaw: number }
 
 export interface MapPoint3D { x: number; y: number; z?: number }
@@ -39,6 +41,10 @@ export function decalPose(
 ) {
   const width = info.width * info.resolution, height = info.height * info.resolution;
   const x = info.origin.x + width / 2, y = info.origin.y + height / 2;
-  const yaw = transform?.yaw ?? 0, c = Math.cos(yaw), s = Math.sin(yaw);
-  return { width, height, x: (transform?.x ?? 0) + x*c-y*s, y: (transform?.y ?? 0) + x*s+y*c, yaw };
+  const placed = planarTransform({
+    x: transform?.x ?? 0,
+    y: transform?.y ?? 0,
+    yaw: transform?.yaw ?? 0
+  });
+  return { width, height, ...applyPlanarTransform(placed, { x, y }), yaw: placed.yaw };
 }

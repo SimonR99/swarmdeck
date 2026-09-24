@@ -2,11 +2,16 @@
   import { Link2, Share2, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
-  import { summarizePeerSlam } from './peerStatus';
-  import { fetchReplicaCatalogue, type ReplicaCatalogueEntry } from '$lib/components/replicas/replicaCatalogue';
+  import { peerMergeComponent, summarizePeerSlam } from './peerStatus';
+  import { replicaCatalogue } from '$lib/stores/replicaCatalogue.svelte';
 
   let { open = false, onclose = () => {} }: { open?: boolean; onclose?: () => void } = $props();
-  let peerComponent = $state<ReplicaCatalogueEntry | null>(null);
+  const peerComponent = $derived(
+    peerMergeComponent({
+      catalogue: replicaCatalogue.catalogue,
+      refreshFailed: replicaCatalogue.refreshFailed
+    })
+  );
   const peers = $derived(fleet.robots.filter((robot) => fleet.isEnabled(robot.robot_id)));
   const peerStatus = $derived(summarizePeerSlam(peers));
   const rows = $derived(peers
@@ -25,26 +30,10 @@
   function onKeyDown(event: KeyboardEvent) { if (open && event.key === 'Escape') closeModal(); }
   function onBackdropClick(event: MouseEvent) { if (event.target === event.currentTarget) closeModal(); }
 
-  async function loadPeerComponent() {
-    try {
-      const catalogue = await fetchReplicaCatalogue();
-      // The deployment composite places every robot by surveyed start pose;
-      // it is not a verified merge and must not count as merged membership.
-      peerComponent = catalogue.components
-        .filter((entry) => entry.available && entry.status === 'ready' &&
-          entry.session_id === catalogue.active_session_id && !entry.composite &&
-          entry.robot_ids.length >= 2)
-        .sort((a, b) => b.robot_ids.length - a.robot_ids.length)[0] ?? null;
-    } catch {
-      peerComponent = null;
-    }
-  }
-
+  // Poll the shared catalogue faster while the panel is open.
   $effect(() => {
     if (!open) return;
-    void loadPeerComponent();
-    const timer = window.setInterval(() => void loadPeerComponent(), 2000);
-    return () => window.clearInterval(timer);
+    return replicaCatalogue.subscribe(2000);
   });
 </script>
 

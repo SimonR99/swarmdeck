@@ -1,6 +1,11 @@
-import type { Point, Pose, RobotState } from '../../types/protocol.ts';
+import type { Point, RobotState } from '../../types/protocol.ts';
+import {
+  applyPlanarTransform,
+  type FrameTransforms,
+  type PlanarTransform
+} from '../map/overlayFrame.ts';
 
-export type FrameTransforms = Record<string, Pose> | undefined;
+export type { FrameTransforms };
 
 /** What the displayed replica raster knows about who belongs on the canvas. */
 export interface GlobalMapMembership {
@@ -27,28 +32,8 @@ export function globalMapMembers(membership: GlobalMapMembership): string[] {
   return globalMembers ? [...globalMembers] : [];
 }
 
-/**
- * The rigid transform that places a robot-local overlay on the displayed
- * raster. Transform provenance is accepted only from that raster response.
- */
-export function overlayFrameOnGlobalGrid(
-  robotId: string,
-  rasterFrames: FrameTransforms
-): Pose | undefined {
-  return rasterFrames?.[robotId];
-}
-
 export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {
   return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
-}
-
-/** The rigid world-to-raster correction for one robot, or null when it has none. */
-export interface RasterProjection {
-  x: number;
-  y: number;
-  yaw: number;
-  c: number;
-  s: number;
 }
 
 /**
@@ -59,7 +44,7 @@ export interface RasterProjection {
 export function rasterProjection(
   robot: Pick<RobotState, 'robot_id' | 'navigation_transform'>,
   frames: FrameTransforms
-): RasterProjection | null | undefined {
+): PlanarTransform | null | undefined {
   const source = robot.navigation_transform;
   if (!source) return undefined;
   const target = frames?.[robot.robot_id];
@@ -78,15 +63,11 @@ export function rasterProjection(
 /** Place recorded world-frame trail points on the displayed raster. */
 export function projectTrailToRaster(
   points: readonly { x: number; y: number }[],
-  projection: RasterProjection | null | undefined
+  projection: PlanarTransform | null | undefined
 ): { x: number; y: number }[] {
   if (projection === undefined) return points as { x: number; y: number }[];
   if (projection === null) return [];
-  const { x, y, c, s } = projection;
-  return points.map((point) => ({
-    x: x + point.x * c - point.y * s,
-    y: y + point.x * s + point.y * c
-  }));
+  return points.map((point) => applyPlanarTransform(projection, point));
 }
 
 /** Re-express one coherent telemetry packet in the transform baked into the raster. */
@@ -95,12 +76,10 @@ export function projectRobotToRaster(robot: RobotState, frames: FrameTransforms)
   if (projection === undefined) return robot;
   if (projection === null) return null;
   // Compose once per packet; every path vertex shares this rigid transform.
-  const { x, y, c, s, yaw } = projection;
   const point = <T extends Point & { yaw?: number }>(value: T): T => ({
     ...value,
-    x: x + value.x * c - value.y * s,
-    y: y + value.x * s + value.y * c,
-    ...(value.yaw === undefined ? {} : { yaw: value.yaw + yaw })
+    ...applyPlanarTransform(projection, value),
+    ...(value.yaw === undefined ? {} : { yaw: value.yaw + projection.yaw })
   });
   return {
     ...robot,

@@ -6,37 +6,20 @@ make pointer handling, map selection, and reset controls harder to navigate.
 The functions intentionally receive the current viewport and layer toggles;
 they remain stateless apart from the trail history supplied by the component. */
 
-import { overlayFrameOnGlobalGrid } from './mapFrames.ts';
+import { overlayFrameOnGlobalGrid } from '../map/overlayFrame.ts';
+import { displayedRoute, type MapRobot, type RoutePoint } from '../map/mapRobot.ts';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
-import type {
-  DetectionEntity,
-  DetectionProposal,
-  Footprint,
-  RobotState
-} from '$lib/types/protocol';
+import type { DetectionEntity, DetectionProposal, Footprint } from '$lib/types/protocol';
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
 export type Viewport = { scale: number; tx: number; ty: number; rotation?: number };
 export type ScreenOf = (gx: number, gy: number) => ScreenPoint;
 
-export interface MapRobot {
-  robot_id: string;
-  robot_type?: string;
-  pose: { x: number; y: number; z?: number; yaw: number };
-  planned_path?: { x: number; y: number; z?: number }[];
-  global_planned_path?: { x: number; y: number; z?: number }[];
-  local_planned_path?: { x: number; y: number; z?: number }[];
-  footprint_radius?: number;
-  footprint?: Footprint | null;
-  goal?: { x: number; y: number; z?: number } | null;
-  nav_status?: RobotState['nav_status'];
-  mode?: RobotState['mode'];
-}
 
 // Keep the map useful while an older adapter is reconnecting and has not yet
 // sent the optional polygon in `hello`. These are the same base-frame polygons
@@ -354,7 +337,7 @@ export function drawNetworkHeatmap(
   // Global map mode: render network heatmaps for all active robots
   for (const layer of mapStore.networkLayers) {
     if (!fleet.isEnabled(layer.robotId)) continue;
-    const tf = mapStore.info?.transforms?.[layer.robotId];
+    const tf = overlayFrameOnGlobalGrid(layer.robotId, mapStore.info?.transforms);
     const width =
       (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
     const height =
@@ -479,26 +462,15 @@ export function drawRobots(
       }
     }
 
-    const isNavActive =
-      robot.nav_status === 'active' ||
-      robot.mode === 'nav' ||
-      Boolean(robot.goal);
-
-    const hasSplitPaths =
-      Boolean((robot.global_planned_path && robot.global_planned_path.length > 0) ||
-      (robot.local_planned_path && robot.local_planned_path.length > 0));
-    const globalPath = isNavActive && hasSplitPaths
-      ? (robot.global_planned_path && robot.global_planned_path.length > 0 ? robot.global_planned_path : robot.planned_path)
-      : isNavActive ? robot.planned_path : undefined;
-    const localPath = isNavActive && robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
+    const route = displayedRoute(robot);
 
     const drawPath = (
-      path: { x: number; y: number }[] | undefined,
+      path: RoutePoint[] | null,
       dash: number[],
       alpha: number,
       lineWidth: number
     ) => {
-      if (!showPlans || !isNavActive || !path || path.length < 2) return false;
+      if (!showPlans || !path) return false;
       const visiblePath = path
         .map((point) => mapStore.worldToGrid(point.x, point.y))
         .filter((point): point is GridPoint => point !== null);
@@ -541,8 +513,8 @@ export function drawRobots(
 
     // Global planner route: thick and bright with halo. Local controller trajectory:
     // solid and vibrant on top.
-    const globalPathVisible = drawPath(globalPath, [8, 5], 0.9, 3.5);
-    const localPathVisible = drawPath(localPath, [], 1.0, 4.0);
+    const globalPathVisible = drawPath(route.global, [8, 5], 0.9, 3.5);
+    const localPathVisible = drawPath(route.local, [], 1.0, 4.0);
     const anyPathVisible = globalPathVisible || localPathVisible;
 
     if (showSensors) {
@@ -586,18 +558,18 @@ export function drawRobots(
       ctx.globalAlpha = 1;
     }
 
-    if (showPlans && isNavActive && robot.goal) {
-      const goal = mapStore.worldToGrid(robot.goal.x, robot.goal.y);
+    if (showPlans && route.goal) {
+      const goal = mapStore.worldToGrid(route.goal.x, route.goal.y);
       if (goal) {
         const s = screenOf(goal.gx, goal.gy);
         // Check if the planner's global route already reaches the goal.
         // If not (e.g. on robots running only local reactive avoidance like Scout,
         // or while the planner is still computing), draw the route guide line to the goal.
-        const lastPt = globalPath && globalPath.length > 0 ? globalPath[globalPath.length - 1] : null;
+        const lastPt = route.global ? route.global[route.global.length - 1] : null;
         const reachesGoal = Boolean(
           globalPathVisible &&
           lastPt &&
-          Math.hypot(lastPt.x - robot.goal.x, lastPt.y - robot.goal.y) < 1.0
+          Math.hypot(lastPt.x - route.goal.x, lastPt.y - route.goal.y) < 1.0
         );
 
         if (!reachesGoal) {

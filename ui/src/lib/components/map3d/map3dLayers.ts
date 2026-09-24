@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { decalPose, mapFrameZ, routePositions, type MapPoint3D } from './mapFrames';
+import { overlayFrameOnGlobalGrid } from '../map/overlayFrame';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -14,7 +15,7 @@ import {
   pathDependencies,
   trailDependencies
 } from './layerChanges';
-import type { MapRobot } from '../map2d/mapLayers';
+import { displayedRoute, type MapRobot } from '../map/mapRobot';
 
 /** A rally beacon and its guide line, kept between updates and moved in place. */
 interface GoalMarker {
@@ -223,9 +224,8 @@ export class Map3DLayers {
     const live = new Set<string>();
     if (showPlans) {
       for (const robot of robots) {
-        const isNavActive =
-          robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
-        if (!isNavActive || !robot.goal) continue;
+        const goal = displayedRoute(robot).goal;
+        if (!goal) continue;
         live.add(robot.robot_id);
 
         const colorHex = new THREE.Color(fleet.colorOf(robot.robot_id)).getHex();
@@ -240,17 +240,17 @@ export class Map3DLayers {
           this.goalsGroup.add(marker.beacon, marker.line);
         }
 
-        const goalZ = mapFrameZ(robot.goal, getGroundZ);
+        const goalZ = mapFrameZ(goal, getGroundZ);
         // Robot pose Z may name the base/navigation origin rather than contact
         // ground. Keep this non-planner guide attached to the rendered surface.
         const robotGroundZ = getGroundZ?.(robot.pose.x, robot.pose.y) ?? 0;
-        marker.beacon.position.set(robot.goal.x, robot.goal.y, goalZ);
+        marker.beacon.position.set(goal.x, goal.y, goalZ);
         marker.outerRing.rotation.z = time * 2;
         marker.innerRing.rotation.z = -time * 3;
 
         const positions = marker.line.geometry.getAttribute('position') as THREE.BufferAttribute;
         positions.setXYZ(0, robot.pose.x, robot.pose.y, robotGroundZ + 0.025);
-        positions.setXYZ(1, robot.goal.x, robot.goal.y, goalZ);
+        positions.setXYZ(1, goal.x, goal.y, goalZ);
         positions.needsUpdate = true;
         marker.line.geometry.computeBoundingSphere();
         marker.line.computeLineDistances();
@@ -325,31 +325,14 @@ export class Map3DLayers {
     if (!showPlans) return;
 
     for (const robot of robots) {
-      const isNavActive =
-        robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
-      if (!isNavActive) continue;
+      const route = displayedRoute(robot);
+      if (!route.global && !route.local) continue;
 
       const color = new THREE.Color(fleet.colorOf(robot.robot_id));
-      const hasSplitPaths = Boolean(
-        (robot.global_planned_path && robot.global_planned_path.length > 0) ||
-        (robot.local_planned_path && robot.local_planned_path.length > 0)
-      );
-      const globalPath = hasSplitPaths
-        ? robot.global_planned_path && robot.global_planned_path.length > 0
-          ? robot.global_planned_path
-          : robot.planned_path
-        : robot.planned_path;
-      const localPath =
-        robot.local_planned_path && robot.local_planned_path.length > 0
-          ? robot.local_planned_path
-          : undefined;
-
       const selected = fleet.isSelected(robot.robot_id);
-      if (globalPath && globalPath.length >= 2)
-        this.addRoute(globalPath, color, selected ? 6 : 4, true, getGroundZ);
-      if (localPath && localPath.length >= 2)
-        this.addRoute(localPath, new THREE.Color(0xffffff), selected ? 5 : 3, false, getGroundZ);
-
+      if (route.global) this.addRoute(route.global, color, selected ? 6 : 4, true, getGroundZ);
+      if (route.local)
+        this.addRoute(route.local, new THREE.Color(0xffffff), selected ? 5 : 3, false, getGroundZ);
     }
   }
 
@@ -544,7 +527,10 @@ export class Map3DLayers {
         material.map.needsUpdate = true;
       }
 
-      const pose = decalPose(networkLayer.info, mapStore.info?.transforms?.[networkLayer.robotId]);
+      const pose = decalPose(
+        networkLayer.info,
+        overlayFrameOnGlobalGrid(networkLayer.robotId, mapStore.info?.transforms)
+      );
       this.networkMesh.scale.set(pose.width, pose.height, 1);
       this.networkMesh.rotation.z = pose.yaw;
       this.networkMesh.position.set(pose.x, pose.y, 0.21);
