@@ -121,13 +121,16 @@ test('centring puts a cell in the middle of the canvas', () => {
   assert.deepEqual(viewport.screenOf(10, 20), { sx: 400, sy: 300 });
 });
 
+// The line from the moving finger to the still one turns from just below
+// +180° to just above -180°: a raw step of about -360° + 0.02 rad.
+const acrossPi: [XY, XY, XY] = [{ x: 300, y: 199 }, { x: 300, y: 201 }, { x: 200, y: 200 }];
+
 test('a pinch zooms and rotates about the fingers, including across ±180°', () => {
   const rect = { left: 12, top: 30 };
   const gestures: [XY, XY, XY][] = [
     [{ x: 300, y: 200 }, { x: 330, y: 190 }, { x: 200, y: 220 }],
     [{ x: 300, y: 200 }, { x: 302, y: 201 }, { x: 299, y: 199 }],
-    // The finger line crosses the left-pointing direction: a step below -180°.
-    [{ x: 100, y: 201 }, { x: 100, y: 199 }, { x: 200, y: 200 }]
+    acrossPi
   ];
   for (const [prev, cur, other] of gestures) {
     const expected = start();
@@ -136,6 +139,46 @@ test('a pinch zooms and rotates about the fingers, including across ±180°', ()
     viewport.pinch(prev, cur, other, { x: rect.left, y: rect.top });
     close(viewport.view, expected);
   }
+});
+
+test('a pinch across ±180° turns the map by the small wrapped step about the fingers', async () => {
+  const [prev, cur, other] = acrossPi;
+  const angleOf = (finger: XY) => Math.atan2(other.y - finger.y, other.x - finger.x);
+  assert.ok(angleOf(cur) - angleOf(prev) < -Math.PI, 'the fixture crosses ±180°');
+  const step = angleOf(cur) - angleOf(prev) + Math.PI * 2;
+
+  // A wrap that never terminates hangs synchronously, which no test timeout
+  // can interrupt, so the gesture runs in a worker that is killed if it stalls.
+  const { Worker } = await import('node:worker_threads');
+  const moduleUrl = new URL('../src/lib/components/map2d/canvasViewport.ts', import.meta.url).href;
+  const worker = new Worker(
+    `const { parentPort, workerData } = require('node:worker_threads');
+     import(workerData.moduleUrl).then(({ CanvasViewport }) => {
+       const viewport = new CanvasViewport(workerData.view);
+       const { prev, cur, other, origin } = workerData;
+       const anchor = viewport.gridOf((prev.x + other.x) / 2 - origin.x, (prev.y + other.y) / 2 - origin.y);
+       viewport.pinch(prev, cur, other, origin);
+       parentPort.postMessage({ view: viewport.view, anchor: viewport.screenOf(anchor.gx, anchor.gy) });
+     });`,
+    { eval: true, workerData: { moduleUrl, view: start(), prev, cur, other, origin: { x: 12, y: 30 } } }
+  );
+  const result = await new Promise<{ view: View; anchor: { sx: number; sy: number } } | 'hung'>((resolve, reject) => {
+    const timer = setTimeout(() => resolve('hung'), 5000);
+    worker.once('message', (message) => {
+      clearTimeout(timer);
+      resolve(message);
+    });
+    worker.once('error', reject);
+  });
+  await worker.terminate();
+  assert.notEqual(result, 'hung', 'the pinch returned');
+  if (result === 'hung') return;
+  assert.ok(Math.abs(step - 0.02) < 1e-3);
+  assert.ok(Math.abs(result.view.rotation - (start().rotation + step)) < 1e-12, 'a small turn, not a full one');
+  assert.ok(Math.abs(result.view.scale - start().scale) < 1e-12, 'equal finger spacing keeps the zoom');
+  const midpoint = { sx: (cur.x + other.x) / 2 - 12, sy: (cur.y + other.y) / 2 - 30 };
+  assert.ok(Math.abs(result.anchor.sx - midpoint.sx) < 1e-9 && Math.abs(result.anchor.sy - midpoint.sy) < 1e-9,
+    'the cell under the fingers stays under them');
 });
 
 test('panning moves the view by the pointer delta', () => {
