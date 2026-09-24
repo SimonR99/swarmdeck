@@ -310,9 +310,8 @@ class RobotBridge(
         self._nav_execution_enabled = False
         self._last_link_at = 0.0
         self._pending_drive = None
-        self._goal_request_future = None
-        self._goal_request_generation = None
-        self._cancel_events: dict[int, threading.Event] = {}
+        # Lost action monitoring still suppresses automatic reverse recovery;
+        # it no longer blocks ownership while the velocity relay is closed.
         self._nav_quiet_unknown = False
         # The FollowPath handle the route progress watchdog cancelled. Its late
         # CANCELED result must not overwrite the failure recorded for it.
@@ -576,8 +575,6 @@ class RobotBridge(
                     self.planned_path = []
                     self.nav_status, self.mode = "idle", "idle"
                 return False
-            self._goal_request_future = future
-            self._goal_request_generation = generation
             self.goal = {
                 "x": final.x,
                 "y": final.y,
@@ -597,9 +594,6 @@ class RobotBridge(
             handle = future.result()
         except Exception as exc:
             with self._goal_lock:
-                if self._goal_request_generation == generation:
-                    self._goal_request_future = None
-                    self._goal_request_generation = None
                 self._nav_quiet_unknown = True
                 if generation != self._goal_generation:
                     return
@@ -607,9 +601,6 @@ class RobotBridge(
                 self._finish_goal("failed", generation)
             return
         with self._goal_lock:
-            if self._goal_request_generation == generation:
-                self._goal_request_future = None
-                self._goal_request_generation = None
             if generation != self._goal_generation:
                 # A cancel can arrive before Nav2 accepts the request. Cancel
                 # the resulting handle instead of ignoring its callbacks.
@@ -625,10 +616,6 @@ class RobotBridge(
                         )
                     except Exception:
                         self._nav_quiet_unknown = True
-                else:
-                    event = self._cancel_events.get(generation)
-                    if event is not None:
-                        event.set()
                 return
             if not handle.accepted:
                 self.node.get_logger().warn(f"[{self.id}] navigation goal rejected")
@@ -684,15 +671,11 @@ class RobotBridge(
                 except Exception:
                     self._nav_quiet_unknown = True
                     return
-                if status in {
+                if status not in {
                     GoalStatus.STATUS_SUCCEEDED,
                     GoalStatus.STATUS_CANCELED,
                     GoalStatus.STATUS_ABORTED,
                 }:
-                    event = self._cancel_events.get(generation)
-                    if event is not None:
-                        event.set()
-                else:
                     self._nav_quiet_unknown = True
                 return
             try:
@@ -920,31 +903,15 @@ class RobotBridge(
     def _cancel_nav(self) -> int:
         with self._goal_lock:
             self._hold_goal_motion()
-            canceled_generation = self._goal_generation
             self._goal_generation += 1  # Ignore callbacks from superseded goals.
-            quiet = threading.Event()
-            pending_acceptance = (
-                self._goal_request_future is not None
-                and self._goal_request_generation == canceled_generation
-            )
             if self._goal_handle is not None:
                 try:
                     self._goal_handle.cancel_goal_async()
                 except Exception:
                     self._nav_quiet_unknown = True
-            elif not pending_acceptance:
-                quiet.set()
             self._goal_handle = None
             self._nav_failure_reason = None
             self._reset_route_watchdog()
-            for old, event in list(self._cancel_events.items()):
-                if event.is_set():
-                    self._cancel_events.pop(old, None)
-            if not quiet.is_set():
-                if len(self._cancel_events) >= 8:
-                    self._nav_quiet_unknown = True
-                else:
-                    self._cancel_events[canceled_generation] = quiet
             # Every operator command that supersedes what the robot is doing
             # comes through here, so an escape can never outlive operator input.
             self._clear_escape()
@@ -993,41 +960,6 @@ class RobotBridge(
 
     def cancel_goal(self) -> int:
         return self.cancel()
-
-    def _goal_status_writable(self) -> bool:
-        return not self._nav_quiet_unknown
-
-    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
-        """Wait off the ROS timer until the canceled simulated route settles."""
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return False
-            if self._nav_quiet_unknown:
-                return False
-            events = [
-                event
-                for generation, event in sorted(self._cancel_events.items())
-                if generation < expected_generation and not event.is_set()
-            ]
-        for event in events:
-            while not event.is_set():
-                remaining = max(0.0, not_after - time.monotonic())
-                if remaining <= 0.0:
-                    return False
-                event.wait(min(0.02, remaining))
-                with self._goal_lock:
-                    if (
-                        expected_generation != self._goal_generation
-                        or self._nav_quiet_unknown
-                    ):
-                        return False
-        with self._goal_lock:
-            if expected_generation != self._goal_generation or self._nav_quiet_unknown:
-                return False
-            for old, event in list(self._cancel_events.items()):
-                if event.is_set():
-                    self._cancel_events.pop(old, None)
-            return True
 
     def _lifecycle_service_response(
         self, name: str, srv_type, request, not_after: float

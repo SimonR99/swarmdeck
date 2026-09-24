@@ -1143,11 +1143,10 @@ def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
     assert bridge.navigation_frame == "odom"
 
 
-# -- goal ownership: behaviours the hardware bridge differs on -------------
+# -- goal ownership: shared with the simulation bridge ----------------------
 #
-# adapter_sim pins its own answers to the same calls. Here a cancel closes the
-# Nav2 velocity relay at once, so nothing waits for the action server, and a
-# replacement route keeps the public status "active" while it is prepared.
+# Both bridges close the Nav2 velocity relay at once on cancel, so nothing
+# waits for the action server and replacement routes stay publicly "active".
 
 
 @pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])

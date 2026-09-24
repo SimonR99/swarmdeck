@@ -526,10 +526,6 @@ class AdapterGoalOwnershipMixin:
     and ``cancel_goal()``.
     """
 
-    def _goal_status_writable(self) -> bool:
-        """Whether the owning generation may still rewrite ``nav_status``."""
-        return True
-
     def _on_nav_cmd_vel(self, msg) -> None:
         with self._goal_lock:
             if not self._nav_execution_enabled:
@@ -552,10 +548,7 @@ class AdapterGoalOwnershipMixin:
 
     def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
         with self._goal_lock:
-            if (
-                expected_generation != self._goal_generation
-                or not self._goal_status_writable()
-            ):
+            if expected_generation != self._goal_generation:
                 return False
             if status != "active":
                 self._hold_goal_motion()
@@ -564,17 +557,14 @@ class AdapterGoalOwnershipMixin:
 
     def set_goal_pending_if_current(self, expected_generation: int) -> bool:
         with self._goal_lock:
-            if (
-                expected_generation != self._goal_generation
-                or not self._goal_status_writable()
-            ):
+            if expected_generation != self._goal_generation:
                 return False
             self._hold_goal_motion()
             self.nav_status = "active"
             return True
 
     def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
-        """Whether the owner may submit; a cancel that settles at once needs no wait."""
+        """Cancellation closes the velocity relay; only ownership needs checking."""
         with self._goal_lock:
             return expected_generation == self._goal_generation
 

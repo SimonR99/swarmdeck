@@ -104,6 +104,13 @@ Bring up the updated session launch and adapter together; a legacy Nav2 launch
 publishing directly to `cmd_vel` bypasses this gate. The generic Nav2 launch
 and hardware launch defaults are unchanged.
 
+As on hardware, a current objective may update its navigation status and plan a
+replacement immediately after cancellation; it does not wait for the cancelled
+action's terminal result. Generation checks still reject superseded commands.
+Simulation retains its separate conservative recovery rule: loss of action
+monitoring suppresses automatic reverse escape, but does not prevent a new
+owned route from being planned.
+
 ## Collaborative graph
 
 Protocol 2 adapters may report graph health:
