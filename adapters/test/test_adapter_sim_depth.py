@@ -353,18 +353,24 @@ def _camera_frame(encoding, width, height, channels, pad):
     )
 
 
+# Each wire channel k of column c holds c * channels + k (see _camera_frame);
+# `order` lists which wire channels land in the decoded B, G, R planes.
 @pytest.mark.parametrize(
-    "encoding, channels, shape",
+    "encoding, channels, order",
     [
-        ("rgb8", 3, (2, 3, 3)),
-        ("8UC3", 3, (2, 3, 3)),
-        ("bgr8", 3, (2, 3, 3)),
-        ("rgba8", 4, (2, 3, 4)),
-        ("bgra8", 4, (2, 3, 4)),
-        ("mono8", 1, (2, 3)),
+        ("rgb8", 3, (2, 1, 0)),
+        ("8UC3", 3, (2, 1, 0)),
+        ("bgr8", 3, (0, 1, 2)),
+        ("rgba8", 4, (2, 1, 0)),
+        ("bgra8", 4, (0, 1, 2)),
+        ("mono8", 1, None),
     ],
 )
-def test_camera_decoding_drops_row_padding(sim_module, encoding, channels, shape):
+def test_camera_decoding_drops_row_padding_and_reorders_to_bgr(
+    sim_module, encoding, channels, order
+):
+    import numpy as np
+
     bridge = _camera_bridge(sim_module)
     bridge._camera_frame = _camera_frame(encoding, 3, 2, channels, pad=5)
     bridge._camera_dirty = True
@@ -372,8 +378,16 @@ def test_camera_decoding_drops_row_padding(sim_module, encoding, channels, shape
     bridge.process_camera()
 
     (image,) = bridge.frames
-    assert image.shape == shape
-    assert (image != 255).all(), "row padding reached the detector"
+    columns = np.arange(3) * channels
+    if order is None:
+        expected = np.broadcast_to(columns, (2, 3))
+    else:
+        expected = np.broadcast_to(
+            np.stack([columns + k for k in order], axis=-1), (2, 3, 3)
+        )
+    assert image.shape == expected.shape
+    assert image.dtype == np.uint8
+    np.testing.assert_array_equal(image, expected)
     assert bridge._camera_dirty is False
 
 
