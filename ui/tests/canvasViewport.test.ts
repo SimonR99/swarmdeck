@@ -122,15 +122,15 @@ test('centring puts a cell in the middle of the canvas', () => {
 });
 
 // The line from the moving finger to the still one turns from just below
-// +180° to just above -180°: a raw step of about -360° + 0.02 rad.
+// +180° to just above -180°: a raw step of about -360° + 0.02 rad. Only the
+// worker test below runs it, so a wrap that hangs cannot stall this file.
 const acrossPi: [XY, XY, XY] = [{ x: 300, y: 199 }, { x: 300, y: 201 }, { x: 200, y: 200 }];
 
-test('a pinch zooms and rotates about the fingers, including across ±180°', () => {
+test('a pinch zooms and rotates about the fingers', () => {
   const rect = { left: 12, top: 30 };
   const gestures: [XY, XY, XY][] = [
     [{ x: 300, y: 200 }, { x: 330, y: 190 }, { x: 200, y: 220 }],
-    [{ x: 300, y: 200 }, { x: 302, y: 201 }, { x: 299, y: 199 }],
-    acrossPi
+    [{ x: 300, y: 200 }, { x: 302, y: 201 }, { x: 299, y: 199 }]
   ];
   for (const [prev, cur, other] of gestures) {
     const expected = start();
