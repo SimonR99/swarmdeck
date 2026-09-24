@@ -69,7 +69,9 @@ Adapters send a complete `robot_state` at 5 Hz:
 
 `planned_path` is the effective bounded route. `global_planned_path` and
 `local_planned_path` may be included when available. `nav_status` is one of
-`idle`, `active`, `succeeded`, `failed`, or `cancelled`.
+`idle`, `active`, `succeeded`, `failed`, or `cancelled`. In both simulation
+and ROS 2 hardware, `active` includes a pending replacement route: it indicates
+an owned navigation objective, not necessarily controller acceptance or motion.
 
 ## Commands
 

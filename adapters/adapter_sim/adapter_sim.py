@@ -228,9 +228,6 @@ class RobotBridge(
 
     adapter_name = "adapter_sim/0.1.0"
     coordinate_frame = "local"
-    # Nav2 controls the simulated robot directly, so do not claim that a
-    # replacement route is executing while cancellation settles.
-    goal_pending_status = "idle"
     _TRACK_IDS = staticmethod(track_ids)
 
     def __init__(

@@ -526,9 +526,6 @@ class AdapterGoalOwnershipMixin:
     and ``cancel_goal()``.
     """
 
-    # Status reported while a replacement route waits for the controller.
-    goal_pending_status: str = "active"
-
     def _goal_status_writable(self) -> bool:
         """Whether the owning generation may still rewrite ``nav_status``."""
         return True
@@ -543,7 +540,7 @@ class AdapterGoalOwnershipMixin:
                 return None
             self.cancel_goal()
             if pending:
-                self.nav_status = self.goal_pending_status
+                self.nav_status = "active"
             return self._goal_generation
 
     def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
@@ -566,7 +563,7 @@ class AdapterGoalOwnershipMixin:
             ):
                 return False
             self._hold_goal_motion()
-            self.nav_status = self.goal_pending_status
+            self.nav_status = "active"
             return True
 
     def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:

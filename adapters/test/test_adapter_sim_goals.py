@@ -489,8 +489,8 @@ def test_stale_conditional_cancel_and_status_cannot_change_newer_state(sim_modul
 # moving until its terminal result arrives, so ownership waits for that.
 
 
-@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "idle")])
-def test_sim_conditional_cancel_reports_pending_as_idle(sim_module, pending, status):
+@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])
+def test_sim_conditional_cancel_reports_pending_as_active(sim_module, pending, status):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 3
     bridge.nav_status, bridge.mode = "active", "nav"
@@ -514,7 +514,7 @@ def test_sim_status_and_pending_writes_refuse_after_unknown_quiet(sim_module):
     assert bridge.nav_status == "active"
 
 
-def test_sim_pending_goal_reports_idle(sim_module):
+def test_sim_pending_goal_reports_active(sim_module):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 3
     bridge.nav_status = "failed"
@@ -522,7 +522,7 @@ def test_sim_pending_goal_reports_idle(sim_module):
     assert bridge.set_goal_pending_if_current(2) is False
     assert bridge.nav_status == "failed"
     assert bridge.set_goal_pending_if_current(3) is True
-    assert bridge.nav_status == "idle"
+    assert bridge.nav_status == "active"
     assert bridge.set_nav_status_if_current(3, "active") is True
     assert bridge.nav_status == "active"
 
