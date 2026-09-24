@@ -49,7 +49,9 @@ explicitly unavailable rather than falling back to a rendered-map clear.
 The simulation reset uses a host-side supervisor, configured on the server by
 `SWARMDECK_SIM_RESET_DIR`. The dashboard's **Reset sim** button appears only
 when `GET /api/sim/reset` reports `supervisor_available: true`, not merely when
-a robot advertises a reset capability. Without a supervisor,
+a robot advertises a reset capability. Availability refreshes every 30 seconds
+while the dashboard is connected; the button stays visible during a reset or
+after a failed reset so its status text is not lost. Without a supervisor,
 `POST /api/sim/reset` fails and changes nothing: detections, alerts and goals
 are not cleared. Hardware fleets reset maps per robot through the epoch path
 above (with a qualified robot-local supervisor), not through simulation reset.

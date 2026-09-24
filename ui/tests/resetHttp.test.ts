@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 
 import { canResetSimulation, fetchJsonWithTimeout, resetRequestId, resetRobotMap } from '../src/lib/api/resetHttp.ts';
 
@@ -9,6 +11,88 @@ test('simulation reset is visible only with an explicitly available supervisor',
   assert.equal(canResetSimulation({}), false);
   assert.equal(canResetSimulation(undefined), false);
   assert.equal(canResetSimulation({ supervisor_available: 'true' }), false);
+});
+
+const connectionSource = readFileSync(new URL('../src/lib/api/connection.ts', import.meta.url), 'utf8');
+
+function connectionFunction(start: string, end: string, bindings: Record<string, unknown>) {
+  const source = connectionSource.slice(connectionSource.indexOf(start), connectionSource.indexOf(end));
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.None }
+  });
+  return new Function(...Object.keys(bindings), `${outputText}\nreturn ${start.match(/function (\w+)/)![1]};`)(...Object.values(bindings));
+}
+
+test('TopBar keeps reset progress and failure visible without trusting robot capabilities', () => {
+  const source = readFileSync(new URL('../src/lib/components/TopBar.svelte', import.meta.url), 'utf8');
+  const expression = source.match(/const canReset = \$derived\(([\s\S]*?)\);/)![1];
+  const visible = new Function('session', 'fleet', `return (${expression});`);
+  const fleet = { robots: [{ capabilities: ['reset'] }] };
+  assert.equal(visible({ resetSupervisorAvailable: false, resetting: false, lastReset: null }, fleet), false);
+  assert.equal(visible({ resetSupervisorAvailable: true, resetting: false, lastReset: null }, { robots: [] }), true);
+  assert.equal(visible({ resetSupervisorAvailable: false, resetting: true, lastReset: null }, fleet), true);
+  assert.equal(visible({ resetSupervisorAvailable: false, resetting: false, lastReset: { ok: false } }, fleet), true);
+  assert.equal(visible({ resetSupervisorAvailable: false, resetting: false, lastReset: { ok: true } }, fleet), false);
+});
+
+test('connection reset status requires HTTP success and clears availability on transport failure', async () => {
+  const availability: boolean[] = [];
+  let result: [Response, { supervisor_available: boolean }] | Error;
+  const fetchStatus = connectionFunction('async function fetchResetStatus', '\nfunction publishResetStatus', {
+    fetchJsonWithTimeout: async () => {
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    canResetSimulation,
+    RESET_FETCH_TIMEOUT_MS: 5000,
+    session: { setResetSupervisorAvailable: (value: boolean) => availability.push(value) }
+  });
+  result = [new Response(null, { status: 200 }), { supervisor_available: true }];
+  await fetchStatus();
+  result = [new Response(null, { status: 503 }), { supervisor_available: true }];
+  await fetchStatus();
+  result = new Error('offline');
+  await assert.rejects(fetchStatus(), /offline/);
+  assert.deepEqual(availability, [true, false, false]);
+});
+
+test('connection refreshes reset availability every 30 seconds only while live and clears its timer', () => {
+  const intervals: { callback: () => void; delay: number }[] = [];
+  const session = { connection: 'connecting', tick: () => {} };
+  let refreshes = 0;
+  const cleared: number[] = [];
+  const source = connectionSource.slice(connectionSource.indexOf('export function startConnection'))
+    .replaceAll('export function', 'function');
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ESNext }
+  });
+  const run = new Function('session', 'setInterval', 'clearInterval', 'resumeReset', `
+    let started = false, tickTimer = null, resetAvailabilityTimer = null;
+    let retryTimer = null, ws = null, mock = null, retry = 0;
+    const detectionCatalog = { load() {} };
+    const connect = () => {};
+    ${outputText}
+    return { startConnection, teardown };
+  `)(session, (callback: () => void, delay: number) => {
+    intervals.push({ callback, delay });
+    return intervals.length;
+  }, (id: number) => cleared.push(id), () => { refreshes++; });
+  run.startConnection();
+  run.startConnection();
+  const refresh = intervals.find(({ delay }) => delay === 30_000);
+  assert.ok(refresh, 'a slow supervisor refresh timer is installed');
+  assert.equal(intervals.length, 2);
+  const initial = refreshes;
+  refresh.callback();
+  assert.equal(refreshes, initial);
+  session.connection = 'live';
+  refresh.callback();
+  assert.equal(refreshes, initial + 1);
+  session.connection = 'lost';
+  refresh.callback();
+  assert.equal(refreshes, initial + 1);
+  run.teardown();
+  assert.deepEqual(cleared.sort(), [1, 2]);
 });
 
 test('reset request IDs use getRandomValues and set UUID v4/variant bits', () => {

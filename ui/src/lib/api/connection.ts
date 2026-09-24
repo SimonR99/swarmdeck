@@ -26,13 +26,12 @@ let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
 let tickTimer: number | null = null;
+let resetAvailabilityTimer: number | null = null;
 let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
 
-type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus & {
-  supervisor_available?: boolean;
-};
+type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus;
 const RESET_POLL_TIMEOUT_MS = 600_000;
 const RESET_FETCH_TIMEOUT_MS = 5_000;
 
@@ -426,6 +425,9 @@ export function startConnection() {
   void resumeReset();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
+  resetAvailabilityTimer = setInterval(() => {
+    if (session.connection === 'live') void resumeReset();
+  }, 30_000) as unknown as number;
   // The map view owns the map's polling: it is the only thing that displays a
   // raster, and it knows when one is on screen. See mapPollScheduler.ts.
 }
@@ -435,8 +437,10 @@ export function teardown() {
   started = false;
   clearTimeout(retryTimer ?? undefined);
   clearInterval(tickTimer ?? undefined);
+  clearInterval(resetAvailabilityTimer ?? undefined);
   retryTimer = null;
   tickTimer = null;
+  resetAvailabilityTimer = null;
   if (ws) ws.onclose = null;
   ws?.close();
   ws = null;

@@ -445,6 +445,7 @@ export interface SimReset {
 
 export interface SimResetSupervisorStatus {
   version: 1;
+  supervisor_available?: boolean;
   request_id?: string;
   phase: 'idle' | 'accepted' | 'stopping' | 'starting' | 'verifying' | 'done' | 'failed' | 'legacy';
   ok: boolean | null;
