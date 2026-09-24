@@ -1,6 +1,7 @@
 """Simulation composes Nav2 without changing hardware defaults or ROS contracts."""
 
 import importlib.util
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -13,7 +14,10 @@ import rclpy
 from composition_interfaces.srv import ListNodes
 from geometry_msgs.msg import TransformStamped
 from lifecycle_msgs.srv import GetState
+from launch.actions import DeclareLaunchArgument
 from rcl_interfaces.srv import GetParameters
+from rclpy.qos import QoSProfile, DurabilityPolicy
+from tf2_msgs.msg import TFMessage
 
 ROOT = Path(__file__).resolve().parents[4]
 NAV = ROOT / "swarmdeck_ros/src/swarmdeck_nav/launch/nav.launch.py"
@@ -21,8 +25,6 @@ PARAMS = ROOT / "swarmdeck_ros/src/swarmdeck_nav/config/nav2_params.yaml"
 
 
 def test_nav_composition_is_opt_in_for_hardware():
-    from launch.actions import DeclareLaunchArgument
-
     spec = importlib.util.spec_from_file_location("nav_launch", NAV)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -48,43 +50,65 @@ def call(node, service_type, name, request):
         node.destroy_client(client)
 
 
+def test_failed_ros_initialization_never_starts_nav_process(tmp_path, monkeypatch):
+    started = []
+
+    def fail_init():
+        raise RuntimeError("ROS init failed")
+
+    monkeypatch.setattr(rclpy, "init", fail_init)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: started.append(a))
+    with pytest.raises(RuntimeError, match="ROS init failed"):
+        test_nav_loads_and_activates_with_namespaced_contracts(tmp_path, True)
+    assert started == []
+
+
+def test_failed_nav_process_start_shuts_down_ros(tmp_path, monkeypatch):
+    def fail_start(*args, **kwargs):
+        raise OSError("launch unavailable")
+
+    monkeypatch.setattr(subprocess, "Popen", fail_start)
+    with pytest.raises(OSError, match="launch unavailable"):
+        test_nav_loads_and_activates_with_namespaced_contracts(tmp_path, True)
+    assert not rclpy.ok()
+
+
 @pytest.mark.parametrize("composed", [False, True])
 def test_nav_loads_and_activates_with_namespaced_contracts(tmp_path, composed):
-    log = (tmp_path / "nav.log").open("w+")
-    process = subprocess.Popen(
-        [
-            "ros2",
-            "launch",
-            str(NAV),
-            "namespace:=dds_nav",
-            f"use_composition:={str(composed).lower()}",
-            "use_sim_time:=false",
-            "bounded_startup:=true",
-            f"params_file:={PARAMS}",
-            "robot_radius:=0.51",
-            "inflation_radius:=0.76",
-        ],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
     rclpy.init()
-    node = rclpy.create_node("nav_composition_test")
-    transform = TransformStamped()
-    transform.header.frame_id = "dds_nav/odom"
-    transform.child_frame_id = "dds_nav/base_link"
-    transform.transform.rotation.w = 1.0
-    # Nav2 deliberately subscribes to namespaced TF, not the broadcaster default.
-    from rclpy.qos import QoSProfile, DurabilityPolicy
-    from tf2_msgs.msg import TFMessage
-
-    tf_pub = node.create_publisher(
-        TFMessage,
-        "/dds_nav/tf_static",
-        QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
-    )
-    tf_pub.publish(TFMessage(transforms=[transform]))
+    node = None
+    process = None
+    log = (tmp_path / "nav.log").open("w+")
     try:
+        node = rclpy.create_node("nav_composition_test")
+        process = subprocess.Popen(
+            [
+                "ros2",
+                "launch",
+                str(NAV),
+                "namespace:=dds_nav",
+                f"use_composition:={str(composed).lower()}",
+                "use_sim_time:=false",
+                "bounded_startup:=true",
+                f"params_file:={PARAMS}",
+                "robot_radius:=0.51",
+                "inflation_radius:=0.76",
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        transform = TransformStamped()
+        transform.header.frame_id = "dds_nav/odom"
+        transform.child_frame_id = "dds_nav/base_link"
+        transform.transform.rotation.w = 1.0
+        # Nav2 subscribes to namespaced TF, not the broadcaster default.
+        tf_pub = node.create_publisher(
+            TFMessage,
+            "/dds_nav/tf_static",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        tf_pub.publish(TFMessage(transforms=[transform]))
         for name in ("controller_server", "velocity_smoother"):
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -131,15 +155,15 @@ def test_nav_loads_and_activates_with_namespaced_contracts(tmp_path, composed):
         assert node.count_publishers("/dds_nav/cmd_vel") == 1
         assert node.count_subscribers("/dds_nav/tf_static") >= 1
     finally:
-        import os
-
-        os.killpg(process.pid, signal.SIGINT)
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
-        node.destroy_node()
+        if process is not None:
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
         log.seek(0)
         print(log.read())
