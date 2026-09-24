@@ -116,3 +116,23 @@ def test_detector_is_off_by_default_and_opt_in(monkeypatch):
         launch.process_environment(spec)["SWARMDECK_DETECTOR_URL"]
         == "http://duck_detector:8091"
     )
+
+
+def test_robot_poses_default_to_cslam_and_reach_the_planners(monkeypatch):
+    monkeypatch.delenv("ROBOT_POSES", raising=False)
+    spec = launch.build_spec(arguments("--drift"), "test")
+    assert spec["robot_poses"] == "cslam"
+    assert launch.process_environment(spec)["SWARMDECK_ROBOT_POSES"] == "cslam"
+
+    spec = launch.build_spec(
+        arguments("--drift", "--robot-poses", "ground_truth"), "test"
+    )
+    assert launch.process_environment(spec)["SWARMDECK_ROBOT_POSES"] == "ground_truth"
+    with pytest.raises(SystemExit):
+        arguments("--robot-poses", "odometry")
+
+
+def test_compose_carries_robot_poses_to_mgg():
+    compose = (REPO / "deploy/compose/docker-compose.yml").read_text()
+    mgg = compose.split("\n  mgg:\n", 1)[1].split("\n  peer0:", 1)[0]
+    assert 'SWARMDECK_ROBOT_POSES: "${SWARMDECK_ROBOT_POSES:-cslam}"' in mgg

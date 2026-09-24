@@ -124,6 +124,18 @@ def parser() -> argparse.ArgumentParser:
         "-e", "--explore", type=int, default=int(os.getenv("EXPLORE_SECONDS", "0"))
     )
     result.add_argument(
+        "--robot-poses",
+        choices=("cslam", "ground_truth"),
+        default=os.getenv("ROBOT_POSES", "cslam").lower(),
+        help=(
+            "inter-robot transforms the MGG planners share roadmaps with: "
+            "cslam (default, as on hardware) shares nothing until C-SLAM links "
+            "two robots into one map component, which inter-robot closures "
+            "(off by default in simulation) do; ground_truth shares from the "
+            "start with the simulator's poses"
+        ),
+    )
+    result.add_argument(
         "--detector",
         action=argparse.BooleanOptionalAction,
         default=os.getenv("DETECTOR", "0").lower() in {"1", "true", "yes", "on"},
@@ -305,6 +317,7 @@ def process_environment(
         COMPOSE_PROFILES="argos",
         SWARMDECK_CONFIG=spec["container_config"],
         SWARMDECK_ODOMETRY=spec["odometry"],
+        SWARMDECK_ROBOT_POSES=spec.get("robot_poses", "cslam"),
         SWARMDECK_TARGETS=str(spec["targets"]),
         EXPLORE_SECONDS=str(spec["explore"]),
         SWARMDECK_ROBOT_COUNT=str(spec["robot_count"]),
@@ -626,6 +639,7 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
         "robot_platforms": platforms_from_config(source, names),
         "render": args.render,
         "odometry": args.odometry,
+        "robot_poses": args.robot_poses,
         "targets": args.targets,
         "explore": args.explore,
         "compose_files": [str(path) for path in files],
@@ -642,6 +656,7 @@ def print_dry_run(spec: dict, build: bool, detach: bool) -> None:
     print(f"  Scenario:  {spec['scenario']} ({spec['robot_count']} robots)")
     print(f"  Render:    {spec['render']}")
     print(f"  Odometry:  {spec['odometry']}")
+    print(f"  Robot poses: {spec['robot_poses']}")
     detector = "on" if "duck_detector" in spec["services"] else "off"
     print(f"  Detector:  {detector}")
     invocation = command(spec) + [

@@ -34,6 +34,7 @@ COMPOSE_PROJECT ?= swarmdeck
 SCENARIO        ?= default        # default (4robot) | bistro | 3robot | dev | path/to/cfg.yaml
 RENDER          ?= software       # software | gpu (nvidia) | dri (intel/amd)
 ODOMETRY        ?= fast_livo2     # fast_livo2 | drift
+ROBOT_POSES     ?= cslam          # cslam | ground_truth: transforms MGG shares roadmaps with
 TARGETS         ?= 10             # Perception targets to scatter
 EXPLORE         ?= 0              # Initial autonomous exploration seconds
 DETECTOR        ?= 0              # 1 runs the YOLOE object detector in up-sim
@@ -72,6 +73,7 @@ help:
 	@echo ""
 	@echo "Simulation (Docker Compose + ARGoS 3):"
 	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|subt_finals|3robot] RENDER=[software|gpu|dri] DETECTOR=[0|1]"
+	@echo "                           ROBOT_POSES=[cslam|ground_truth]: transforms the MGG planners share roadmaps with"
 	@echo "  make up-argos            4-robot indoor scene with software Vulkan (portable)"
 	@echo "  make up-argos-gpu        4-robot indoor scene with NVIDIA GPU hardware acceleration"
 	@echo "  make up-argos-dri        4-robot indoor scene with Intel/AMD DRI hardware acceleration"
@@ -162,10 +164,10 @@ down-mock:
 build-argos:
 	$(COMPOSE) --profile argos build argos sim fast_livo2
 
-# Modular simulation target accepting SCENARIO, RENDER, and ODOMETRY overrides:
+# Modular simulation target accepting SCENARIO, RENDER, ODOMETRY and ROBOT_POSES overrides:
 up-sim:
 	./scripts/sim-up --scenario $(SCENARIO) --render $(RENDER) --odometry $(ODOMETRY) \
-	  --targets $(TARGETS) --explore $(EXPLORE) \
+	  --robot-poses $(ROBOT_POSES) --targets $(TARGETS) --explore $(EXPLORE) \
 	  $(if $(filter 1 true yes on,$(strip $(DETECTOR))),--detector,--no-detector)
 
 up-argos:

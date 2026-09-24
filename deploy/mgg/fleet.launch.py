@@ -46,6 +46,15 @@ def mola_initial_ground_reach(robot, lidar):
     return math.ceil(required / LATTICE_RESOLUTION_M) * LATTICE_RESOLUTION_M
 
 
+def simulation_robot_poses():
+    """The inter-robot transform source for roadmap sharing: `cslam` (the
+    default) or `ground_truth`, which only the simulation has."""
+    source = os.environ.get("SWARMDECK_ROBOT_POSES") or "cslam"
+    if source not in ("cslam", "ground_truth"):
+        raise ValueError("SWARMDECK_ROBOT_POSES must be cslam or ground_truth")
+    return source
+
+
 def simulation_robot_prefix(fleet):
     prefix = fleet.get("robot_prefix", "robot_")
     if (
@@ -110,8 +119,10 @@ def generate_launch_description():
     sensor_overrides = simulation_sensor_overrides(lidar)
     nodes = []
     params = "/opt/mgg/ros2/src/mgg_argos/config/bistro.yaml"
+    names = [f"{prefix}{i}" for i in range(len(platforms))]
+    robot_poses = simulation_robot_poses()
     for i, platform in enumerate(platforms):
-        robot = f"{prefix}{i}"
+        robot = names[i]
         selected = os.environ.get("SWARMDECK_MGG_ROBOT")
         if selected and robot != selected:
             continue
@@ -143,6 +154,8 @@ def generate_launch_description():
                 "BoundedSpaceParams.Global.max_val": bounds_max,
                 "PlanningParams.max_inclination": math.radians(30),
             },
+            peers=[name for name in names if name != robot],
+            robot_poses=robot_poses,
         )
     if not nodes:
         raise ValueError("SWARMDECK_MGG_ROBOT is not in the simulation fleet")

@@ -38,6 +38,8 @@ def launch_module(monkeypatch):
         "SWARMDECK_MAPS_ROOT",
         "SWARMDECK_PLANNING_FRAME_TEMPLATE",
         "SWARMDECK_MGG_ROBOT",
+        "SWARMDECK_ROBOT_POSES",
+        "SWARMDECK_PEER_NAMES",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
@@ -223,6 +225,83 @@ def test_sim_fleet_uses_configured_robot_prefix_for_every_mgg_boundary(
     assert [
         node.namespace for node in selected if getattr(node, "package", "") == "mgg_pci"
     ] == ["rover_1/mgg"]
+
+
+def load_fleet_launch(monkeypatch, tmp_path, name):
+    repo = Path(__file__).parents[2]
+    monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
+    monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
+    config = tmp_path / "fleet.yaml"
+    config.write_text("""fleet:
+  robot_count: 2
+  robot_type: bunker
+  robot_types:
+    robot_1: spot
+  lidar:
+    profile: vlp16
+""")
+    monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
+    spec = importlib.util.spec_from_file_location(
+        name, repo / "deploy/mgg/fleet.launch.py"
+    )
+    fleet_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet_module)
+    return fleet_module
+
+
+def robot_pose_processes(nodes):
+    return [node for node in nodes if getattr(node, "name", "").endswith("_poses")]
+
+
+def test_sim_planners_share_roadmaps_on_one_topic(launch_module, monkeypatch, tmp_path):
+    fleet_module = load_fleet_launch(monkeypatch, tmp_path, "mgg_share_launch")
+    nodes = fleet_module.generate_launch_description()
+    planners = [node for node in nodes if getattr(node, "package", "") == "mgg_ros"]
+    for planner in planners:
+        assert ("neighbour_graph_out", "/mgg/graphs") in planner.remappings
+        assert ("neighbour_graph_in", "/mgg/graphs") in planner.remappings
+        assert planner.parameters[-1]["neighbour_pose_source"] == "topic"
+        # No static offset names a real (1-based) robot id.
+        assert planner.parameters[-1]["neighbour_offsets"] == [0.0, 0.0, 0.0, 0.0]
+    # One transform publisher per robot, naming the other robots; cslam is
+    # the default source.
+    processes = robot_pose_processes(nodes)
+    assert [p.name for p in processes] == ["robot_0_robot_poses", "robot_1_robot_poses"]
+    command = processes[0].cmd
+    assert command[1].endswith("deploy/mgg/robot_poses.py")
+    assert command[2:] == [
+        "--robot",
+        "robot_0",
+        "--peers",
+        '["robot_1"]',
+        "--robot-poses",
+        "cslam",
+    ]
+
+
+def test_sim_robot_poses_source_is_selectable(launch_module, monkeypatch, tmp_path):
+    fleet_module = load_fleet_launch(monkeypatch, tmp_path, "mgg_truth_launch")
+    monkeypatch.setenv("SWARMDECK_ROBOT_POSES", "ground_truth")
+    processes = robot_pose_processes(fleet_module.generate_launch_description())
+    assert all(p.cmd[-1] == "ground_truth" for p in processes)
+    monkeypatch.setenv("SWARMDECK_ROBOT_POSES", "odometry")
+    with pytest.raises(ValueError, match="SWARMDECK_ROBOT_POSES"):
+        fleet_module.generate_launch_description()
+
+
+def test_hardware_roadmap_sharing_accepts_only_cslam(launch_module, monkeypatch):
+    path = Path(__file__).parents[2] / "deploy/mgg/hardware.launch.py"
+    spec = importlib.util.spec_from_file_location("mgg_hardware_peers", path)
+    hardware = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hardware)
+    assert hardware.hardware_fleet("botman") == (1, [])
+    monkeypatch.setenv("SWARMDECK_PEER_NAMES", '["botman", "aslan"]')
+    # Distinct 1-based ids, or the merge drops the other robot as itself.
+    assert hardware.hardware_fleet("botman") == (1, ["aslan"])
+    assert hardware.hardware_fleet("aslan") == (2, ["botman"])
+    monkeypatch.setenv("SWARMDECK_ROBOT_POSES", "ground_truth")
+    with pytest.raises(ValueError, match="only cslam"):
+        hardware.hardware_fleet("botman")
 
 
 def test_sim_fleet_rejects_robot_prefix_that_is_not_a_ros_namespace(
