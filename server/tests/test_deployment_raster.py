@@ -83,6 +83,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(replica_views, "store", lambda: store)
     monkeypatch.setattr(autonomy_routes, "store", lambda: store)
 
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
     registry = Registry()
     sink = AsyncMock()
     for robot_id, component_id in components.items():
@@ -102,7 +103,6 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(replica_live, "registry", registry)
     map_service = MapServiceStub(TRANSFORMS)
     monkeypatch.setattr(replica_views, "map_service", map_service)
-    monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
     monkeypatch.setattr(map_routes, "_optimized", {})
 
     refresher = deployment_raster.DeploymentRasterRefresher()

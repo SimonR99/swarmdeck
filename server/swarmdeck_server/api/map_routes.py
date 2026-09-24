@@ -206,6 +206,7 @@ def robot_command_error(robot_id: str) -> str | None:
 
     mission = os.environ.get("SWARMDECK_MISSION_ID")
     if not mission:
+        # Mock/dev fleets have no mapping mission but still accept UI commands.
         return None
     root = reset_root()
     if root is not None:
@@ -288,7 +289,9 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
 
     root = reset_root()
     mission = os.environ.get("SWARMDECK_MISSION_ID")
-    if root is None or not mission:
+    if not mission:
+        return JSONResponse({"error": "no active mission"}, status_code=409)
+    if root is None:
         return JSONResponse(
             {
                 "phase": "failed",
@@ -347,6 +350,8 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
 async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
     from .simulation_reset import reset_root, robot_reset_status
 
+    if not os.environ.get("SWARMDECK_MISSION_ID"):
+        return JSONResponse({"error": "no active mission"}, status_code=409)
     root = reset_root()
     if root is None:
         return JSONResponse(
@@ -367,34 +372,15 @@ async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> R
 
 
 async def reset_all_maps() -> Response:
-    if os.environ.get("SWARMDECK_MISSION_ID"):
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "reset all maps is unsupported for peer mapping; use the full mission reset",
-            },
-            status_code=409,
-        )
-    from .state import broadcast
-
-    blocked = sorted(
-        robot.robot_id
-        for robot in registry.robots.values()
-        if robot.nav_status == "active" or robot.goal is not None
+    if not os.environ.get("SWARMDECK_MISSION_ID"):
+        return JSONResponse({"error": "no active mission"}, status_code=409)
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": "reset all maps is unsupported for peer mapping; use the full mission reset",
+        },
+        status_code=409,
     )
-    if blocked:
-        return JSONResponse(
-            {
-                "error": "map reset refused while navigation is active",
-                "robots": blocked,
-            },
-            status_code=409,
-        )
-    reset = await map_service.reset_robot_async()
-    reset_optimized_maps()
-    await broadcast({"type": "network_clear", "robot_id": None})
-    events.log("map_reset", {"scope": "all", "robots": reset})
-    return JSONResponse({"ok": True, "scope": "all", "robots": reset})
 
 
 async def get_optimized_index() -> dict[str, Any]:

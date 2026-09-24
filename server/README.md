@@ -22,3 +22,19 @@ not create independent fleet instances: this remains one fleet per process.
   but camera selection has no server-to-adapter side effect.
 - `POST /api/fleet/{robot_id}/discard` is removed. Use the existing
   `DELETE /api/fleet/{robot_id}` route (as the dashboard already does).
+
+## Mission boundary
+
+The server still starts without `SWARMDECK_MISSION_ID` for `make server`,
+`make mock`, and `make demo`. Missionless mock fleets retain telemetry, drive,
+body commands, goals, exploration, and the legacy adapter reset handshake.
+Mock adapters' per-robot replica session IDs do not configure a server mission.
+
+Live mapping authority (`live_mapping` and `peer_slam`) is admitted only with
+an active server mission. Unfenced `home_pose` telemetry no longer establishes
+mapping home; epoch-qualified live mapping supplies it. Without a mission,
+`GET/POST /api/map/reset/{robot_id}`, `POST /api/map/reset`, and live-component
+GET/goal operations return HTTP 409, `no active mission`. All-map reset remains
+unsupported for a live peer mission; use the full mission reset instead.
+Historical replica browsing and safe raster retirement when a mission ends
+remain available. Replica publication and generic mock controls are unchanged.

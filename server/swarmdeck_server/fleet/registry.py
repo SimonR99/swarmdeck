@@ -208,15 +208,19 @@ class Registry:
                 return None
         r.last_seen = time.monotonic()
         try:
-            r.peer_slam = peer_status(
-                msg.get("peer_slam"),
-                r.robot_id,
-                os.environ.get("SWARMDECK_MISSION_ID") or None,
+            r.peer_slam = (
+                peer_status(msg.get("peer_slam"), r.robot_id, mission)
+                if mission
+                else None
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             r.peer_slam = None
         try:
-            r.live_mapping = validate_live_mapping(msg.get("live_mapping"), r.robot_id)
+            r.live_mapping = (
+                validate_live_mapping(msg.get("live_mapping"), r.robot_id)
+                if mission
+                else None
+            )
             r.live_mapping_received_at = r.last_seen
         except (KeyError, TypeError, ValueError, OverflowError):
             r.live_mapping = None
@@ -231,17 +235,6 @@ class Registry:
                     "y": pose[1][3],
                     "yaw": math.atan2(pose[1][0], pose[0][0]),
                 }
-        if (
-            r.home_pose is None
-            and floor is None
-            and isinstance(msg.get("home_pose"), dict)
-        ):
-            try:
-                home = {key: float(msg["home_pose"][key]) for key in ("x", "y", "yaw")}
-                if all(math.isfinite(v) for v in home.values()):
-                    r.home_pose = home
-            except (KeyError, TypeError, ValueError):
-                pass
         if "battery" in msg:
             r.battery = msg["battery"]
         if "mode" in msg:
