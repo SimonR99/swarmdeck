@@ -17,8 +17,13 @@ int main() {
   assert(!cache.matches(graph, values, {0, 0}, 0));
   cache.remember(graph, values, {0, 0}, 0);
   int skipped = 0;
-  for (int i = 0; i < 100; ++i)
-    skipped += cache.matches(graph, values, {0, 0}, 0);
+  for (int i = 0; i < 100; ++i) {
+    auto collected_graph = boost::make_shared<gtsam::NonlinearFactorGraph>();
+    auto collected_values = boost::make_shared<gtsam::Values>(*values);
+    collected_graph->emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+        0, 1, gtsam::Pose3(), gtsam::noiseModel::Isotropic::Sigma(6, 1.0));
+    skipped += cache.matches(collected_graph, collected_values, {0, 0}, 0);
+  }
   assert(skipped == 100);
   auto remote_graph = boost::make_shared<gtsam::NonlinearFactorGraph>(*graph);
   auto remote_values = boost::make_shared<gtsam::Values>(*values);
