@@ -1,24 +1,5 @@
 --- a/cslam/cslam/lidar_pr/scancontext_matching.py
 +++ b/cslam/cslam/lidar_pr/scancontext_matching.py
-@@ -2,13 +2,13 @@
- import numpy as np
- from scipy import spatial
- 
-+
- class ScanContextMatching(object):
--    """Nearest Neighbor matching of description vectors
--    """
-+    """Nearest Neighbor matching of description vectors"""
- 
--    def __init__(self, shape=[20,60], num_candidates=10, threshold=0.15): 
--        """ Initialization
--            Default configs are the same as in the original paper 
-+    def __init__(self, shape=[20, 60], num_candidates=10, threshold=0.15):
-+        """Initialization
-+        Default configs are the same as in the original paper
- 
-         """
-         self.shape = shape
 @@ -19,6 +19,8 @@
          self.ringkeys = np.zeros((1000, self.shape[0]))
          self.items = dict()
@@ -28,31 +9,10 @@
  
      def add_item(self, descriptor, item):
          """Add item to the matching list
-@@ -30,11 +32,14 @@
-         sc = descriptor.reshape(self.shape)
- 
-         if self.nb_items >= len(self.ringkeys):
--            self.scancontexts.resize((2 * len(self.scancontexts), self.shape[0], self.shape[1]),
--                                 refcheck=False)
--            self.ringkeys.resize((2 * len(self.ringkeys), self.shape[0]),
--                                 refcheck=False)
--                                 
-+            self.scancontexts.resize(
-+                (2 * len(self.scancontexts), self.shape[0], self.shape[1]),
-+                refcheck=False,
-+            )
-+            self.ringkeys.resize(
-+                (2 * len(self.ringkeys), self.shape[0]), refcheck=False
-+            )
-+
-         rk = sc_utils.sc2rk(sc)
- 
-         self.scancontexts[self.nb_items] = sc
-@@ -42,6 +47,38 @@
-         self.items[self.nb_items] = item
+@@ -43,6 +45,38 @@
  
          self.nb_items = self.nb_items + 1
-+
+ 
 +    def _candidate_indices(self, ringkey_query):
 +        # A copied tree owns stable data across ringkeys.resize(). Newly added
 +        # descriptors remain searchable immediately in a bounded exact tail.
@@ -84,10 +44,11 @@
 +            tree = spatial.KDTree(self.ringkeys[: self.nb_items])
 +            return np.atleast_1d(tree.query(ringkey_query, k=count)[1])
 +        return indices[order[:count]]
- 
++
      def search(self, query, k):
          """Search for nearest neighbors
-@@ -57,33 +94,31 @@
+ 
+@@ -57,19 +91,15 @@
              return [None], [None]
  
          # step 1
@@ -99,10 +60,8 @@
 -        _, nncandidates_idx = ringkey_tree.query(ringkey_query, k=self.num_candidates)
 +        nncandidates_idx = self._candidate_indices(ringkey_query)
  
--        # step 2        
--        nn_dist = 1.0 # initialize with the largest value of distance
-+        # step 2
-+        nn_dist = 1.0  # initialize with the largest value of distance
+         # step 2        
+         nn_dist = 1.0 # initialize with the largest value of distance
          nn_idx = None
          nn_yawdiff = None
 -        for ith in range(self.num_candidates):
@@ -110,33 +69,4 @@
 +        for candidate_idx in nncandidates_idx:
              candidate_sc = self.scancontexts[candidate_idx]
              dist, yaw_diff = sc_utils.distance_sc(candidate_sc, query_sc)
--            if(dist < nn_dist):
-+            if dist < nn_dist:
-                 nn_dist = dist
-                 nn_yawdiff = yaw_diff
-                 nn_idx = candidate_idx
- 
-         if nn_idx is None:
--            nn_idx = 0 
-+            nn_idx = 0
-             nn_yawdiff_deg = 0
-             similarity = 0.0
-         else:
--            nn_yawdiff_deg = nn_yawdiff * (360/self.shape[1])
--            similarity = 1 - nn_dist # For now we return only 1 match, but we could return the n best matches
-+            nn_yawdiff_deg = nn_yawdiff * (360 / self.shape[1])
-+            similarity = (
-+                1 - nn_dist
-+            )  # For now we return only 1 match, but we could return the n best matches
-         return [self.items[nn_idx]], [similarity]
- 
-     def search_best(self, query):
-@@ -98,7 +133,7 @@
-         """
-         if self.nb_items < 1:
-             return None, None
--            
-+
-         idxs, sims = self.search(query, 1)
- 
-         return idxs[0], sims[0]
+             if(dist < nn_dist):
