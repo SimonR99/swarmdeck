@@ -1279,6 +1279,8 @@ def event_bridge(module, monkeypatch):
     bridge.timers = []
     bridge._shared_lock = threading.Lock()
     bridge.capture_tf_lookup_misses = 0
+    bridge.capture_wakes = []
+    bridge.capture_ready = NS(trigger=lambda: bridge.capture_wakes.append(True))
 
     class Timer:
         def __init__(self, period, callback):
@@ -1483,3 +1485,84 @@ def test_capture_retry_reuses_timer_object(bridge_module, monkeypatch, kind):
     timer = getattr(bridge, timer_name)
     arm()
     assert getattr(bridge, timer_name) is timer
+
+
+def test_bridge_init_has_no_periodic_capture_polls():
+    import ast
+
+    bridge = next(
+        node
+        for node in ast.parse(BRIDGE_SOURCE.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "Bridge"
+    )
+    init = next(
+        node for node in bridge.body if getattr(node, "name", None) == "__init__"
+    )
+    calls = [node for node in ast.walk(init) if isinstance(node, ast.Call)]
+    assert not [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "create_timer"
+    ]
+    callbacks = [
+        call.args[2].attr
+        for call in calls
+        if isinstance(call.func, ast.Name) and call.func.id == "create_steady_timer"
+    ]
+    assert sorted(callbacks) == ["flush_captures", "normalize", "snapshot"]
+    canceled = {
+        call.func.value.attr
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "cancel"
+        and isinstance(call.func.value, ast.Attribute)
+    }
+    assert {"normalize_retry_timer", "capture_retry_timer"} <= canceled
+
+
+def test_raw_capture_provenance_wakes_peer_executor(bridge_module, monkeypatch):
+    from autonomy.tests.test_capture_providers import raw_metadata
+
+    bridge = event_bridge(bridge_module, monkeypatch)
+    bridge.core = NS(capture_provider=NS(spec=NS(name="simulation")))
+    bridge.raw_capture_source_reset = False
+    bridge.raw_capture_source = None
+    bridge.raw_capture_metadata, bridge.raw_capture_collisions = {}, {}
+    bridge.raw_capture_provenance(NS(data=raw_metadata()))
+    assert bridge.raw_capture_metadata[123].provider == "simulation"
+    assert bridge.capture_wakes == [True]
+
+
+def test_normalized_cloud_wakes_peer_executor(bridge_module, monkeypatch):
+    import numpy as np
+
+    bridge = event_bridge(bridge_module, monkeypatch)
+    transform = NS(translation=NS(x=0.0, y=0.0, z=0.0), rotation=NS(x=0, y=0, z=0, w=1))
+    bridge.tf = NS(lookup_transform=lambda *args: NS(transform=transform))
+    bridge.base, bridge.odom_frame = "base", "odom"
+    bridge.last_normalized_pose, bridge.last_normalized_at = None, 0.0
+    bridge.raw_capture_enabled = False
+    bridge.max_range, bridge.peer_mask = 40.0, None
+    bridge.capture_calibrations, bridge.normalized_count = {}, 0
+    monkeypatch.setattr(
+        bridge_module,
+        "transform_pose",
+        lambda t: NS(position=t.translation, orientation=t.rotation),
+    )
+    monkeypatch.setattr(bridge_module, "Header", NS)
+    monkeypatch.setattr(bridge_module, "Odometry", lambda: NS(pose=NS(pose=None)))
+    points = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    monkeypatch.setattr(
+        bridge_module.point_cloud2, "read_points_numpy", lambda *a, **k: points
+    )
+    monkeypatch.setattr(
+        bridge_module.point_cloud2, "create_cloud_xyz32", lambda h, p: NS(points=p)
+    )
+    published = []
+    bridge.cloud_pub = NS(publish=published.append)
+    bridge.odom_pub = NS(publish=lambda msg: None)
+    cloud = NS(header=NS(stamp=NS(sec=3, nanosec=0), frame_id="lidar"))
+    bridge.raw_cloud(cloud)
+    assert bridge.normalized_count == 1
+    np.testing.assert_array_equal(published[0].points, points)
+    assert bridge.capture_wakes == [True]
