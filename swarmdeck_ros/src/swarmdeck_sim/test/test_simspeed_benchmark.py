@@ -94,11 +94,17 @@ def test_missing_gpu_samples_preserve_measured_rtf(tmp_path, monkeypatch):
     output = tmp_path / "window"
     with pytest.raises(RuntimeError, match="GPU utilization"):
         benchmark["run_window"](
-            output, 60, lambda _: {"rtf": 2.0, "sim_s": 120, "wall_s": 60}
+            output,
+            60,
+            lambda _: {
+                "rtf": {"rtf": 2.0, "sim_s": 120, "wall_s": 60},
+                "scans": {"robot_0": {"messages": 241, "scan_hz_sim": 2}},
+            },
         )
     saved = json.loads(output.with_suffix(".json").read_text())
     assert saved["rtf"] == {"rtf": 2.0, "sim_s": 120, "wall_s": 60}
     assert "GPU utilization" in saved["gpu"]["error"]
+    assert saved["scans"]["robot_0"]["scan_hz_sim"] == 2
 
 
 def test_benchmark_stops_exploration_before_each_window(tmp_path, monkeypatch):
@@ -140,3 +146,109 @@ def test_benchmark_stops_exploration_before_each_window(tmp_path, monkeypatch):
         == 0
     )
     assert calls == ["stop", "window"] * 3
+
+
+def test_window_probe_counts_scan_messages_in_simulation_time(monkeypatch):
+    import json
+    import subprocess
+
+    benchmark = runpy.run_path(str(SCRIPT))
+    raw = {
+        "clock": [[10, 0], [11, 2]],
+        "scans": {
+            "robot_0": [[10 + i / 4, i / 2] for i in range(5)],
+            "robot_1": [[10 + i / 20, i / 10] for i in range(21)],
+            "robot_2": [],
+            "robot_3": [[10, 0]],
+        },
+    }
+
+    def run(command, **kwargs):
+        assert command[:4] == ["docker", "exec", "-i", "swarmdeck-sim-1"]
+        compile(kwargs["input"], "probe", "exec")
+        return subprocess.CompletedProcess(command, 0, json.dumps(raw), "")
+
+    monkeypatch.setattr(benchmark["subprocess"], "run", run)
+    result = benchmark["measure_window"](60)
+    assert result["rtf"]["rtf"] == 2
+    assert result["scans"]["robot_0"] == {
+        "messages": 5,
+        "scan_hz_sim": 2.0,
+        "scan_hz_wall": 4.0,
+    }
+    assert result["scans"]["robot_1"]["scan_hz_sim"] == 10
+    assert result["scans"]["robot_2"]["messages"] == 0
+    assert result["scans"]["robot_2"]["scan_hz_sim"] is None
+    assert result["scans"]["robot_3"]["scan_hz_sim"] is None
+
+
+def test_stop_stack_saves_argos_logs_before_teardown(tmp_path, monkeypatch):
+    import subprocess
+
+    benchmark = runpy.run_path(str(SCRIPT))
+    stem = tmp_path / "window"
+
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "logs"]:
+            kwargs["stdout"].write("renderer diagnostics\n")
+        else:
+            assert command[-1] == "--down"
+            assert (
+                stem.with_suffix(".argos.log").read_text() == "renderer diagnostics\n"
+            )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(benchmark["subprocess"], "run", run)
+    benchmark["stop_stack"](["launcher"], stem)
+
+
+def test_embedded_probe_subscribes_to_all_robot_clouds(monkeypatch, capsys):
+    import json
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    benchmark = runpy.run_path(str(SCRIPT))
+    callbacks = {}
+    node = SimpleNamespace(
+        create_subscription=lambda _type, topic, callback, qos: callbacks.update(
+            {topic: callback}
+        ),
+        destroy_node=lambda: None,
+    )
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+
+    def spin_once(*args, **kwargs):
+        callbacks["/clock"](SimpleNamespace(clock=stamp))
+        for i in range(4):
+            for _ in range(i + 1):
+                callbacks[f"/robot_{i}/scan/points"](
+                    SimpleNamespace(header=SimpleNamespace(stamp=stamp))
+                )
+
+    # This is a transport-only fake: execute the real generated probe and
+    # inspect its output, without ROS, Docker, or a running simulation.
+    ticks = iter([0, 0] + [0.5] * 11 + [2])
+    for name, attrs in {
+        "time": {"monotonic": lambda: next(ticks)},
+        "rclpy": {
+            "init": lambda: None,
+            "create_node": lambda _: node,
+            "spin_once": spin_once,
+            "shutdown": lambda: None,
+        },
+        "rclpy.qos": {"qos_profile_sensor_data": object()},
+        "rosgraph_msgs.msg": {"Clock": object()},
+        "sensor_msgs.msg": {"PointCloud2": object()},
+    }.items():
+        module = ModuleType(name)
+        module.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, module)
+    exec(benchmark["WINDOW_PROBE"].replace("WINDOW", "1"), {})
+    observed = json.loads(capsys.readouterr().out)
+    assert len(observed["clock"]) == 1
+    assert {robot: len(samples) for robot, samples in observed["scans"].items()} == {
+        "robot_0": 1,
+        "robot_1": 2,
+        "robot_2": 3,
+        "robot_3": 4,
+    }

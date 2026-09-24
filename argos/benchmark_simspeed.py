@@ -14,7 +14,6 @@ import datetime as dt
 import json
 from pathlib import Path
 import platform
-import runpy
 import signal
 import statistics
 import subprocess
@@ -83,6 +82,76 @@ def gpu_summary(path: Path) -> dict:
     }
 
 
+WINDOW_PROBE = r"""
+import json, time, rclpy
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import PointCloud2
+from rclpy.qos import qos_profile_sensor_data
+rclpy.init()
+node = rclpy.create_node("swarmdeck_simspeed_probe")
+clock = []
+scans = {f"robot_{i}": [] for i in range(4)}
+def stamp(value):
+    return value.sec + value.nanosec * 1e-9
+node.create_subscription(Clock, "/clock",
+    lambda m: clock.append((time.monotonic(), stamp(m.clock))),
+    qos_profile_sensor_data)
+for robot, samples in scans.items():
+    node.create_subscription(PointCloud2, f"/{robot}/scan/points",
+        lambda m, samples=samples: samples.append((time.monotonic(), stamp(m.header.stamp))),
+        qos_profile_sensor_data)
+end = time.monotonic() + WINDOW
+while time.monotonic() < end:
+    rclpy.spin_once(node, timeout_sec=0.05)
+print(json.dumps({"clock": clock, "scans": scans}))
+node.destroy_node()
+rclpy.shutdown()
+"""
+
+
+def measure_window(window: float) -> dict:
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            "swarmdeck-sim-1",
+            "bash",
+            "-c",
+            "source /opt/ros/jazzy/setup.bash && python3 -",
+        ],
+        input=WINDOW_PROBE.replace("WINDOW", repr(window)),
+        text=True,
+        capture_output=True,
+        timeout=window + 60,
+    )
+    if result.returncode:
+        return {"rtf": {"error": (result.stderr or result.stdout)[-500:]}, "scans": {}}
+    try:
+        raw = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        return {"rtf": {"error": f"invalid window probe output: {exc}"}, "scans": {}}
+    clock = raw["clock"]
+    if len(clock) < 2 or clock[-1][0] <= clock[0][0]:
+        rtf = {"error": f"only {len(clock)} usable /clock messages"}
+    else:
+        wall, sim = (clock[-1][i] - clock[0][i] for i in (0, 1))
+        rtf = {
+            "rtf": sim / wall,
+            "sim_s": sim,
+            "wall_s": wall,
+            "clock_hz": (len(clock) - 1) / wall,
+        }
+    scans = {}
+    for robot, samples in raw["scans"].items():
+        summary = {"messages": len(samples)}
+        for i, label in enumerate(("scan_hz_wall", "scan_hz_sim")):
+            elapsed = samples[-1][i] - samples[0][i] if len(samples) > 1 else 0
+            summary[label] = (len(samples) - 1) / elapsed if elapsed > 0 else None
+        scans[robot] = summary
+    return {"rtf": rtf, "scans": scans}
+
+
 def run_window(output: Path, window: float, probe) -> dict:
     before = host_sample()
     with output.with_suffix(".gpu.csv").open("w") as gpu_output:
@@ -109,15 +178,36 @@ def run_window(output: Path, window: float, probe) -> dict:
     record = {
         "before": before,
         "after": host_sample(),
-        "rtf": result,
+        "rtf": result["rtf"],
+        "scans": result["scans"],
         "gpu": gpu_result,
     }
     output.with_suffix(".json").write_text(json.dumps(record, indent=2) + "\n")
-    if "error" in result:
-        raise RuntimeError(result["error"])
+    if "error" in result["rtf"]:
+        raise RuntimeError(result["rtf"]["error"])
     if "error" in gpu_result:
         raise RuntimeError(gpu_result["error"])
     return record
+
+
+def stop_stack(launcher: list[str], stem: Path) -> None:
+    try:
+        with stem.with_suffix(".argos.log").open("w") as log:
+            subprocess.run(
+                ["docker", "logs", "swarmdeck-argos-1"],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+            )
+    finally:
+        with stem.with_suffix(".stop.log").open("w") as log:
+            subprocess.run(
+                [*launcher, "--down"],
+                cwd=REPO,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
 
 
 def stop_exploration() -> None:
@@ -181,7 +271,7 @@ def main(argv=None) -> int:
     subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv"], check=True)
     args.output.mkdir(parents=True, exist_ok=False)
     source = (REPO / "configs/4robot_subt_finals.yaml").read_text()
-    probe = runpy.run_path(str(REPO / "scripts/profile_stack.py"))["real_time_factor"]
+    probe = measure_window
     launcher = [sys.executable, str(REPO / "deploy/simulation_launch.py")]
     order = benchmark_order(args.rounds)
     (args.output / "plan.json").write_text(
@@ -259,18 +349,11 @@ def main(argv=None) -> int:
                     f"{stem.name}: {record['rtf']['rtf']:.3f} sim-seconds/wall-second",
                     flush=True,
                 )
-                with stem.with_suffix(".stop.log").open("w") as log:
-                    subprocess.run(
-                        [*launcher, "--down"],
-                        cwd=REPO,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        check=True,
-                    )
+                stop_stack(launcher, stem)
                 owns_stack = False
     finally:
         if owns_stack:
-            subprocess.run([*launcher, "--down"], cwd=REPO, check=True)
+            stop_stack(launcher, stem)
     return 0
 
 

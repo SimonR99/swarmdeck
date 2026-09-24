@@ -67,10 +67,18 @@ would switch to lockstep exchange and change the bottleneck. Normal scenarios
 keep `realtime_factor: 1`; nonnegative finite factors are accepted.
 
 Each result JSON records sim-seconds per wall-second, mean GPU utilization,
-load average, available/free memory, and swap before/after the window. The
+load average, available/free memory, and swap before/after the window. The same
+ROS probe counts `/robot_N/scan/points` messages for all four robots. Its `scans`
+entries report `messages`, `scan_hz_sim` (from scan-header stamp intervals), and
+`scan_hz_wall` (from receipt intervals); fewer than two usable samples gives null
+Hz, not an invented zero. At unpaced speed use **simulation-time** Hz to distinguish
+parked throttling (~2 Hz) from non-activation (~10 Hz). These are observed delivery
+rates; middleware/probe drops can also lower them. GPU sample failure is recorded
+under `gpu.error` without losing RTF or scan evidence; the run then fails. The
 adjacent CSV contains one-second `nvidia-smi` samples (including ROS discovery
 time); `.argos` files preserve the actual generated experiment. Config snapshots,
-launch/stop logs, and revision/order metadata are retained. `--no-build` is for
+launch/stop logs, pre-teardown ARGoS logs (`.argos.log`), and revision/order metadata
+are retained, including cleanup after failed windows. `--no-build` is for
 an already rebuilt image, not an old image that ignores parked-lidar settings.
 
 **Pending qualification:** native image rebuild/runtime probe, alternating tuf
