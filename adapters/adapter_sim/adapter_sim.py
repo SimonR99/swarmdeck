@@ -929,6 +929,8 @@ class RobotBridge(
         if exploration is not None:
             exploration.stop()
         with self._goal_lock:
+            # A latched drive must not re-apply after this stop.
+            self._pending_drive = None
             self._cancel_nav()
             self.pub_cmd.publish(Twist())
             self.goal = None
@@ -958,6 +960,8 @@ class RobotBridge(
 
     def cancel(self) -> int:
         with self._goal_lock:
+            # A latched drive must not re-apply after a cancel.
+            self._pending_drive = None
             self._cancel_nav()
             self.pub_cmd.publish(Twist())
             self.goal = None

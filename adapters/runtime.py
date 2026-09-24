@@ -16,7 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
@@ -540,6 +540,9 @@ class AdapterLinkMixin:
         exploration = getattr(self, "exploration", None)
         if exploration is not None:
             exploration.stop()
+        with getattr(self, "_goal_lock", nullcontext()):
+            # A latched drive must not re-apply after this stop.
+            self._pending_drive = None
         self.drive(0.0, 0.0)
         self.cancel_goal()
         self.mode = "estop"

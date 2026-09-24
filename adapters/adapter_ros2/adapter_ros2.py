@@ -1692,6 +1692,8 @@ class HardwareBridge(
 
     def cancel_goal(self) -> int:
         with self._goal_lock:
+            # A latched drive must not re-apply after a cancel or stop.
+            self._pending_drive = None
             self._goal_generation += 1
             generation = self._goal_generation
             self._nav_execution_enabled = False

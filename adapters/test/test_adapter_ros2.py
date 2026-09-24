@@ -1459,3 +1459,17 @@ def test_body_command_waits_on_its_service_without_holding_the_goal_lock(mod):
     assert durations["watchdog"] < 0.1 and durations["result"] < 0.1
     assert time.monotonic() - started < 1.0
     assert bridge.nav_status == "cancelled"  # The stale-link cancel ran.
+
+
+@pytest.mark.parametrize("command", ["stop", "cancel_goal"])
+def test_stop_and_cancel_drop_a_latched_drive(mod, command):
+    """M1: Stop inside the 50 ms latch window must not be overwritten."""
+    bridge = _bridge(mod)
+    bridge.note_drive_command(0.3, 0.0)
+
+    getattr(bridge, command)()
+    bridge.pub_cmd.publish.reset_mock()
+    bridge.apply_pending_drive()
+
+    assert bridge._pending_drive is None
+    bridge.pub_cmd.publish.assert_not_called()

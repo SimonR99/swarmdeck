@@ -138,3 +138,17 @@ def test_sim_timer_skips_a_held_goal_lock_and_cancels_on_the_next_tick(
     tick()
     assert bridge.nav_status == "cancelled"
     assert velocities and velocities[-1].linear.x == 0.0
+
+
+@pytest.mark.parametrize("command", ["stop", "cancel", "cancel_goal"])
+def test_sim_stop_and_cancel_drop_a_latched_drive(sim_module, monkeypatch, command):
+    """M1: the timer must not re-apply a drive latched before Stop or cancel."""
+    bridge, tick, clock, velocities = _timed_bridge(sim_module, monkeypatch)
+    bridge.note_drive_command(0.2, -0.1)
+
+    getattr(bridge, command)()
+    velocities.clear()
+    tick()
+
+    assert bridge._pending_drive is None
+    assert velocities == []
