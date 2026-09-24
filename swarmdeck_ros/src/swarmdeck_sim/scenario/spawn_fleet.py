@@ -10,6 +10,7 @@ transforms and `auto` merging has ground truth to be scored against.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import math
 import re
 import subprocess
@@ -17,6 +18,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any
 import yaml
 
 try:
