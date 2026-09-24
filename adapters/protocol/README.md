@@ -69,7 +69,9 @@ Adapters send a complete `robot_state` at 5 Hz:
 
 `planned_path` is the effective bounded route. `global_planned_path` and
 `local_planned_path` may be included when available. `nav_status` is one of
-`idle`, `active`, `succeeded`, `failed`, or `cancelled`.
+`idle`, `active`, `succeeded`, `failed`, or `cancelled`. In both simulation
+and ROS 2 hardware, `active` includes a pending replacement route: it indicates
+an owned navigation objective, not necessarily controller acceptance or motion.
 
 ## Commands
 
@@ -88,6 +90,35 @@ MGG goals are navigation-frame goals. Objective planning resolves and validates
 mapping authority, then sends a trajectory to `FollowPath`; vendor adapters
 may pass a navigation-frame goal to their native controller. `stop`, manual
 drive, and a replacement objective cancel active route execution.
+
+### Simulation velocity ownership
+
+The simulation session remaps Nav2's smoothed output to
+`/<robot_id>/cmd_vel_adapter`. The simulation adapter uses the same velocity
+gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
+only an accepted, current route with an active status and fresh operator link
+can relay Nav2 output. Both adapters run the shared 20 Hz ROS watchdog separately
+from websocket telemetry: a stale link cancels active navigation, publishes
+a stop and reports `cancelled` rather than merely holding the velocity relay
+closed. The same watchdog
+consumes pending manual-drive commands and enforces their deadman timeout.
+Pending routes, cancellation, stop, and manual drive
+close the relay; manual drive and recovery still publish directly through the
+adapter. On sim and hardware, a terminal result that closes an open relay also
+publishes one zero velocity, so the driver cannot retain the last moving
+command while the smoother's delayed stop is blocked. An already closed relay
+does not publish another zero. This adds one DDS hop after the smoother, not
+another smoothing stage.
+Bring up the updated session launch and adapter together; a legacy Nav2 launch
+publishing directly to `cmd_vel` bypasses this gate. The generic Nav2 launch
+and hardware launch defaults are unchanged.
+
+As on hardware, a current objective may update its navigation status and plan a
+replacement immediately after cancellation; it does not wait for the cancelled
+action's terminal result. Generation checks still reject superseded commands.
+Simulation retains its separate conservative recovery rule: loss of action
+monitoring suppresses automatic reverse escape, but does not prevent a new
+owned route from being planned.
 
 ## Collaborative graph
 

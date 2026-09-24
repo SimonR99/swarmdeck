@@ -75,9 +75,10 @@ Simulation passes `use_composition:=true` to `nav.launch.py`: each robot gets
 one `nav_container` running the controller and velocity smoother, with isolated
 executors. The complete rewritten YAML is also passed to the container so the
 controller's internally constructed local costmap inherits its parameters.
-Lifecycle ownership, per-robot node names, action endpoints, TF remaps, and the
-`cmd_vel_nav` → smoother → `cmd_vel` chain remain unchanged. The bounded
-simulation startup process still exits after activation. Hardware callers keep
+Lifecycle ownership, per-robot node names, action endpoints and TF remaps remain
+unchanged. Simulation routes velocity through `cmd_vel_nav` → smoother →
+`cmd_vel_adapter` → adapter → `cmd_vel`, so the adapter gates driver motion.
+The bounded simulation startup process still exits after activation. Hardware callers keep
 `use_composition:=false` by default and retain their separate processes.
 
 With four robots, static batching removes 15 processes/participants and Nav2

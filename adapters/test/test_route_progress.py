@@ -306,6 +306,7 @@ def _sim_bridge(sim_module, **cfg):
     bridge.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
     bridge.map_pose = lambda: dict(bridge.pose)
     bridge.map_pose_at = lambda *_a, **_k: None
+    bridge._pending_drive = None
     return bridge
 
 
@@ -331,13 +332,21 @@ def _submit(bridge, plan, expected_generation=None):
     return generation, handle
 
 
+def _sim_tick(bridge):
+    # A healthy websocket refreshes the link; route supervision now runs from
+    # the independent ROS watchdog timer, not from the telemetry state tick.
+    bridge.note_link_activity()
+    bridge.session_state_tick()
+    bridge._watchdogs()
+
+
 def _rock(bridge, clock, seconds, amplitude=0.3, at=2.5):
-    """Run the state tick for ``seconds`` while the robot rocks at ``at``."""
+    """Run telemetry and watchdog ticks while the robot rocks at ``at``."""
     ticks = int(round(seconds / 0.2))
     for tick in range(ticks):
         clock[0] += 0.2
         bridge.pose = {"x": at - (amplitude if tick % 2 else 0.0), "y": 0.0}
-        bridge.session_state_tick()
+        _sim_tick(bridge)
 
 
 @pytest.fixture
@@ -391,7 +400,7 @@ def test_sim_tick_leaves_a_route_alone_while_the_robot_advances(sim_module, cloc
     for tick in range(600):  # two minutes at 0.05 m/s
         clock[0] += 0.2
         bridge.pose = {"x": 0.01 * tick, "y": 0.0}
-        bridge.session_state_tick()
+        _sim_tick(bridge)
     assert bridge.nav_status == "active"
     handle.cancel_goal_async.assert_not_called()
 
@@ -443,7 +452,7 @@ def test_sim_tick_supervises_a_route_in_the_odometry_frame(sim_module, clock):
     for tick in range(ticks):
         clock[0] += 0.2
         bridge._odom_to_base = {"x": 2.5 - (0.3 if tick % 2 else 0.0), "y": 0.0}
-        bridge.session_state_tick()
+        _sim_tick(bridge)
     assert bridge.nav_status == "failed"
     handle.cancel_goal_async.assert_called_once()
     assert "no progress along the route" in bridge._nav_failure_reason

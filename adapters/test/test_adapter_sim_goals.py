@@ -27,11 +27,11 @@ def _bridge(sim_module):
     bridge.mode = "idle"
     bridge._goal_generation = 0
     bridge._goal_handle = None
-    bridge._goal_request_future = None
-    bridge._goal_request_generation = None
-    bridge._cancel_events = {}
     bridge._nav_quiet_unknown = False
     bridge._goal_lock = threading.RLock()
+    bridge._nav_execution_enabled = False
+    bridge._last_link_at = time.monotonic()
+    bridge.cfg = dict(sim_module.TRANSPORT_DEFAULTS)
     bridge.path_client = MagicMock()
     bridge.path_client.server_is_ready.return_value = True
     bridge._clear_escape = MagicMock()
@@ -156,10 +156,11 @@ def test_sim_reports_controller_acceptance_and_terminal_to_exploration(sim_modul
     bridge.exploration.controller_finished.assert_called_once_with()
 
 
-def _active_goal_cancel_state(sim_module):
+def _active_goal_cancel_state(sim_module, cancel_failure=None):
     """Return a live goal plus callbacks needed to drive cancellation races."""
     bridge = _bridge(sim_module)
     bridge._goal_generation = 5
+    bridge.nav_status = "active"
     handle = MagicMock()
     handle.accepted = True
     result_future = MagicMock()
@@ -170,26 +171,30 @@ def _active_goal_cancel_state(sim_module):
     response_future.result.return_value = handle
 
     bridge._goal_response(response_future, generation=5)
-    cancel_future = MagicMock()
-    cancel_callbacks = []
-    cancel_future.add_done_callback.side_effect = cancel_callbacks.append
-    handle.cancel_goal_async.return_value = cancel_future
+    if cancel_failure == "exception":
+        handle.cancel_goal_async.side_effect = RuntimeError("cancel failed")
+    else:
+        handle.cancel_goal_async.return_value = _ImmediateFuture(
+            SimpleNamespace(return_code=1 if cancel_failure == "rejected" else 0)
+        )
     bridge._cancel_nav()
-    quiet = bridge._cancel_events[5]
     assert len(result_callbacks) == 1
-    return bridge, quiet, cancel_future, cancel_callbacks, result_callbacks[0]
+    return bridge, result_callbacks[0]
 
 
-def test_sim_cancel_response_completion_alone_does_not_make_route_quiet(sim_module):
-    bridge, quiet, cancel_future, cancel_callbacks, result_done = (
-        _active_goal_cancel_state(sim_module)
-    )
-    cancel_future.result.return_value = SimpleNamespace(return_code=0)
-    for callback in cancel_callbacks:
-        callback(cancel_future)
+def _assert_cancelled_velocity_held_while_planning(bridge, generation):
+    assert bridge.set_goal_pending_if_current(generation) is True
+    assert bridge.nav_status == "active"
+    velocities = []
+    bridge.pub_cmd = SimpleNamespace(publish=velocities.append)
+    bridge._on_nav_cmd_vel(SimpleNamespace(linear=SimpleNamespace(x=0.3)))
+    assert velocities == []
 
-    assert not quiet.is_set()
-    assert bridge.wait_goal_quiet(6, time.monotonic()) is False
+
+def test_sim_cancel_holds_velocity_without_waiting_for_terminal_result(sim_module):
+    bridge, result_done = _active_goal_cancel_state(sim_module)
+
+    _assert_cancelled_velocity_held_while_planning(bridge, 6)
 
     old_result = MagicMock()
     old_result.result.return_value = SimpleNamespace(
@@ -197,39 +202,25 @@ def test_sim_cancel_response_completion_alone_does_not_make_route_quiet(sim_modu
     )
     result_done(old_result)
 
-    assert quiet.is_set()
-    assert bridge.wait_goal_quiet(6, time.monotonic() + 1.0) is True
+    _assert_cancelled_velocity_held_while_planning(bridge, 6)
 
 
 @pytest.mark.parametrize("cancel_failure", ["rejected", "exception"])
-def test_sim_failed_cancel_response_does_not_make_route_quiet(
+def test_sim_failed_cancel_response_cannot_drive_while_planning(
     sim_module, cancel_failure
 ):
-    bridge, quiet, cancel_future, cancel_callbacks, _result_done = (
-        _active_goal_cancel_state(sim_module)
-    )
-    if cancel_failure == "rejected":
-        cancel_future.result.return_value = SimpleNamespace(return_code=1)
-    else:
-        cancel_future.result.side_effect = RuntimeError("cancel failed")
-    for callback in cancel_callbacks:
-        callback(cancel_future)
+    bridge, _result_done = _active_goal_cancel_state(sim_module, cancel_failure)
 
-    assert not quiet.is_set()
-    assert bridge.wait_goal_quiet(6, time.monotonic()) is False
+    _assert_cancelled_velocity_held_while_planning(bridge, 6)
 
 
-def test_sim_late_accepted_goal_is_canceled_and_waits_for_terminal_result(sim_module):
+def test_sim_late_accepted_goal_is_canceled_with_velocity_held_while_planning(
+    sim_module,
+):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 5
-    bridge._goal_request_future = MagicMock()
-    bridge._goal_request_generation = 5
     late_handle = MagicMock()
     late_handle.accepted = True
-    cancel_future = MagicMock()
-    cancel_callbacks = []
-    cancel_future.add_done_callback.side_effect = cancel_callbacks.append
-    late_handle.cancel_goal_async.return_value = cancel_future
     terminal_future = MagicMock()
     terminal_callbacks = []
     terminal_future.add_done_callback.side_effect = terminal_callbacks.append
@@ -239,24 +230,19 @@ def test_sim_late_accepted_goal_is_canceled_and_waits_for_terminal_result(sim_mo
 
     bridge._cancel_nav()
     assert bridge._goal_generation == 6
-    quiet = bridge._cancel_events[5]
     bridge._goal_response(response_future, generation=5)
 
     late_handle.cancel_goal_async.assert_called_once_with()
     late_handle.get_result_async.assert_called_once_with()
-    for callback in cancel_callbacks:
-        callback(cancel_future)
     assert len(terminal_callbacks) == 1
-    assert not quiet.is_set()
-    assert bridge.wait_goal_quiet(6, time.monotonic()) is False
+    _assert_cancelled_velocity_held_while_planning(bridge, 6)
 
     terminal = MagicMock()
     terminal.result.return_value = SimpleNamespace(
         status=sim_module.GoalStatus.STATUS_CANCELED
     )
     terminal_callbacks[0](terminal)
-    assert quiet.is_set()
-    assert bridge.wait_goal_quiet(6, time.monotonic() + 1.0) is True
+    _assert_cancelled_velocity_held_while_planning(bridge, 6)
 
 
 def test_unmonitored_accepted_goal_latches_unknown_without_escape(sim_module):
@@ -277,19 +263,13 @@ def test_unmonitored_accepted_goal_latches_unknown_without_escape(sim_module):
     assert bridge.nav_status == "failed"
 
 
-def test_sim_double_cancel_waits_for_the_original_terminal_result(sim_module):
-    """A newer cancel must not hide an older action still settling in Nav2."""
-    bridge, original_quiet, _cancel_future, _cancel_callbacks, result_done = (
-        _active_goal_cancel_state(sim_module)
-    )
+def test_sim_double_cancel_keeps_velocity_held_without_delaying_planning(sim_module):
+    """An older unsettled action cannot drive after repeated cancellation."""
+    bridge, result_done = _active_goal_cancel_state(sim_module)
 
-    # First cancel owns generation 5 and remains unresolved. A second cancel
-    # creates generation 7 and has no handle of its own, so its event is quiet
-    # immediately; wait_goal_quiet must still account for generation 5.
     bridge._cancel_nav()
     assert bridge._goal_generation == 7
-    assert not original_quiet.is_set()
-    assert bridge.wait_goal_quiet(7, time.monotonic()) is False
+    _assert_cancelled_velocity_held_while_planning(bridge, 7)
 
     old_result = MagicMock()
     old_result.result.return_value = SimpleNamespace(
@@ -297,8 +277,7 @@ def test_sim_double_cancel_waits_for_the_original_terminal_result(sim_module):
     )
     result_done(old_result)
 
-    assert original_quiet.is_set()
-    assert bridge.wait_goal_quiet(7, time.monotonic() + 1.0) is True
+    _assert_cancelled_velocity_held_while_planning(bridge, 7)
 
 
 def test_stale_conditional_follow_path_does_not_preempt_newer_goal(sim_module):
@@ -482,15 +461,14 @@ def test_stale_conditional_cancel_and_status_cannot_change_newer_state(sim_modul
     assert bridge.mode == "nav"
 
 
-# -- goal ownership: behaviours the simulation bridge differs on -----------
+# -- goal ownership: intentionally unified with ROS 2 hardware --------------
 #
-# adapter_ros2 pins its own answers to the same calls. The two differ on
-# purpose: here Nav2 drives the robot directly and a cancelled route keeps
-# moving until its terminal result arrives, so ownership waits for that.
+# Cancellation closes the velocity relay before planning can proceed. Pending
+# objectives report active without waiting for an old action's terminal result.
 
 
-@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "idle")])
-def test_sim_conditional_cancel_reports_pending_as_idle(sim_module, pending, status):
+@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])
+def test_sim_conditional_cancel_reports_pending_as_active(sim_module, pending, status):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 3
     bridge.nav_status, bridge.mode = "active", "nav"
@@ -503,18 +481,18 @@ def test_sim_conditional_cancel_reports_pending_as_idle(sim_module, pending, sta
     bridge.pub_cmd.publish.assert_called_once()
 
 
-def test_sim_status_and_pending_writes_refuse_after_unknown_quiet(sim_module):
+def test_sim_status_and_pending_writes_hold_velocity_after_unknown_quiet(sim_module):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 3
     bridge.nav_status = "active"
     bridge._nav_quiet_unknown = True
 
-    assert bridge.set_nav_status_if_current(3, "failed") is False
-    assert bridge.set_goal_pending_if_current(3) is False
-    assert bridge.nav_status == "active"
+    assert bridge.set_nav_status_if_current(3, "failed") is True
+    assert bridge.nav_status == "failed"
+    _assert_cancelled_velocity_held_while_planning(bridge, 3)
 
 
-def test_sim_pending_goal_reports_idle(sim_module):
+def test_sim_pending_goal_reports_active(sim_module):
     bridge = _bridge(sim_module)
     bridge._goal_generation = 3
     bridge.nav_status = "failed"
@@ -522,16 +500,6 @@ def test_sim_pending_goal_reports_idle(sim_module):
     assert bridge.set_goal_pending_if_current(2) is False
     assert bridge.nav_status == "failed"
     assert bridge.set_goal_pending_if_current(3) is True
-    assert bridge.nav_status == "idle"
+    assert bridge.nav_status == "active"
     assert bridge.set_nav_status_if_current(3, "active") is True
     assert bridge.nav_status == "active"
-
-
-def test_sim_wait_goal_quiet_is_immediate_without_unsettled_cancels(sim_module):
-    bridge = _bridge(sim_module)
-    bridge._goal_generation = 3
-
-    assert bridge.wait_goal_quiet(2, time.monotonic() + 1.0) is False
-    assert bridge.wait_goal_quiet(3, time.monotonic()) is True
-    bridge._nav_quiet_unknown = True
-    assert bridge.wait_goal_quiet(3, time.monotonic() + 1.0) is False

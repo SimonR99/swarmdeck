@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -433,7 +434,7 @@ class AdapterDetectionMixin:
 
 
 class AdapterLinkMixin:
-    """Deadman and websocket freshness policy shared by hardware bridges."""
+    """Shared sim/hardware velocity gating, deadman and link watchdog policy."""
 
     def _on_nav_cmd_vel(self, msg) -> None:
         if self.nav_status == "active" and self.pub_cmd is not None:
@@ -487,14 +488,18 @@ class AdapterLinkMixin:
         self._last_link_at = time.monotonic()
 
     def link_watchdog(self) -> None:
-        if self.nav_status != "active" or self.link_ok():
-            return
-        self._log_warning(
-            f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
-            "with a goal active; cancelling and stopping"
-        )
-        self.cancel_goal()
-        self.drive(0.0, 0.0)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if self.nav_status != "active" or self.link_ok():
+                return
+            self._log_warning(
+                f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
+                "with a goal active; cancelling and stopping"
+            )
+            self.cancel_goal()
+            self.drive(0.0, 0.0)
+            # A manual zero drive retains each adapter's normal semantics;
+            # this watchdog stop is the terminal cancellation of its route.
+            self.nav_status = "cancelled"
 
     def stop(self) -> None:
         exploration = getattr(self, "exploration", None)
@@ -522,19 +527,38 @@ class AdapterGoalOwnershipMixin:
 
     Each call acts only while ``expected_generation`` still owns the bridge's
     goal, so a planner can never cancel or relabel a newer operator command.
-    The bridge provides ``_goal_lock``, ``_goal_generation``, ``nav_status``
-    and ``cancel_goal()``.
+    The bridge provides ``_goal_lock``, ``_goal_generation``, ``nav_status``,
+    ``_nav_execution_enabled``, ``pub_cmd`` and ``cancel_goal()``. Place this
+    mixin before ``AdapterLinkMixin`` to gate its velocity relay on accepted
+    execution as well as link freshness.
     """
 
-    # Status reported while a replacement route waits for the controller.
-    goal_pending_status: str = "active"
-
-    def _goal_status_writable(self) -> bool:
-        """Whether the owning generation may still rewrite ``nav_status``."""
-        return True
+    def _on_nav_cmd_vel(self, msg) -> None:
+        with self._goal_lock:
+            if not self._nav_execution_enabled:
+                return
+            super()._on_nav_cmd_vel(msg)
 
     def _hold_goal_motion(self) -> None:
-        """Stop relaying controller output while no accepted route executes."""
+        """Close the velocity relay before ownership returns to a planner."""
+        self._nav_execution_enabled = False
+
+    def _finish_goal_motion(self) -> None:
+        """Replace the last relayed velocity when a terminal result closes the gate.
+
+        The smoother's stop may arrive after the action result and be dropped
+        by the closed gate. Do not leave the driver holding its last velocity.
+        """
+        with self._goal_lock:
+            was_executing = self._nav_execution_enabled
+            self._hold_goal_motion()
+            if was_executing and self.pub_cmd is not None:
+                from geometry_msgs.msg import Twist
+
+                zero = Twist()
+                zero.linear.x = zero.linear.y = zero.linear.z = 0.0
+                zero.angular.x = zero.angular.y = zero.angular.z = 0.0
+                self.pub_cmd.publish(zero)
 
     def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
         """Cancel only the command owning ``expected_generation``."""
@@ -543,15 +567,12 @@ class AdapterGoalOwnershipMixin:
                 return None
             self.cancel_goal()
             if pending:
-                self.nav_status = self.goal_pending_status
+                self.nav_status = "active"
             return self._goal_generation
 
     def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
         with self._goal_lock:
-            if (
-                expected_generation != self._goal_generation
-                or not self._goal_status_writable()
-            ):
+            if expected_generation != self._goal_generation:
                 return False
             if status != "active":
                 self._hold_goal_motion()
@@ -560,19 +581,11 @@ class AdapterGoalOwnershipMixin:
 
     def set_goal_pending_if_current(self, expected_generation: int) -> bool:
         with self._goal_lock:
-            if (
-                expected_generation != self._goal_generation
-                or not self._goal_status_writable()
-            ):
+            if expected_generation != self._goal_generation:
                 return False
             self._hold_goal_motion()
-            self.nav_status = self.goal_pending_status
+            self.nav_status = "active"
             return True
-
-    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
-        """Whether the owner may submit; a cancel that settles at once needs no wait."""
-        with self._goal_lock:
-            return expected_generation == self._goal_generation
 
 
 class AdapterTelemetryMixin:

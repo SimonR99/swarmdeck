@@ -858,6 +858,9 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     )
     bridge.nav_status = "active"
     bridge._nav_execution_enabled = True
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge.goal = {"x": 1.0, "y": 2.0}
+    bridge.planned_path = [{"x": 1.0, "y": 2.0}]
     bridge.note_link_activity()
 
     # Fresh link: autonomy is relayed as before.
@@ -872,6 +875,9 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
         "on nav_status, so leaving it active lets Nav2's next sample overwrite "
         "the stop within milliseconds"
     )
+    assert bridge._goal_handle is None
+    assert bridge.goal is None
+    assert bridge.planned_path == []
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
@@ -1143,11 +1149,10 @@ def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
     assert bridge.navigation_frame == "odom"
 
 
-# -- goal ownership: behaviours the hardware bridge differs on -------------
+# -- goal ownership: shared with the simulation bridge ----------------------
 #
-# adapter_sim pins its own answers to the same calls. Here a cancel closes the
-# Nav2 velocity relay at once, so nothing waits for the action server, and a
-# replacement route keeps the public status "active" while it is prepared.
+# Both bridges close the Nav2 velocity relay at once on cancel, so nothing
+# waits for the action server and replacement routes stay publicly "active".
 
 
 @pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])
@@ -1192,12 +1197,40 @@ def test_hardware_pending_goal_reports_active_with_the_relay_closed(mod):
     assert bridge._nav_execution_enabled is False
 
 
-def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
-    bridge = _bridge(mod)
-    bridge._goal_generation = 3
-
-    assert bridge.wait_goal_quiet(2, 0.0) is False
-    assert bridge.wait_goal_quiet(3, 0.0) is True
+@pytest.mark.parametrize("terminal", ["success", "abort", "failure"])
+def test_hardware_terminal_result_stops_an_open_gate_once(mod, monkeypatch, terminal):
+    bridge = _route_bridge(mod)
+    generation, handle = _submit_route(bridge, _route_plan())
+    velocities = []
+    bridge.pub_cmd = SimpleNamespace(publish=velocities.append)
+    command = SimpleNamespace(linear=SimpleNamespace(x=0.3))
+    bridge._on_nav_cmd_vel(command)
+    assert velocities == [command]
+    velocities.clear()
+    statuses = SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5)
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", statuses)
+    monkeypatch.setattr(
+        sys.modules["geometry_msgs.msg"],
+        "Twist",
+        lambda: SimpleNamespace(linear=SimpleNamespace(), angular=SimpleNamespace()),
+    )
+    outcome = {
+        "success": SimpleNamespace(status=4),
+        "abort": SimpleNamespace(status=6),
+        "failure": RuntimeError("result channel failed"),
+    }[terminal]
+    future = MagicMock()
+    if isinstance(outcome, Exception):
+        future.result.side_effect = outcome
+    else:
+        future.result.return_value = outcome
+    bridge._on_goal_result(future, generation, handle)
+    assert len(velocities) == 1
+    assert vars(velocities[0].linear) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert vars(velocities[0].angular) == {"x": 0.0, "y": 0.0, "z": 0.0}
+    bridge._on_goal_result(future, generation, handle)
+    bridge._on_nav_cmd_vel(command)
+    assert len(velocities) == 1
 
 
 def test_hardware_state_probes_link_quality_towards_the_backend(mod, monkeypatch):

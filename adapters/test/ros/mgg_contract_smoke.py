@@ -111,15 +111,6 @@ class FollowPathSink:
     def set_goal_pending_if_current(self, expected_generation):
         return self.set_nav_status_if_current(expected_generation, "active")
 
-    def wait_goal_quiet(self, expected_generation, not_after):
-        # This sink never publishes velocity; controller stopping semantics
-        # belong to the production bridge tests and the physical trial.
-        with self._goal_lock:
-            return (
-                expected_generation == self._goal_generation
-                and time.monotonic() < not_after
-            )
-
     def drive(self, *_):
         pass
 
