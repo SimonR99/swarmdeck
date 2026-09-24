@@ -263,8 +263,8 @@ configured robot. MGG stays idle until Explore is pressed.
 
 The sidecar shares the simulator's network namespace. The peer launcher selects
 a fresh mission and ROS domain; the direct legacy overlay uses domain 42. The
-isolated test overlays use UDP between separate container IPC namespaces; this
-does not require disabling shared memory for colocated production ROS processes.
+isolated test overlays share sim's IPC namespace with peers and MGG, using the
+large-data SHM profile for local delivery and retaining UDP for remote hosts.
 publication at 2 Hz. It also projects the depth camera at
 2 Hz, sampling every fourth pixel, to observe ground inside the elevated
 LiDAR’s blind region. Camera extrinsics come from the same platform table
