@@ -304,6 +304,7 @@ class MolaWorker:
         self,
         maps_root: Path,
         *,
+        mission_id: str,
         importer: Path = Path(
             "/mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import"
         ),
@@ -316,7 +317,6 @@ class MolaWorker:
         max_maps: int = DEFAULT_MAX_MAPS,
         keep_generations: int = 2,
         planner_maps: bool = False,
-        mission_id: str | None = None,
         parallel_peers: int = DEFAULT_PARALLEL_PEERS,
     ):
         if timeout_s <= 0 or poll_s <= 0 or retry_s < 0:
@@ -346,9 +346,7 @@ class MolaWorker:
         self.max_maps = max_maps
         self.keep_generations = keep_generations
         self.planner_maps = planner_maps
-        self.mission_id = (
-            _canonical_mission_id(mission_id) if mission_id is not None else None
-        )
+        self.mission_id = _canonical_mission_id(mission_id)
         self.parallel_peers = parallel_peers
         # Per-peer native state: one ``swarmdeck-mola-import --serve`` client
         # per peer root, created on the peer's first native build and closed
@@ -377,15 +375,11 @@ class MolaWorker:
         self._logged_errors: dict[Path, str] = {}
 
     def discover(self) -> tuple[Path, ...]:
-        """Return peer roots matching /maps/<mission>/<robot>/snapshot.json."""
+        """Return this mission's peer roots, /maps/<mission>/<robot>/snapshot.json."""
 
-        if self.mission_id is not None:
-            mission_root = self.maps_root / self.mission_id
-            return tuple(
-                sorted(path.parent for path in mission_root.glob("*/snapshot.json"))
-            )
+        mission_root = self.maps_root / self.mission_id
         return tuple(
-            sorted(path.parent for path in self.maps_root.glob("*/*/snapshot.json"))
+            sorted(path.parent for path in mission_root.glob("*/snapshot.json"))
         )
 
     @staticmethod
@@ -1122,11 +1116,6 @@ def main() -> None:
         default=os.getenv("SWARMDECK_MISSION_ID"),
         help="canonical mission UUID to process (defaults to SWARMDECK_MISSION_ID)",
     )
-    parser.add_argument(
-        "--all-missions",
-        action="store_true",
-        help="explicitly enable legacy discovery across every mission directory",
-    )
     args = parser.parse_args()
     if args.mode is not None:
         print(
@@ -1135,9 +1124,7 @@ def main() -> None:
             file=sys.stderr,
             flush=True,
         )
-    if args.all_missions and args.mission_id is not None:
-        parser.error("--all-missions conflicts with --mission-id/SWARMDECK_MISSION_ID")
-    if not args.all_missions and args.mission_id is None:
+    if args.mission_id is None:
         parser.error("--mission-id or SWARMDECK_MISSION_ID is required")
     MolaWorker(
         args.maps_root,
@@ -1151,7 +1138,7 @@ def main() -> None:
         max_resident_points=args.max_resident_points,
         max_maps=args.max_maps,
         planner_maps=args.planner_maps,
-        mission_id=None if args.all_missions else args.mission_id,
+        mission_id=args.mission_id,
         parallel_peers=args.parallel_peers,
     ).run_forever()
 
