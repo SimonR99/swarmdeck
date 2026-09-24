@@ -1,6 +1,6 @@
 """Run in the C-SLAM image with patched source on PYTHONPATH."""
 
-from time import perf_counter
+from time import process_time
 
 import numpy as np
 from scipy import spatial
@@ -8,12 +8,12 @@ from scipy import spatial
 from cslam.lidar_pr.scancontext_matching import ScanContextMatching
 
 
-def median_ms(function, repeats):
+def median_cpu_ms(function, repeats):
     samples = []
     for _ in range(repeats):
-        start = perf_counter()
+        start = process_time()
         function()
-        samples.append((perf_counter() - start) * 1000)
+        samples.append((process_time() - start) * 1000)
     return round(float(np.median(samples)), 3)
 
 
@@ -39,10 +39,11 @@ for count in (1000, 5000, 20000):
     )
     new = lambda: matcher._candidate_indices(ringkey)
     # Fixed scoring work is unchanged. Report it separately from index costs.
+    # Process CPU time excludes scheduler delays from concurrent lane builds.
     print(
-        f"n={count}: index old={median_ms(old, 30)}ms "
-        f"cached={median_ms(new, 30)}ms "
-        f"full_old_search={median_ms(lambda: baseline.search(query, 1), 3)}ms "
-        f"full_cached_search={median_ms(lambda: matcher.search(query, 1), 3)}ms",
+        f"n={count} CPU: index old={median_cpu_ms(old, 30)}ms "
+        f"cached={median_cpu_ms(new, 30)}ms "
+        f"full_old_search={median_cpu_ms(lambda: baseline.search(query, 1), 3)}ms "
+        f"full_cached_search={median_cpu_ms(lambda: matcher.search(query, 1), 3)}ms",
         flush=True,
     )
