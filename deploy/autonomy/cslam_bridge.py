@@ -521,8 +521,15 @@ class Bridge(Node):
         self.pending_cloud = None
         self.pending_cloud_since = 0.0
         self.normalize_retry_s = 0.05
-        self.normalize_retry_timer = None
-        self.capture_retry_timer = None
+        self.normalize_retry_clock, self.normalize_retry_timer = create_steady_timer(
+            self.sensor_node, 0.05, self.normalize
+        )
+        self.capture_retry_clock, self.capture_retry_timer = create_steady_timer(
+            self, RAW_CAPTURE_JOIN_GRACE_S, self.flush_captures
+        )
+        self.normalize_retry_timer.cancel()
+        self.capture_retry_timer.cancel()
+        self.capture_tf_lookup_misses = 0
         # Sensor callbacks run on a separate executor in split-domain mode.
         # Wake the peer executor rather than consuming keyframes across threads.
         self.capture_ready = self.create_guard_condition(self.flush_captures)
@@ -935,19 +942,15 @@ class Bridge(Node):
         self.normalize()
 
     def _cancel_normalize_retry(self):
-        if self.normalize_retry_timer is not None:
-            self.normalize_retry_timer.cancel()
-            self.sensor_node.destroy_timer(self.normalize_retry_timer)
-            self.normalize_retry_timer = None
+        self.normalize_retry_timer.cancel()
 
     def _retry_normalize(self):
         remaining = AUTHORITY_SENSOR_TTL_S - (
             time.monotonic() - self.pending_cloud_since
         )
         delay = max(0.001, min(self.normalize_retry_s, remaining))
-        self.normalize_retry_clock, self.normalize_retry_timer = create_steady_timer(
-            self.sensor_node, delay, self.normalize
-        )
+        self.normalize_retry_timer.timer_period_ns = int(delay * 1_000_000_000)
+        self.normalize_retry_timer.reset()
         self.normalize_retry_s = min(1.0, 2 * self.normalize_retry_s)
 
     def raw_capture_provenance(self, message):
@@ -1072,6 +1075,8 @@ class Bridge(Node):
             mount = self.tf.lookup_transform(self.base, cloud.header.frame_id, stamp)
             local = self.tf.lookup_transform(self.odom_frame, self.base, stamp)
         except TransformException:
+            with self._shared_lock:
+                self.capture_tf_lookup_misses += 1
             self._retry_normalize()
             return  # never substitute a latest transform for capture-time TF
         self.pending_cloud = None
@@ -1181,10 +1186,7 @@ class Bridge(Node):
         self.flush_captures()
 
     def flush_captures(self):
-        if self.capture_retry_timer is not None:
-            self.capture_retry_timer.cancel()
-            self.destroy_timer(self.capture_retry_timer)
-            self.capture_retry_timer = None
+        self.capture_retry_timer.cancel()
         for seq in tuple(self.clouds.keys() | self.odoms.keys()):
             self.consume(seq)
         waiting = self.clouds.keys() & self.odoms.keys()
@@ -1193,9 +1195,8 @@ class Bridge(Node):
             # data wakes this method via capture_ready before that deadline.
             deadline = min(self.pending_capture_since[seq] for seq in waiting)
             delay = max(0.001, deadline + RAW_CAPTURE_JOIN_GRACE_S - time.monotonic())
-            self.capture_retry_clock, self.capture_retry_timer = create_steady_timer(
-                self, delay, self.flush_captures
-            )
+            self.capture_retry_timer.timer_period_ns = int(delay * 1_000_000_000)
+            self.capture_retry_timer.reset()
 
     def _take_raw_capture(self, stamp, keyframe):
         with self._shared_lock:
@@ -1489,6 +1490,7 @@ class Bridge(Node):
         with self._shared_lock:
             last_sensor_at = self.last_sensor_at
             normalized_count = self.normalized_count
+            capture_tf_lookup_misses = self.capture_tf_lookup_misses
         if self.core.revision and self.graph_solution_revision != self.core.revision:
             revision = ComponentRevision(
                 component_id_for_anchor(self.core.anchor),
@@ -1637,6 +1639,7 @@ class Bridge(Node):
             "robot_map_epoch": self.core.map_epoch,
             "run_id": self.core.run_id,
             "normalized_scans": normalized_count,
+            "capture_tf_lookup_misses": capture_tf_lookup_misses,
             "keyframes": self.capture_count,
             "qualified_raw_captures": self.qualified_capture_count,
             "capture_provider": self.core.capture_provider.spec.name,

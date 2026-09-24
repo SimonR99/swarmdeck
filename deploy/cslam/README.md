@@ -31,9 +31,12 @@ replaces an older cloud waiting for capture-time TF. There are no idle 20 Hz nor
 retry, backing off from 50 ms to 1 s. A pending cloud is discarded after the
 existing 3 s sensor-freshness limit, with a rate-limited warning; a newer cloud
 replaces it. A raw/provenance join retains its existing 0.5 s grace period with
-an on-demand deadline timer. Both timers disappear when no work remains. The
-1 Hz snapshot timer, write-on-change status file, authority thread and epoch
-fence are unchanged.
+an on-demand deadline timer. Both steady-clock retry timers are allocated once,
+then rearmed with `reset()` and canceled when no work remains. Only the snapshot
+timer remains active at idle. `status.json.capture_tf_lookup_misses` counts failed
+capture-time TF lookup attempts (including retries), so the controller can measure
+the miss rate. The 1 Hz snapshot cadence, write-on-change status behavior,
+authority thread and epoch fence are unchanged.
 
 RGB-D caches remain bounded (8 records, 64 MiB per stream, 16 MiB per message)
 and decode-free. Frames up to 250 ms before a scan can be valid color sources;

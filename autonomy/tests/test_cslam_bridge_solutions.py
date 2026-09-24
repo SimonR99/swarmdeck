@@ -1275,19 +1275,37 @@ def event_bridge(module, monkeypatch):
     bridge.pending_cloud = None
     bridge.pending_cloud_since = 0.0
     bridge.normalize_retry_s = 0.05
-    bridge.normalize_retry_timer = None
-    bridge.capture_retry_timer = None
-    bridge.sensor_node = NS(destroy_timer=lambda timer: timer.cancel())
-    bridge.destroy_timer = lambda timer: timer.cancel()
+    bridge.sensor_node = NS()
     bridge.timers = []
+    bridge._shared_lock = threading.Lock()
+    bridge.capture_tf_lookup_misses = 0
+
+    class Timer:
+        def __init__(self, period, callback):
+            self.timer_period_ns = int(period * 1_000_000_000)
+            self.callback = callback
+            self.cancelled = False
+
+        @property
+        def period(self):
+            return self.timer_period_ns / 1_000_000_000
+
+        def cancel(self):
+            self.cancelled = True
+
+        def reset(self):
+            self.cancelled = False
 
     def timer(node, period, callback):
-        handle = NS(period=period, callback=callback, cancelled=False)
-        handle.cancel = lambda: setattr(handle, "cancelled", True)
+        handle = Timer(period, callback)
         bridge.timers.append(handle)
         return None, handle
 
     monkeypatch.setattr(module, "create_steady_timer", timer)
+    _, bridge.normalize_retry_timer = timer(bridge, 0.05, bridge.normalize)
+    _, bridge.capture_retry_timer = timer(bridge, 0.5, bridge.flush_captures)
+    bridge.normalize_retry_timer.cancel()
+    bridge.capture_retry_timer.cancel()
     bridge.get_logger = lambda: NS(warn=lambda *args, **kwargs: None)
     return bridge
 
@@ -1299,7 +1317,7 @@ def test_raw_cloud_normalizes_without_periodic_poll(bridge_module, monkeypatch):
     cloud = object()
     bridge.raw_cloud(cloud)
     assert normalized == [cloud]
-    assert bridge.timers == []
+    assert len(bridge.timers) == 2 and all(t.cancelled for t in bridge.timers)
 
 
 def test_missing_tf_retries_only_while_pending_and_expires(bridge_module, monkeypatch):
@@ -1318,12 +1336,13 @@ def test_missing_tf_retries_only_while_pending_and_expires(bridge_module, monkey
     first = bridge.normalize_retry_timer
     now[0] += 0.05
     first.callback()
-    assert first.cancelled
+    assert bridge.normalize_retry_timer is first and not first.cancelled
     assert bridge.normalize_retry_timer.period == 0.1
+    assert bridge.capture_tf_lookup_misses == 2
     now[0] += bridge_module.AUTHORITY_SENSOR_TTL_S
     bridge.normalize_retry_timer.callback()
     assert bridge.pending_cloud is None
-    assert bridge.normalize_retry_timer is None
+    assert bridge.normalize_retry_timer.cancelled
     assert all(timer.cancelled for timer in bridge.timers)
 
 
@@ -1347,7 +1366,7 @@ def test_keyframe_join_flushes_on_events_and_arms_only_pending_deadline(
 
     bridge.consume = consume
     bridge.key_cloud(NS(mission_id="m", map_epoch=0, id=1, pointcloud="cloud"))
-    assert bridge.timers == []
+    assert len(bridge.timers) == 2 and all(t.cancelled for t in bridge.timers)
     bridge.key_odom(NS(mission_id="m", map_epoch=0, id=1, odom="odom"))
     assert bridge.capture_retry_timer.period == bridge_module.RAW_CAPTURE_JOIN_GRACE_S
     waiting = bridge.capture_retry_timer
@@ -1356,9 +1375,9 @@ def test_keyframe_join_flushes_on_events_and_arms_only_pending_deadline(
     bridge.flush_captures()
     assert consumed == [1]
     assert waiting.cancelled
-    assert bridge.capture_retry_timer is None
+    assert bridge.capture_retry_timer.cancelled
     bridge.flush_captures()
-    assert len(bridge.timers) == 1
+    assert len(bridge.timers) == 2
 
 
 def test_tf_recovery_cancels_retry_even_for_parked_cloud(bridge_module, monkeypatch):
@@ -1386,7 +1405,7 @@ def test_tf_recovery_cancels_retry_even_for_parked_cloud(bridge_module, monkeypa
     now[0] += 0.05
     retry.callback()
     assert bridge.pending_cloud is None
-    assert bridge.normalize_retry_timer is None
+    assert bridge.normalize_retry_timer.cancelled
     assert retry.cancelled
     assert bridge.captures_skipped_parked == 1
     assert bridge.last_sensor_at == now[0]
@@ -1418,7 +1437,7 @@ def test_raw_capture_join_deadline_preserves_grace_and_cleans_timer(
     assert not bridge.pending_capture_since
     assert bridge.dropped == 1  # no calibration: existing fail-closed behavior
     assert deadline.cancelled
-    assert bridge.capture_retry_timer is None
+    assert bridge.capture_retry_timer.cancelled
 
 
 def test_tf_retry_never_schedules_beyond_sensor_freshness_limit(
@@ -1444,3 +1463,23 @@ def test_trimming_one_keyframe_cache_keeps_other_halfs_join_deadline(
     assert 0 not in bridge.clouds and 0 in bridge.odoms
     assert bridge.pending_capture_since[0] == 10.0
     assert bridge.dropped == 1
+
+
+@pytest.mark.parametrize("kind", ["normalize", "capture"])
+def test_capture_retry_reuses_timer_object(bridge_module, monkeypatch, kind):
+    bridge = event_bridge(bridge_module, monkeypatch)
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: 10.0)
+    if kind == "normalize":
+        bridge.pending_cloud_since = 10.0
+        arm = bridge._retry_normalize
+        timer_name = "normalize_retry_timer"
+    else:
+        bridge.clouds, bridge.odoms = {1: object()}, {1: object()}
+        bridge.pending_capture_since = {1: 10.0}
+        bridge.consume = lambda seq: None
+        arm = bridge.flush_captures
+        timer_name = "capture_retry_timer"
+    arm()
+    timer = getattr(bridge, timer_name)
+    arm()
+    assert getattr(bridge, timer_name) is timer
