@@ -132,7 +132,6 @@ def robot_floodlights(
 TICKS_PER_SECOND = 100
 
 # Sensor rates, as divisors of the tick rate.
-LIDAR_HZ = 10.0  # what a VLP-16 actually spins at
 CAMERA_HZ = 5.0  # matches the adapter's JPEG preview budget
 EXCHANGE_HZ = 10.0  # how often ROS sees an observation, and the /clock rate
 
@@ -186,7 +185,14 @@ def _divider(hz: float) -> int:
 
 
 def controller_block(
-    rid: str, profile: str, spec, lidar, odometry: Any = True, indent: str = "    "
+    rid: str,
+    profile: str,
+    spec,
+    lidar,
+    odometry: Any = True,
+    indent: str = "    ",
+    *,
+    parked_lidar_divider: int = 0,
 ) -> list[str]:
     """One robot's controller, with its sensors mounted from `RobotSpec`.
 
@@ -245,7 +251,15 @@ def controller_block(
         # A real time-of-flight unit is specified around +/-3 cm. Zero noise
         # hands the scan matcher an accuracy it will never have on hardware.
         f'{indent}                          range_noise_std_dev="0.03"',
-        f"{indent}                          framerate_divider={_attr(_divider(LIDAR_HZ))} />",
+        *(
+            [
+                f"{indent}                          parked_framerate_divider={_attr(parked_lidar_divider)}",
+                f"{indent}                          parked_after_ticks={_attr(TICKS_PER_SECOND)}",
+            ]
+            if parked_lidar_divider
+            else []
+        ),
+        f"{indent}                          framerate_divider={_attr(_divider(lidar.rate))} />",
         f'{indent}    <photorealistic_camera implementation="default" medium="pr"',
         f'{indent}                           anchor="origin"',
         f"{indent}                           position={_attr(_vec(spec.camera_x, 0.0, camera_z))}",
@@ -355,6 +369,31 @@ def generate_argos_xml(
             f"fleet.lidar.profile to vlp16 or generic_32."
         )
 
+    simulation = cfg.get("simulation") or {}
+    realtime_factor = simulation.get("realtime_factor", 1)
+    if (
+        isinstance(realtime_factor, bool)
+        or not isinstance(realtime_factor, (int, float))
+        or not math.isfinite(realtime_factor)
+        or realtime_factor < 0
+    ):
+        raise ValueError("simulation.realtime_factor must be finite and nonnegative")
+    parked_rate = simulation.get("parked_lidar_rate")
+    parked_divider = 0
+    if parked_rate is not None:
+        if (
+            isinstance(parked_rate, bool)
+            or not isinstance(parked_rate, (int, float))
+            or not math.isfinite(parked_rate)
+            or not 0 < parked_rate <= lidar.rate
+            or not math.isclose(_divider(parked_rate) * parked_rate, TICKS_PER_SECOND)
+        ):
+            raise ValueError(
+                "simulation.parked_lidar_rate must be positive, no faster than "
+                "fleet.lidar.rate, and divide the 100 Hz physics tick rate exactly"
+            )
+        parked_divider = _divider(parked_rate)
+
     types = robot_types(fleet_cfg, count, prefix)
     robot_ids = [f"{prefix}{i}" for i in range(count)]
 
@@ -395,7 +434,16 @@ def generate_argos_xml(
     ]
 
     for rid, profile, odom_s in zip(robot_ids, types, odom_specs):
-        lines.extend(controller_block(rid, profile, robot_spec(profile), lidar, odom_s))
+        lines.extend(
+            controller_block(
+                rid,
+                profile,
+                robot_spec(profile),
+                lidar,
+                odom_s,
+                parked_lidar_divider=parked_divider,
+            )
+        )
 
     lines.extend(
         [
@@ -409,7 +457,7 @@ def generate_argos_xml(
             f"      socket={_attr(socket_path)}",
             f'      robots={_attr(",".join(robot_ids))}',
             f"      exchange_period={_attr(_divider(EXCHANGE_HZ))}",
-            '      realtime_factor="1"',
+            f"      realtime_factor={_attr(realtime_factor)}",
             '      connect_timeout="180" />',
             "",
         ]

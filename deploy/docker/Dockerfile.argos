@@ -94,6 +94,7 @@ RUN cmake -S /src/argos3/src -B /src/argos3/build \
 # Incremental rebuild preserves the expensive upstream/Filament build cache.
 COPY deploy/patches/argos /tmp/swarmdeck-steps
 RUN python3 /tmp/swarmdeck-steps/apply_steps.py /src/argos3 \
+    && python3 /tmp/swarmdeck-steps/apply_parked_lidar.py /src/argos3 \
     && cmake --build /src/argos3/build -j4 \
     && cmake --install /src/argos3/build
 

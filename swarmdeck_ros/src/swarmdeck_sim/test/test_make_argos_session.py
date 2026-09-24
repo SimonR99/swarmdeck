@@ -111,6 +111,85 @@ def test_the_lidar_matches_the_configured_profile(tree, cfg):
     assert lo == pytest.approx(-hi, abs=1e-3)
 
 
+@pytest.mark.parametrize("rate, divider", [(5.0, 20), (10.0, 10)])
+def test_lidar_render_rate_follows_fleet_config_without_changing_geometry(
+    tmp_path, cfg, rate, divider
+):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["fleet"]["lidar"] = {"profile": "os1_32", "rate": rate}
+    path = tmp_path / "lidar-rate.yaml"
+    path.write_text(yaml.safe_dump(config))
+    root = ElementTree.fromstring(mas.generate_argos_xml(path))
+    for block in controllers(root).values():
+        lidar = block.find("./sensors/photorealistic_lidar")
+        assert int(lidar.get("framerate_divider")) == divider
+        assert lidar.get("rings") == "33"
+        assert lidar.get("horizontal_resolution") == "0.3516"
+        assert lidar.get("max_range") == "100"
+        assert (
+            block.find("./sensors/photorealistic_camera").get("framerate_divider")
+            == "20"
+        )
+    assert root.find("loop_functions").get("exchange_period") == "10"
+
+
+@pytest.mark.parametrize("factor", [0, 2.0])
+def test_benchmark_pacing_can_be_disabled_without_enabling_lockstep(
+    tmp_path, cfg, factor
+):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["simulation"] = {"realtime_factor": factor}
+    path = tmp_path / "unpaced.yaml"
+    path.write_text(yaml.safe_dump(config))
+    loop = ElementTree.fromstring(mas.generate_argos_xml(path)).find("loop_functions")
+    assert float(loop.get("realtime_factor")) == factor
+    assert loop.get("realtime", "true") == "true"
+
+
+@pytest.mark.parametrize("factor", [-1, float("nan"), float("inf"), True, "bad"])
+def test_benchmark_pacing_rejects_invalid_factors(tmp_path, cfg, factor):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["simulation"] = {"realtime_factor": factor}
+    path = tmp_path / "invalid-pacing.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="realtime_factor"):
+        mas.generate_argos_xml(path)
+
+
+def test_parked_lidar_is_opt_in_and_preserves_moving_scans(tmp_path, cfg):
+    normal = ElementTree.fromstring(mas.generate_argos_xml(CONFIG))
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["simulation"] = {"parked_lidar_rate": 2.0}
+    path = tmp_path / "parked-lidar.yaml"
+    path.write_text(yaml.safe_dump(config))
+    parked = ElementTree.fromstring(mas.generate_argos_xml(path))
+    for original, reduced in zip(
+        controllers(normal).values(), controllers(parked).values()
+    ):
+        baseline = original.find("./sensors/photorealistic_lidar")
+        lidar = reduced.find("./sensors/photorealistic_lidar")
+        assert "parked_framerate_divider" not in baseline.attrib
+        assert lidar.attrib.pop("parked_framerate_divider", None) == "50"
+        assert lidar.attrib.pop("parked_after_ticks", None) == "100"
+        assert lidar.attrib == baseline.attrib
+        assert (
+            reduced.find("./sensors/photorealistic_camera").attrib
+            == original.find("./sensors/photorealistic_camera").attrib
+        )
+
+
+@pytest.mark.parametrize(
+    "rate", [0, -1, 11, 3, float("nan"), float("inf"), True, "bad"]
+)
+def test_parked_lidar_rejects_invalid_or_unrepresentable_rates(tmp_path, cfg, rate):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["simulation"] = {"parked_lidar_rate": rate}
+    path = tmp_path / "invalid-parked-lidar.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="parked_lidar_rate"):
+        mas.generate_argos_xml(path)
+
+
 @pytest.mark.parametrize("profile", ["vlp16", "os1_32"])
 def test_lidar_extreme_rays_fit_rendered_face_corners(tmp_path, cfg, profile):
     config = yaml.safe_load(yaml.safe_dump(cfg))
@@ -435,7 +514,7 @@ def test_the_sensor_rates_divide_the_tick_rate(tree):
     block = list(controllers(tree).values())[0]
     lidar = block.find("./sensors/photorealistic_lidar")
     camera = block.find("./sensors/photorealistic_camera")
-    assert 100 / int(lidar.get("framerate_divider")) == pytest.approx(mas.LIDAR_HZ)
+    assert 100 / int(lidar.get("framerate_divider")) == pytest.approx(10.0)
     assert 100 / int(camera.get("framerate_divider")) == pytest.approx(mas.CAMERA_HZ)
     assert 100 / int(tree.find("loop_functions").get("exchange_period")) == (
         pytest.approx(mas.EXCHANGE_HZ)

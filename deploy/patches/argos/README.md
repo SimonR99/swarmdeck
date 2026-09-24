@@ -71,3 +71,29 @@ stale setting.
 insertion anchors change, including under Python's optimized mode. When updating
 the ARGoS pin, review the generated model sources and rerun both suites. Match
 the Jolt library's build flags: profiling and SIMD definitions affect its ABI.
+
+## Opt-in parked lidar scheduling
+
+`apply_parked_lidar.py` adds `parked_framerate_divider` and `parked_after_ticks`
+to the lidar sensor and camera pool without changing RGB/depth cameras or
+normal lidar defaults. `swarmdeck_lidar_schedule.h` chooses the original
+schedule until the physical anchor has been exactly still for the configured
+grace period; any translation or rotation restores it immediately. Simulation
+clock reset restarts the grace period. The four lidar faces remain synchronized.
+The patch also adds the helper to the installed public-header list. Unknown
+upstream insertion anchors fail before any source files are written; applying
+the patch twice is idempotent.
+
+`Dockerfile.argos` applies it after the step patch. Offline regressions compile
+and execute the standalone scheduling helper and test patch application against
+the pinned ARGoS sources:
+
+```bash
+server/.venv/bin/python -m pytest -q \
+  swarmdeck_ros/src/swarmdeck_sim/test/test_argos_parked_lidar.py \
+  swarmdeck_ros/src/swarmdeck_sim/test/test_make_argos_session.py \
+  swarmdeck_ros/src/swarmdeck_sim/test/test_simspeed_benchmark.py
+```
+
+Configuration, fidelity trade-offs, the **tuf-only** unpaced benchmark, and
+remaining runtime qualification are in `configs/README-simspeed.md`.
