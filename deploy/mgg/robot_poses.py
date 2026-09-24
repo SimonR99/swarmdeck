@@ -238,6 +238,7 @@ def transform_message(frame, peer_frame, transform, stamp):
 
 def run(robot, peers, source):
     import rclpy
+    from rclpy.executors import ExternalShutdownException
     from nav_msgs.msg import Odometry
     from std_msgs.msg import String
     from tf2_msgs.msg import TFMessage
@@ -311,8 +312,13 @@ def run(robot, peers, source):
     node.create_timer(PUBLISH_PERIOD_S, publish)
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception:
+        # ros2 launch stops the group with a signal, which shuts the context
+        # down under a spin that may be building its wait set.
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
         rclpy.try_shutdown()
