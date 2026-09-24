@@ -1,10 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { CanvasViewport, type CanvasView } from './canvasViewport';
+  import { CanvasInteraction, qualifiedNavigateTargets } from './canvasInteraction';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
     globalMapMembers,
-    hasQualifiedRasterFrame,
     RasterRobotProjectionCache,
     RasterTrailProjectionCache
   } from './mapFrames';
@@ -112,11 +112,9 @@
     if (!robot) return [];
     return trailCache.project(robot, trails.points(robotId), mapStore.info?.transforms);
   }
-  const pointers = new Map<number, { x: number; y: number }>();
-  let dragged = false;
 
   const viewport = new CanvasViewport(view);
-  const { screenOf, gridOf } = viewport;
+  const { screenOf } = viewport;
 
   function robotsOnMap() {
     // The displayed raster decides who is on it: the optimized scope's robots
@@ -461,126 +459,65 @@
     });
   });
 
-  let pointerDownPos: { x: number; y: number } | null = null;
+  // Pointer gestures, picking and goal entry live in canvasInteraction.ts.
+  const interaction = new CanvasInteraction(viewport, {
+    goalMode: () => navigation.goalMode,
+    robotsOnMap,
+    worldToGrid: (x, y) => mapStore.worldToGrid(x, y),
+    gridToWorld: (gx, gy) => mapStore.gridToWorld(gx, gy),
+    reviewedObjectAt: (x, y) => hitTestReviewedObject(x, y, screenOf),
+    reviewSelected: () => review.selected,
+    selectReview: (id) => review.select(id),
+    focusRobot: (id) => actions.focusRobot(id),
+    selectRobot: (id, additive) => {
+      fleet.select(id, additive);
+      actions.selectRobots(fleet.selected);
+    },
+    goalTargets: navigateTargets,
+    goalScope: () => mapStore.globalOptimizedScope,
+    sendGoal: (id, scope, world) => postGlobalRasterGoal(id, scope, world, fetch, navigation.exploreIfUnknown),
+    goalRefused: (id, reason) =>
+      session.addAlert({
+        id: `raster_goal_${id}`,
+        level: 'warn',
+        kind: 'fault',
+        robot_id: id,
+        message: `Goal on the raster refused: ${reason instanceof Error ? reason.message : String(reason)}`,
+        t_wall: Date.now() / 1000,
+        acknowledged: false
+      }),
+    cancelGoalMode: () => navigation.cancelGoalMode(),
+    finishGoal: (world) => navigation.finishGoal(world),
+    stopFollowing: () => (follow = false),
+    setCursor: (world) => (cursorWorld = world)
+  });
+
+  function navigateTargets() {
+    return qualifiedNavigateTargets(
+      fleet.selected,
+      (id) => fleet.can(id, 'navigate'),
+      (id) => fleet.get(id),
+      mapStore.info?.transforms
+    );
+  }
+
+  function canvasOrigin() {
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.left, y: rect.top };
+  }
 
   function onPointerDown(e: PointerEvent) {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pointers.size === 1) {
-      pointerDownPos = { x: e.clientX, y: e.clientY };
-      dragged = false;
-    }
-  }
-
-  function qualifiedNavigateTargets() {
-    return fleet.selected.filter((id) => {
-      if (!fleet.can(id, 'navigate')) return false;
-      const robot = fleet.get(id);
-      return !robot || hasQualifiedRasterFrame(robot, mapStore.info?.transforms);
-    });
+    interaction.pointerDown(e.pointerId, { x: e.clientX, y: e.clientY });
   }
 
   function onPointerMove(e: PointerEvent) {
-    const prev = pointers.get(e.pointerId);
-    if (!prev) {
-      if (canvas) {
-        const rect = canvas.getBoundingClientRect();
-        const g = gridOf(e.clientX - rect.left, e.clientY - rect.top);
-        cursorWorld = mapStore.gridToWorld(g.gx, g.gy);
-      }
-      return;
-    }
-    const cur = { x: e.clientX, y: e.clientY };
-
-    if (pointers.size === 2 && canvas) {
-      const rect = canvas.getBoundingClientRect();
-      const entries = [...pointers.entries()];
-      const otherEntry = entries.find(([id]) => id !== e.pointerId);
-      if (otherEntry) {
-        const [, otherCur] = otherEntry;
-        viewport.pinch(prev, cur, otherCur, { x: rect.left, y: rect.top });
-        pointers.set(e.pointerId, cur);
-        dragged = true;
-        follow = false;
-        return;
-      }
-    }
-
-    pointers.set(e.pointerId, cur);
-    if (pointerDownPos && Math.hypot(cur.x - pointerDownPos.x, cur.y - pointerDownPos.y) > 6) {
-      dragged = true;
-      follow = false;
-    }
-    viewport.pan(cur.x - prev.x, cur.y - prev.y);
+    interaction.pointerMove(e.pointerId, { x: e.clientX, y: e.clientY }, canvasOrigin);
   }
 
   function onPointerUp(e: PointerEvent) {
-    const wasDrag = dragged;
-    pointers.delete(e.pointerId);
-    if (pointers.size === 0) {
-      pointerDownPos = null;
-    }
-    if (wasDrag || !canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-
-    // In inspection mode, map markers are directly selectable. Shift-click
-    // mirrors the fleet rail's additive selection behaviour.
-    if (!navigation.goalMode) {
-      const detection = hitTestReviewedObject(clickX, clickY, screenOf);
-      if (detection) {
-        if (review.selected === detection.id) {
-          review.select(null);
-        } else {
-          review.select(detection.id);
-          const robotId = detection.robotId ?? detection.robotIds[0];
-          if (robotId) actions.focusRobot(robotId);
-        }
-        return;
-      }
-
-      let nearest: { id: string; distance: number } | null = null;
-      for (const robot of robotsOnMap()) {
-        const grid = mapStore.worldToGrid(robot.pose.x, robot.pose.y);
-        if (!grid) continue;
-        const screen = screenOf(grid.gx, grid.gy);
-        const distance = Math.hypot(screen.sx - clickX, screen.sy - clickY);
-        if (distance <= 18 && (!nearest || distance < nearest.distance)) {
-          nearest = { id: robot.robot_id, distance };
-        }
-      }
-      if (nearest) {
-        fleet.select(nearest.id, e.shiftKey);
-        actions.selectRobots(fleet.selected);
-      }
-      return;
-    }
-
-    const g = gridOf(clickX, clickY);
-    const world = mapStore.gridToWorld(g.gx, g.gy);
-    if (!world) return;
-    const targets = qualifiedNavigateTargets();
-    const scope = mapStore.globalOptimizedScope;
-    if (!scope) {
-      navigation.cancelGoalMode();
-      return;
-    }
-    for (const id of targets) {
-      void postGlobalRasterGoal(id, scope, world, fetch, navigation.exploreIfUnknown).catch((reason) => {
-        session.addAlert({
-          id: `raster_goal_${id}`,
-          level: 'warn',
-          kind: 'fault',
-          robot_id: id,
-          message: `Goal on the raster refused: ${reason instanceof Error ? reason.message : String(reason)}`,
-          t_wall: Date.now() / 1000,
-          acknowledged: false
-        });
-      });
-    }
-    if (targets.length) navigation.finishGoal(world);
+    interaction.pointerUp(e.pointerId, { x: e.clientX, y: e.clientY }, canvasOrigin, e.shiftKey);
   }
 
   function onWheel(e: WheelEvent) {
@@ -590,7 +527,7 @@
     zoomBy(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - rect.left, e.clientY - rect.top);
   }
 
-  const canGoal = $derived(qualifiedNavigateTargets().length);
+  const canGoal = $derived(navigateTargets().length);
   const registrationEntries = $derived(Object.entries(mapStore.status?.registrations ?? {}));
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
