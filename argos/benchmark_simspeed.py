@@ -120,6 +120,24 @@ def run_window(output: Path, window: float, probe) -> dict:
     return record
 
 
+def stop_exploration() -> None:
+    subprocess.run(
+        ["docker", "exec", "-i", "swarmdeck-server-1", "python", "-"],
+        input="""import asyncio, json, websockets
+async def main():
+    async with websockets.connect("ws://localhost:8080/ws") as ws:
+        await ws.send(json.dumps({"type": "stop_explore"}))
+        # Keep the connection alive while the server forwards the stop, and
+        # allow the chassis to settle before collecting stationary scan rates.
+        await asyncio.sleep(2)
+asyncio.run(main())
+""",
+        text=True,
+        check=True,
+        timeout=30,
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -141,6 +159,7 @@ def main(argv=None) -> int:
         return 2
     if args.window <= 0 or args.warmup < 0 or args.rounds < 1:
         parser.error("window and rounds must be positive; warmup must be nonnegative")
+    os.environ["COMPOSE_PROJECT"] = "swarmdeck"
     existing = subprocess.check_output(
         [
             "docker",
@@ -208,6 +227,8 @@ def main(argv=None) -> int:
                     "--drift",
                     "-t",
                     "10",
+                    "-e",
+                    "0",
                 ]
                 if index or args.no_build:
                     command.append("--no-build")
@@ -232,6 +253,7 @@ def main(argv=None) -> int:
                     text=True,
                 )
                 stem.with_suffix(".argos").write_text(experiment)
+                stop_exploration()
                 record = run_window(stem, args.window, probe)
                 print(
                     f"{stem.name}: {record['rtf']['rtf']:.3f} sim-seconds/wall-second",

@@ -99,3 +99,44 @@ def test_missing_gpu_samples_preserve_measured_rtf(tmp_path, monkeypatch):
     saved = json.loads(output.with_suffix(".json").read_text())
     assert saved["rtf"] == {"rtf": 2.0, "sim_s": 120, "wall_s": 60}
     assert "GPU utilization" in saved["gpu"]["error"]
+
+
+def test_benchmark_stops_exploration_before_each_window(tmp_path, monkeypatch):
+    import subprocess
+
+    benchmark = runpy.run_path(str(SCRIPT))
+    calls = []
+    monkeypatch.setattr(benchmark["platform"], "node", lambda: "tuf")
+    monkeypatch.setenv("COMPOSE_PROJECT", "wrong-project")
+    monkeypatch.setenv("EXPLORE_SECONDS", "99")
+    monkeypatch.setattr(benchmark["time"], "sleep", lambda _: None)
+
+    def run(command, **kwargs):
+        if "simulation_launch.py" in " ".join(command):
+            assert benchmark["os"].environ["COMPOSE_PROJECT"] == "swarmdeck"
+            if "--down" not in command:
+                assert command[command.index("-e") + 1] == "0"
+        if command[:3] == ["docker", "exec", "-i"]:
+            calls.append("stop")
+            assert '"stop_explore"' in kwargs["input"]
+        return subprocess.CompletedProcess(command, 0)
+
+    def check_output(command, **kwargs):
+        if command[:2] == ["docker", "ps"]:
+            return ""
+        return "fixture"
+
+    def window(*args):
+        calls.append("window")
+        return {"rtf": {"rtf": 2}}
+
+    monkeypatch.setattr(benchmark["subprocess"], "run", run)
+    monkeypatch.setattr(benchmark["subprocess"], "check_output", check_output)
+    monkeypatch.setitem(benchmark["main"].__globals__, "run_window", window)
+    assert (
+        benchmark["main"](
+            ["--rounds", "1", "--warmup", "0", "--output", str(tmp_path / "results")]
+        )
+        == 0
+    )
+    assert calls == ["stop", "window"] * 3
