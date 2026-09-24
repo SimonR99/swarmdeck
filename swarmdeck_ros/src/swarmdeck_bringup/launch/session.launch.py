@@ -247,7 +247,7 @@ def setup(context, *args, **kwargs):
         ExecuteProcess(
             cmd=[
                 "python3",
-                str(Path(__file__).with_name("static_mounts.py")),
+                str(Path(__file__).resolve().with_name("static_mounts.py")),
                 json.dumps(mounts),
                 "--ros-args",
                 "-p",
