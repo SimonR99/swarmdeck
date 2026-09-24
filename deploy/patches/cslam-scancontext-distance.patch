@@ -39,7 +39,9 @@
 -    sim = np.max(sim_for_each_cols)
 -    dist = 1 - sim
 -
--    return dist, yaw_diff+    # Normalize each column once, then score every column pairing together.
+-    return dist, yaw_diff
+\ No newline at end of file
++    # Normalize each column once, then score every column pairing together.
 +    # Each cyclic diagonal represents one of the original 1..num_sectors shifts.
 +    norms1 = np.linalg.norm(sc1, axis=0)
 +    norms2 = np.linalg.norm(sc2, axis=0)
