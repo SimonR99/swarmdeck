@@ -1566,3 +1566,23 @@ def test_normalized_cloud_wakes_peer_executor(bridge_module, monkeypatch):
     assert bridge.normalized_count == 1
     np.testing.assert_array_equal(published[0].points, points)
     assert bridge.capture_wakes == [True]
+
+
+def test_status_reports_each_counter_under_one_key():
+    """Every `status.json` field carries a distinct value. `solutions` is the
+    adopted-correction count (docs/operations/known-issues.md); it was once
+    repeated as `corrections_applied`.
+    """
+    import ast
+
+    status = next(
+        node.value
+        for node in ast.walk(ast.parse(BRIDGE_SOURCE.read_text()))
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "status" for target in node.targets)
+        and isinstance(node.value, ast.Dict)
+    )
+    keys = [key.value for key in status.keys if key is not None]
+    values = [ast.unparse(value) for value in status.values]
+    assert "solutions" in keys and "corrections_applied" not in keys
+    assert len(set(values)) == len(values)

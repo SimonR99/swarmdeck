@@ -1673,8 +1673,8 @@ class Bridge(Node):
             "color_tf_rejections": self.color_tf_rejections,
             "color_projection_rejections": self.color_projection_rejections,
             "colored_captures": self.colored_captures,
-            # `solutions` is retained for compatibility and has always counted
-            # adopted corrections rather than native optimizer messages.
+            # `solutions` counts adopted corrections, not native optimizer
+            # messages.
             # Accepted results split into adopted (`solutions`), deferred
             # (moved a pose beyond the change tolerance but held by the
             # adoption interval) and unchanged.
@@ -1700,7 +1700,6 @@ class Bridge(Node):
             "inter_robot_closures_verified": self.verified_closures,
             "inter_robot_closures_rejected": self.rejected_closures,
             "inter_robot_closures_by_peer": dict(sorted(self.closures_by_peer.items())),
-            "corrections_applied": self.solution_count,
             # The adopted frame's order, and the newest solver clock seen;
             # they differ after a result that was deferred or moved nothing.
             "last_solution_order": list(self.core.solution_order),
