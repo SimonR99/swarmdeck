@@ -29,8 +29,11 @@ def hardware_settings(config):
     }
 
 
-def hardware_peers(robot):
-    """The fleet's other robots from SWARMDECK_PEER_NAMES (a JSON list), whose
+def hardware_fleet(robot):
+    """(MGG robot id, other robots) from SWARMDECK_PEER_NAMES (a JSON list).
+
+    The merge keys roadmaps by the 1-based robot id, which is the robot's
+    position in that list, and drops one carrying its own id. The others'
     roadmaps are placed with C-SLAM's estimates: a robot has no ground truth,
     so `cslam` is the only source here."""
     if (os.environ.get("SWARMDECK_ROBOT_POSES") or "cslam") != "cslam":
@@ -38,7 +41,8 @@ def hardware_peers(robot):
     names = json.loads(os.environ.get("SWARMDECK_PEER_NAMES") or "[]")
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise ValueError("SWARMDECK_PEER_NAMES must be a JSON list of robot names")
-    return [name for name in names if name != robot]
+    index = names.index(robot) + 1 if robot in names else 1
+    return index, [name for name in names if name != robot]
 
 
 def generate_launch_description():
@@ -51,6 +55,7 @@ def generate_launch_description():
     planner = config["exploration"]["planner"]
     topics = config["topics"]
     robot = os.environ["SWARMDECK_ROBOT_ID"]
+    robot_index, peers = hardware_fleet(robot)
     return LaunchDescription(
         module.robot_nodes(
             robot,
@@ -60,8 +65,9 @@ def generate_launch_description():
             "/tf_static",
             os.environ.get("MGG_PARAMS_FILE", str(here / "config/hardware.yaml")),
             False,
+            robot_index=robot_index,
             planner_overrides=hardware_settings(config),
-            peers=hardware_peers(robot),
+            peers=peers,
             robot_poses="cslam",
         )
     )

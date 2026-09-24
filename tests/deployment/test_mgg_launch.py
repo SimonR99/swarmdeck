@@ -294,12 +294,14 @@ def test_hardware_roadmap_sharing_accepts_only_cslam(launch_module, monkeypatch)
     spec = importlib.util.spec_from_file_location("mgg_hardware_peers", path)
     hardware = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hardware)
-    assert hardware.hardware_peers("botman") == []
+    assert hardware.hardware_fleet("botman") == (1, [])
     monkeypatch.setenv("SWARMDECK_PEER_NAMES", '["botman", "aslan"]')
-    assert hardware.hardware_peers("botman") == ["aslan"]
+    # Distinct 1-based ids, or the merge drops the other robot as itself.
+    assert hardware.hardware_fleet("botman") == (1, ["aslan"])
+    assert hardware.hardware_fleet("aslan") == (2, ["botman"])
     monkeypatch.setenv("SWARMDECK_ROBOT_POSES", "ground_truth")
     with pytest.raises(ValueError, match="only cslam"):
-        hardware.hardware_peers("botman")
+        hardware.hardware_fleet("botman")
 
 
 def test_sim_fleet_rejects_robot_prefix_that_is_not_a_ros_namespace(
