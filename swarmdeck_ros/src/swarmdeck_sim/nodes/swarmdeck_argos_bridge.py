@@ -954,8 +954,10 @@ class ArgosBridge(Node):
         if _read_flag(sock):
             self._read_odometry(sock, robot, robot_id, tick, ticks_per_second)
         if _read_flag(sock):
-            # The estimator consumes encoders through its own ARGoS channel.
-            # This copy is a wire field nothing reads; drain it for framing.
+            # Wheel encoders (2 velocities, 2 distances). Nothing reads them:
+            # the estimator takes encoders through its own ARGoS channel. The
+            # loop function still sends them, so drain them for framing until
+            # the wire format drops the block.
             recv_exact(sock, 4 * 8)
         if _read_flag(sock):
             self._read_imu(sock, robot, stamp)
@@ -1235,13 +1237,6 @@ class ArgosBridge(Node):
             depth.step = width * 4
             depth.data = depth_data
             robot.pub_depth.publish(depth)
-
-    @staticmethod
-    def _iter_hits(raw: bytes, readings: int):
-        arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
-        hit_mask = arr["hit"] != 0
-        for pt in arr[hit_mask]:
-            yield float(pt["x"]), float(pt["y"]), float(pt["z"]), int(pt["ring"])
 
     def _send_commands(
         self, sock: socket.socket, tick: int, ids, sim_now: float
