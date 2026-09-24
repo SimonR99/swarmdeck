@@ -15,8 +15,8 @@ not create independent fleet instances: this remains one fleet per process.
   loss is no longer inferred from that unused cache. `/api/robot/{id}/vision`
   retains `camera_streaming: false`, `frame_age_ms: null`, and `frame_seq: null`
   for CLI consumers; detections and robot metadata are unchanged. The robot
-  tool's snapshot command uses its primary agent vision path, without a JPEG
-  endpoint fallback.
+  tool's `snap` and `snapshot` commands print media-pipeline guidance and exit 1
+  without a traceback. Use `doctor` or the dashboard for RTSP/WHEP camera access.
 - Adapter `camera_interest` messages are no longer emitted. GUI
   `switch_camera` messages remain accepted and logged for existing dashboards,
   but camera selection has no server-to-adapter side effect.

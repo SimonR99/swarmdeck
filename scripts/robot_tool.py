@@ -8,7 +8,7 @@ Provides CLI and programmatic tools for Cortex and operators to:
 - Send body actions for legged robots (stand, sit, wave, etc.)
 - Stop robot(s) immediately
 - Inspect vision / camera frames ("what are you seeing on this robot")
-- Capture live camera snapshots to disk
+- Explain media-pipeline access for retired camera snapshot commands
 - Inspect image files for multimodal understanding
 - Inspect YOLOE live detections and operator proposals
 - Diagnose telemetry, camera, RTSP, SSH, and required robot services in one call
@@ -1105,7 +1105,7 @@ def main() -> None:
 
     # snap / snapshot
     p_snap = subparsers.add_parser(
-        "snap", help="Capture a live camera snapshot from a robot"
+        "snap", help="Show camera snapshot guidance (RTSP/WHEP)"
     )
     p_snap.add_argument("robot_id", help="Target robot ID")
     p_snap.add_argument(
@@ -1113,9 +1113,12 @@ def main() -> None:
     )
 
     def _run_snap(args):
-        from agent.tools.vision import cmd_snapshot
-
-        cmd_snapshot(args)
+        print(
+            "camera snapshots are served by the media pipeline (RTSP/WHEP); "
+            "use `doctor` or the dashboard",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     p_snap.set_defaults(func=_run_snap)
 
