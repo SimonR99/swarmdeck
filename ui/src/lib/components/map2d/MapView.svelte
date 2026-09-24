@@ -4,7 +4,7 @@
   import { CanvasInteraction, qualifiedNavigateTargets } from './canvasInteraction';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
   import {
-    globalMapMembers,
+    membersRasterCannotPlace,
     RasterRobotProjectionCache,
     RasterTrailProjectionCache
   } from './mapFrames';
@@ -113,24 +113,25 @@
     return trailCache.project(robot, trails.points(robotId), mapStore.info?.transforms);
   }
 
+  /** Members the 3D scene draws but this raster cannot place, named for the operator. */
+  const notOnRaster = $derived(
+    mapStore.info ? membersRasterCannotPlace(membersOfMap(), mapStore.info.transforms).map(robotDisplayName) : []
+  );
+
   const viewport = new CanvasViewport(view);
   const { screenOf } = viewport;
 
-  function robotsOnMap() {
-    // The displayed raster decides who is on it: the optimized scope's robots
-    // (the composite or a merged component may be shown while the SLAM merged
-    // map reports no members at all), else the robots its transforms placed.
-    const members = globalMapMembers({
-      showingOptimizedGrid: mapStore.showingOptimizedGrid,
-      optimizedRobots: mapStore.globalOptimizedRobots,
-      transforms: mapStore.info?.transforms,
-      globalMembers: mapStore.status?.global_members
-    });
+  /** The robots this map has, shared with the 3D scene, before the raster places them. */
+  function membersOfMap() {
     return membersOnMap(fleet.robots, {
       localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
-      members,
+      members: mapStore.globalMapMembers,
       isEnabled: (id) => fleet.isEnabled(id)
-    })
+    });
+  }
+
+  function robotsOnMap() {
+    return membersOfMap()
       .map((robot) => overlayCache.project(robot, mapStore.info?.transforms))
       .filter((robot): robot is (typeof fleet.robots)[number] => robot !== null);
   }
@@ -932,6 +933,10 @@
       {#if mapStore.seq >= 0}
         <span class="h-3 w-px bg-border"></span>
         <span>rev {mapStore.seq}</span>
+      {/if}
+      {#if notOnRaster.length}
+        <span class="h-3 w-px bg-border"></span>
+        <span class="text-warn">Not on this raster: {notOnRaster.join(', ')}</span>
       {/if}
     {/if}
   </div>

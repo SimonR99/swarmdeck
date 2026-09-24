@@ -17,6 +17,8 @@ function stores() {
       revision: 11,
       info: { resolution: 0.05, transforms: { robot_0: { x: 0, y: 0, yaw: 0 } } },
       status: { global_members: ['robot_0'], reference: 'robot_0' },
+      optimizedScopes: [{ scope: 'deployment:composite', robots: ['robot_0'] }] as unknown,
+      globalOptimizedScope: 'deployment:composite' as string | null,
       viewMode: 'global',
       viewRobot: null as string | null,
       slamGraphs: {}
@@ -73,6 +75,8 @@ test('every store the frame is drawn from can make it dirty', () => {
     'network patches': (s) => (s.mapStore.revision += 1),
     'raster transforms': (s) => (s.mapStore.info = { resolution: 0.1, transforms: {} }),
     'map membership': (s) => (s.mapStore.status = { global_members: [], reference: null }),
+    'catalogue scopes': (s) => (s.mapStore.optimizedScopes = []),
+    'displayed map scope': (s) => (s.mapStore.globalOptimizedScope = null),
     'view mode': (s) => (s.mapStore.viewMode = 'local'),
     'view robot': (s) => (s.mapStore.viewRobot = 'robot_1'),
     'loop closures': (s) => (s.mapStore.slamGraphs = { robot_0: { inter_robot: [] } }),

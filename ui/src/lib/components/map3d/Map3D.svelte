@@ -48,7 +48,7 @@
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map/mapRobot';
-  import { localRobotOf, membersOnMap, slamMergeMembers } from '../map/mapMembership';
+  import { localRobotOf, membersOnMap } from '../map/mapMembership';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
 
   let {
@@ -160,7 +160,7 @@
     }
     return membersOnMap(fleet.robots, {
       localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
-      members: slamMergeMembers(mapStore.status?.global_members),
+      members: mapStore.globalMapMembers,
       isEnabled: (id) => fleet.isEnabled(id)
     });
   }

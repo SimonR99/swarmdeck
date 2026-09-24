@@ -7,33 +7,23 @@ import {
 
 export type { FrameTransforms };
 
-/** What the displayed replica raster knows about who belongs on the canvas. */
-export interface GlobalMapMembership {
-  showingOptimizedGrid: boolean;
-  optimizedRobots?: readonly string[] | null;
-  transforms: FrameTransforms;
-  globalMembers?: readonly string[] | null;
+export function hasQualifiedRasterFrame(
+  robot: Pick<RobotState, 'robot_id' | 'navigation_transform'>,
+  frames: FrameTransforms
+): boolean {
+  return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
 }
 
 /**
- * Robot ids that belong on the global canvas. While an optimized raster is on
- * show, the merged SLAM map's membership says nothing about it (the central
- * SLAM service can be idle with an empty merged grid while the composite or a
- * merged component is displayed), so the members are the robots the displayed
- * scope lists in the catalogue, else every robot the raster's transform header
- * placed. Otherwise the SLAM merged map's own members, as before.
+ * Map members the displayed raster has no transform for. The 3D scene draws
+ * them but the canvas cannot, so it names them rather than dropping them
+ * silently.
  */
-export function globalMapMembers(membership: GlobalMapMembership): string[] {
-  const { showingOptimizedGrid, optimizedRobots, transforms, globalMembers } = membership;
-  if (showingOptimizedGrid) {
-    if (optimizedRobots && optimizedRobots.length > 0) return [...optimizedRobots];
-    return Object.keys(transforms ?? {});
-  }
-  return globalMembers ? [...globalMembers] : [];
-}
-
-export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {
-  return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
+export function membersRasterCannotPlace(
+  members: readonly Pick<RobotState, 'robot_id' | 'navigation_transform'>[],
+  frames: FrameTransforms
+): string[] {
+  return members.filter((robot) => !hasQualifiedRasterFrame(robot, frames)).map((robot) => robot.robot_id);
 }
 
 /**

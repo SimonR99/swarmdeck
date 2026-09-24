@@ -17,10 +17,16 @@
  *   (`detectionCatalog.colorOf`).
  * - `trails.revision` — the recorded movement history.
  * - `mapStore.revision` — the network heatmap layers and their patches.
- * - `mapStore.info` — the transform the network decal is placed with.
- * - `mapStore.status` — `global_members`, which decides who is on the global
- *   map at all. A status poll can change membership on its own, without a
- *   network patch, a SLAM graph or any telemetry.
+ * - `mapStore.info` — the transform the network decal is placed with, and the
+ *   raster transform header that names the global map's members when the
+ *   catalogue scope does not.
+ * - `mapStore.status` — `global_members`, the SLAM merge's members. A status
+ *   poll can change membership on its own, without a network patch, a SLAM
+ *   graph or any telemetry.
+ * - `mapStore.optimizedScopes` / `mapStore.globalOptimizedScope` — the
+ *   displayed map's catalogue scope, which decides who is on the global map
+ *   (`mapStore.globalMapMembers`, shared with the 2D canvas). A catalogue poll
+ *   can change it without anything else changing.
  * - `mapStore.viewMode` / `mapStore.viewRobot` — local versus global
  *   membership, and the robot identity the markers are keyed by.
  * - `mapStore.slamGraphs` — the inter-robot loop closure lines.
@@ -42,6 +48,8 @@ export interface SceneDrawStores {
     readonly revision: number;
     readonly info: unknown;
     readonly status: unknown;
+    readonly optimizedScopes: unknown;
+    readonly globalOptimizedScope: string | null;
     readonly viewMode: string;
     readonly viewRobot: string | null;
     readonly slamGraphs: unknown;
@@ -81,6 +89,8 @@ export function sceneDrawInputs(stores: SceneDrawStores, state: SceneDrawState):
     stores.mapStore.revision,
     stores.mapStore.info,
     stores.mapStore.status,
+    stores.mapStore.optimizedScopes,
+    stores.mapStore.globalOptimizedScope,
     stores.mapStore.viewMode,
     stores.mapStore.viewRobot,
     stores.mapStore.slamGraphs,

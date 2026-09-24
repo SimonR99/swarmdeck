@@ -9,6 +9,7 @@ import {
 } from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { keepIfUnchanged } from './sameFieldValue';
+import { globalMapMembers } from '$lib/components/map/mapMembership';
 import type { NetworkPatch, MapStatus, Pose, SlamGraph } from '$lib/types/protocol';
 
 export type { OptimizedScope } from './optimizedScopes';
@@ -178,6 +179,15 @@ export const mapStore = {
   get globalOptimizedRobots(): readonly string[] | undefined {
     const scope = state.globalOptimizedScope;
     return scope ? state.optimizedScopes.find((entry) => entry.scope === scope)?.robots : undefined;
+  },
+  /** Who belongs on the displayed global map, for the 2D and 3D views alike; null places every robot. */
+  get globalMapMembers(): readonly string[] | null {
+    return globalMapMembers({
+      showingOptimizedGrid: this.showingOptimizedGrid,
+      optimizedRobots: this.globalOptimizedRobots,
+      transforms: state.info?.transforms,
+      globalMembers: state.status?.global_members
+    });
   },
   get globalOptimizedLabel() {
     return state.globalOptimizedScope ? optimizedScopeLabel(state.globalOptimizedScope) : null;
