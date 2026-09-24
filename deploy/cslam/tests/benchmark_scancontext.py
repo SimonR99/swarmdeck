@@ -17,6 +17,13 @@ def median_ms(function, repeats):
     return round(float(np.median(samples)), 3)
 
 
+class RebuiltIndexMatching(ScanContextMatching):
+    def _candidate_indices(self, ringkey_query):
+        return spatial.KDTree(np.array(self.ringkeys[: self.nb_items])).query(
+            ringkey_query, k=self.num_candidates
+        )[1]
+
+
 rng = np.random.default_rng(19)
 for count in (1000, 5000, 20000):
     matcher = ScanContextMatching()
@@ -25,6 +32,8 @@ for count in (1000, 5000, 20000):
     query = rng.random(1200)
     ringkey = query.reshape(20, 60).mean(axis=1)
     matcher._candidate_indices(ringkey)
+    baseline = RebuiltIndexMatching()
+    baseline.__dict__.update(matcher.__dict__)
     old = lambda: spatial.KDTree(np.array(matcher.ringkeys[:count])).query(
         ringkey, k=10
     )
@@ -33,6 +42,7 @@ for count in (1000, 5000, 20000):
     print(
         f"n={count}: index old={median_ms(old, 30)}ms "
         f"cached={median_ms(new, 30)}ms "
+        f"full_old_search={median_ms(lambda: baseline.search(query, 1), 3)}ms "
         f"full_cached_search={median_ms(lambda: matcher.search(query, 1), 3)}ms",
         flush=True,
     )
