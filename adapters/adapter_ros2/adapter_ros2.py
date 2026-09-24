@@ -1486,6 +1486,9 @@ class HardwareBridge(
                 self._finish_goal("failed")
                 return
             self._goal_handle = handle
+            exploration = getattr(self, "exploration", None)
+            if exploration is not None:
+                exploration.controller_accepted(generation)
             try:
                 result = handle.get_result_async()
                 result.add_done_callback(
@@ -1619,6 +1622,11 @@ class HardwareBridge(
         self._trajectory_step_count = 0
         self._trajectory_step_error = None
         self._reset_route_watchdog()
+        # Exploration asks MGG for the next path on this terminal event rather
+        # than on its next periodic tick, while the robot stands.
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.controller_finished()
 
     # -- route progress watchdog ------------------------------------------
     #

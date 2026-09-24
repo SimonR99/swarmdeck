@@ -1216,3 +1216,53 @@ def test_hardware_state_probes_link_quality_towards_the_backend(mod, monkeypatch
 
     assert bridge.state()["network"] == {"quality": 1.0}
     assert calls == [("wlan0", {"host": "backend", "port": 8080})]
+
+
+def test_hardware_reports_controller_acceptance_and_terminal_to_exploration(
+    mod, monkeypatch
+):
+    """Exploration replans on the controller's terminal event, as in simulation."""
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    generation, handle = _submit_route(bridge, _route_plan())
+
+    bridge.exploration.controller_accepted.assert_called_once_with(generation)
+    bridge.exploration.controller_finished.assert_not_called()
+
+    goal_status = type("GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5})
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    outcome = MagicMock()
+    outcome.result.return_value = SimpleNamespace(
+        status=4, result=SimpleNamespace(success=True)
+    )
+    bridge._on_goal_result(outcome, generation, handle)
+
+    assert bridge.nav_status == "succeeded"
+    bridge.exploration.controller_finished.assert_called_once_with()
+
+
+def test_hardware_route_stall_reports_the_controller_terminal(mod):
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    generation, _handle = _submit_route(bridge, _route_plan())
+
+    assert bridge._fail_route_progress(generation, "stalled") is True
+
+    assert bridge.nav_status == "failed"
+    bridge.exploration.controller_finished.assert_called_once_with()
+
+
+def test_rejected_or_cancelled_hardware_goals_do_not_claim_acceptance(mod):
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    rejected = MagicMock()
+    rejected.accepted = False
+    bridge.path_client.send_goal_async.return_value = _ImmediateFuture(rejected)
+
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        bridge.follow_path(_route_plan())
+
+    bridge.exploration.controller_accepted.assert_not_called()
+    bridge.exploration.controller_finished.assert_called_once_with()
+    bridge.cancel_goal()
+    bridge.exploration.controller_finished.assert_called_once_with()

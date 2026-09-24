@@ -98,12 +98,14 @@ when the path ends before that (superseded, rejected, stopped, controller
 terminal). Times are monotonic seconds from the path's arrival, taken before
 it is validated: `->validated` (path checks done), `->granted` (peer
 reservation), `->sent` (submitted to the controller), `->accepted` (the
-controller accepted it; the simulation bridge reports this) and `->moved`
+controller accepted it; the simulation and ROS 2 bridges report this) and `->moved`
 (sampled on the 0.2 s exploration tick, so an upper bound). `age` is the path's
 age on the node clock at arrival, `replan->path` the planner round trip and
 `terminal->replan` the delay from the previous controller result to the replan
-request. At most one line a second is written; skipped lines are counted in the
-next. A lost reservation's warning says how long after its grant it was lost.
+request. The simulation and ROS 2 bridges also report the controller's terminal
+result, and exploration requests the next path on it rather than on its next
+periodic tick. At most one line a second is written; skipped lines are counted
+in the next. A lost reservation's warning says how long after its grant it was lost.
 
 Each peer bridge sends its map authority every second. While a fresh authority
 cannot be built (stale sensor input, a failed transform, a lagging product, or a
