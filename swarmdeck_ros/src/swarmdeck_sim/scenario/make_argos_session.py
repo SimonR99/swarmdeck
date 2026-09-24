@@ -359,6 +359,15 @@ def generate_argos_xml(
     )
 
     lidar = lidar_spec(fleet_cfg)
+    if (
+        not math.isfinite(lidar.rate)
+        or not 0 < lidar.rate <= TICKS_PER_SECOND
+        or not math.isclose(_divider(lidar.rate) * lidar.rate, TICKS_PER_SECOND)
+    ):
+        raise ValueError(
+            "fleet.lidar.rate must be finite, positive, and divide the "
+            "100 Hz physics tick rate exactly"
+        )
     if lidar.rings < MIN_LIDAR_RINGS:
         raise ValueError(
             f"the ARGoS backend fuses odometry with Fast-LIVO2, which is "

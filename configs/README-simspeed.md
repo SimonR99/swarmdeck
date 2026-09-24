@@ -33,7 +33,9 @@ Parked scans retain the same density, range, and noise; only their cadence
 changes. RGB and camera depth remain 320×240 at 5 Hz. No world mesh changes.
 
 The generator also honors the existing `fleet.lidar.rate` field instead of
-silently forcing 10 Hz. A 5 Hz fleet is a **measurement probe**, not the chosen
+silently forcing 10 Hz. It must be finite, positive, no greater than 100 Hz,
+and divide the physics tick rate exactly; 15 Hz is rejected rather than rounded.
+A 5 Hz fleet is a **measurement probe**, not the chosen
 moving-robot optimization. The ROS bridge still reports `LaserScan.scan_time`
 as 0.1 s; qualifying a globally reduced spin rate requires bridge-owner review
 of that metadata and Nav2/C-SLAM freshness assumptions. No bridge or adapter

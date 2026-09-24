@@ -902,3 +902,13 @@ def test_subt_targets_are_scattered_through_the_tunnels(subt_tree):
     # Several levels: the tunnels descend from the hangar floor at z = 0.
     assert len({round(z) for _, _, z in positions}) > 1
     assert all(-16.0 < z < 1.5 for _, _, z in positions)
+
+
+@pytest.mark.parametrize("rate", [15, 101, float("nan"), float("inf")])
+def test_lidar_rate_must_be_representable_by_physics_ticks(tmp_path, cfg, rate):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["fleet"]["lidar"] = {"profile": "os1_32", "rate": rate}
+    path = tmp_path / "invalid-rate.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="fleet.lidar.rate"):
+        mas.generate_argos_xml(path)
