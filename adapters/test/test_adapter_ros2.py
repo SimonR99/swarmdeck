@@ -1128,3 +1128,16 @@ def test_pose_lookup_uses_navigation_frame_and_base_frame(mod):
     assert pose["x"] == pytest.approx(1.25)
     assert pose["y"] == pytest.approx(-0.75)
     assert pose["yaw"] == pytest.approx(0.5)
+
+
+def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
+    """__init__ subscribes odom and plan, so their message types must import."""
+    node = MagicMock()
+    bridge = mod.HardwareBridge(node, "r0", mod.load_config(None), "http://backend")
+
+    subscribed = {
+        call.args[1]: call.args[0] for call in node.create_subscription.call_args_list
+    }
+    assert subscribed["odom"] is mod.Odometry
+    assert subscribed["plan"] is mod.NavPath
+    assert bridge.navigation_frame == "odom"
