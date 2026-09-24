@@ -8,8 +8,8 @@ Provides CLI and programmatic tools for Cortex and operators to:
 - Send body actions for legged robots (stand, sit, wave, etc.)
 - Stop robot(s) immediately
 - Inspect vision / camera frames ("what are you seeing on this robot")
-- Capture live camera snapshots to disk
-- Inspect image files for multimodal understanding
+- Explain media-pipeline access for retired camera snapshot commands
+- Report unavailable image-file inspection
 - Inspect YOLOE live detections and operator proposals
 - Diagnose telemetry, camera, RTSP, SSH, and required robot services in one call
 """
@@ -1105,48 +1105,43 @@ def main() -> None:
 
     # snap / snapshot
     p_snap = subparsers.add_parser(
-        "snap", help="Capture a live camera snapshot from a robot"
+        "snap", help="Show camera snapshot guidance (RTSP/WHEP)"
     )
     p_snap.add_argument("robot_id", help="Target robot ID")
     p_snap.add_argument(
-        "--save", default=None, help="File path to save the JPEG snapshot"
+        "--save",
+        default=None,
+        help="Ignored compatibility option; snapshots are not saved",
     )
 
     def _run_snap(args):
-        try:
-            from agent.tools.vision import cmd_snapshot
-
-            cmd_snapshot(args)
-        except Exception:
-            raw_jpeg = _http_get(f"/api/camera/{args.robot_id}", args.server)
-            out_path = (
-                args.save
-                or f"/app/agent/captures/snapshot_{args.robot_id}_{int(time.time())}.jpg"
-            )
-            os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(raw_jpeg)
-            print(f"Captured snapshot from {args.robot_id} -> {out_path}")
+        print(
+            "camera snapshots are served by the media pipeline (RTSP/WHEP); "
+            "use `doctor` or the dashboard",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     p_snap.set_defaults(func=_run_snap)
 
     p_snapshot = subparsers.add_parser("snapshot", help="Alias for snap")
     p_snapshot.add_argument("robot_id", help="Target robot ID")
     p_snapshot.add_argument(
-        "--save", default=None, help="File path to save the JPEG snapshot"
+        "--save",
+        default=None,
+        help="Ignored compatibility option; snapshots are not saved",
     )
     p_snapshot.set_defaults(func=_run_snap)
 
     # inspect
     p_inspect = subparsers.add_parser(
-        "inspect", help="Inspect and analyze an image file"
+        "inspect", help="Report unavailable image-file inspection"
     )
     p_inspect.add_argument("image_path", help="Path to image file")
 
     def _run_inspect(args):
-        from agent.tools.vision import cmd_inspect
-
-        cmd_inspect(args)
+        print("image inspection is not available in robot_tool", file=sys.stderr)
+        sys.exit(1)
 
     p_inspect.set_defaults(func=_run_inspect)
 

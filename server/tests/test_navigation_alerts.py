@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from swarmdeck_server.api import app
+from swarmdeck_server.api import state as app
 from swarmdeck_server.api.navigation_alerts import explain_navigation_failure
 
 

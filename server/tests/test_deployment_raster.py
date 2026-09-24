@@ -83,6 +83,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(replica_views, "store", lambda: store)
     monkeypatch.setattr(autonomy_routes, "store", lambda: store)
 
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
     registry = Registry()
     sink = AsyncMock()
     for robot_id, component_id in components.items():
@@ -102,7 +103,6 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(replica_live, "registry", registry)
     map_service = MapServiceStub(TRANSFORMS)
     monkeypatch.setattr(replica_views, "map_service", map_service)
-    monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
     monkeypatch.setattr(map_routes, "_optimized", {})
 
     refresher = deployment_raster.DeploymentRasterRefresher()
@@ -358,9 +358,6 @@ def test_a_verified_merge_is_rasterized_under_its_component_id(setup, tmp_path):
     assert transforms["robot_0"] == {"x": 0.0, "y": 0.0, "yaw": 0.0}
     assert transforms["robot_1"] == {"x": 4.0, "y": -1.0, "yaw": 0.0}
     assert scope_of(session) not in map_routes._optimized
-    # The back-end's scope list still never prunes it.
-    assert map_routes._prune_optimized_maps(["robot:x"]) == []
-    assert shared in map_routes._optimized
     # A verified shared frame does not make the Local view a fleet union.
     assert cell_at(meta, cells, 0.5, 0.5) == 100
     own_meta, own_cells, _, _ = map_routes._optimized["robot:robot_0"]
@@ -369,21 +366,15 @@ def test_a_verified_merge_is_rasterized_under_its_component_id(setup, tmp_path):
     assert cell_at(own_meta, own_cells, 0.5, 0.5) == -1
 
 
-def test_slam_scope_list_never_prunes_the_deployment_scope():
+def test_retire_server_scopes_keeps_only_selected_scope():
     meta = GridMeta(0.2, 2, 2, 0.0, 0.0)
     cells = np.zeros((2, 2), dtype=np.int8)
     scope = scope_of(str(uuid4()))
     map_routes.reset_optimized_maps()
     map_routes.publish_optimized_map(scope, meta, cells, ("robot_0",), None)
-    # A verified component this server rasterized shares the back-end's
-    # naming and is kept like the composite; a back-end-posted grid the
-    # back-end no longer lists is pruned.
     map_routes.publish_optimized_map(
         "component:2", meta, cells, ("robot_1", "robot_2"), None
     )
-    with map_routes._optimized_lock:
-        map_routes._optimized["component:1"] = (meta, cells, ("robot_1",), None)
-    assert map_routes._prune_optimized_maps(["robot:a"]) == ["component:1"]
     assert sorted(map_routes._optimized) == sorted([scope, "component:2"])
     assert map_routes.retire_server_scopes(keep="component:2") == [scope]
     assert map_routes.retire_server_scopes(keep=None) == ["component:2"]

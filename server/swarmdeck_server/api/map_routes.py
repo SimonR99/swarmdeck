@@ -25,7 +25,6 @@ from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, map_service
 
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 DEPLOYMENT_SCOPE_PREFIX = "deployment:"
 _optimized: dict[
     str,
@@ -207,6 +206,7 @@ def robot_command_error(robot_id: str) -> str | None:
 
     mission = os.environ.get("SWARMDECK_MISSION_ID")
     if not mission:
+        # Mock/dev fleets have no mapping mission but still accept UI commands.
         return None
     root = reset_root()
     if root is not None:
@@ -238,7 +238,7 @@ def robot_command_error(robot_id: str) -> str | None:
 
 
 async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> None:
-    from .app import CONFIG, broadcast
+    from .state import CONFIG, broadcast
     from ..bus import stamps
 
     global _raster_generation
@@ -289,7 +289,9 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
 
     root = reset_root()
     mission = os.environ.get("SWARMDECK_MISSION_ID")
-    if root is None or not mission:
+    if not mission:
+        return JSONResponse({"error": "no active mission"}, status_code=409)
+    if root is None:
         return JSONResponse(
             {
                 "phase": "failed",
@@ -348,6 +350,8 @@ async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Respo
 async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
     from .simulation_reset import reset_root, robot_reset_status
 
+    if not os.environ.get("SWARMDECK_MISSION_ID"):
+        return JSONResponse({"error": "no active mission"}, status_code=409)
     root = reset_root()
     if root is None:
         return JSONResponse(
@@ -368,52 +372,15 @@ async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> R
 
 
 async def reset_all_maps() -> Response:
-    if os.environ.get("SWARMDECK_MISSION_ID"):
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "reset all maps is unsupported for peer mapping; use the full mission reset",
-            },
-            status_code=409,
-        )
-    from .app import broadcast
-
-    blocked = sorted(
-        robot.robot_id
-        for robot in registry.robots.values()
-        if robot.nav_status == "active" or robot.goal is not None
+    if not os.environ.get("SWARMDECK_MISSION_ID"):
+        return JSONResponse({"error": "no active mission"}, status_code=409)
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": "reset all maps is unsupported for peer mapping; use the full mission reset",
+        },
+        status_code=409,
     )
-    if blocked:
-        return JSONResponse(
-            {
-                "error": "map reset refused while navigation is active",
-                "robots": blocked,
-            },
-            status_code=409,
-        )
-    reset = await map_service.reset_robot_async()
-    reset_optimized_maps()
-    await broadcast({"type": "network_clear", "robot_id": None})
-    events.log("map_reset", {"scope": "all", "robots": reset})
-    return JSONResponse({"ok": True, "scope": "all", "robots": reset})
-
-
-def _prune_optimized_maps(scopes: Any) -> list[str]:
-    if not isinstance(scopes, list) or not all(
-        isinstance(scope, str) for scope in scopes
-    ):
-        return []
-    live = set(scopes)
-    with _optimized_lock:
-        dead = sorted(
-            scope for scope in set(_optimized) - live if not is_server_scope(scope)
-        )
-        for scope in dead:
-            _optimized.pop(scope, None)
-            _optimized_seq.pop(scope, None)
-            _optimized_publication.pop(scope, None)
-        _drop_optimized_png_cache(dead)
-    return dead
 
 
 async def get_optimized_index() -> dict[str, Any]:
@@ -522,3 +489,14 @@ def reset_optimized_maps() -> None:
         _optimized_publication.clear()
         _drop_optimized_png_cache()
         _raster_generation += 1
+
+
+class CachedEpochStore:
+    """Registry-facing view of the API's bounded epoch cache."""
+
+    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
+        return cached_map_epoch(robot_id, session_id)
+
+
+def command_guard(robot_id: str) -> str | None:
+    return robot_command_error(robot_id)

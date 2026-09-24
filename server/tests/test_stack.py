@@ -10,10 +10,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from swarmdeck_server.api.app import (
-    app,
-    handle_adapter_message,
-    handle_gui_message,
+from swarmdeck_server.api.state import (
     load_config,
     map_service,
     review_store,
@@ -21,6 +18,9 @@ from swarmdeck_server.api.app import (
     settings_store,
     state_loop_tick,
 )
+from swarmdeck_server.api.app import app
+from swarmdeck_server.api.adapter_socket import handle_adapter_message
+from swarmdeck_server.api.gui_socket import handle_gui_message
 from swarmdeck_server.fleet.registry import Registry
 from swarmdeck_server.fleet.registry import registry as app_registry
 
@@ -30,7 +30,7 @@ def _cfg(monkeypatch, tmp_path):
     load_config()
     monkeypatch.setattr(settings_store, "path", tmp_path / "settings.json")
     monkeypatch.setattr(settings_store, "value", settings_store.validate({}))
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     monkeypatch.setattr(app_module, "REVIEW_PATH", tmp_path / "detections.json")
     review_store.reset()
@@ -111,7 +111,7 @@ def test_network_patch_skips_when_revision_has_not_changed():
 
 
 def test_stop_all_reaches_every_registered_robot(monkeypatch):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     registry = Registry()
     for robot_id in ("r0", "r1"):
@@ -190,7 +190,7 @@ def test_map_status_reports_deployment_transforms_and_roundtrips_pose():
 
 
 def test_state_loop_sends_changes_and_one_hz_keepalive(monkeypatch):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     sent = []
 
@@ -211,7 +211,7 @@ def test_state_loop_sends_changes_and_one_hz_keepalive(monkeypatch):
 
 
 def test_state_loop_refreshes_authority_age_only_on_keepalive(monkeypatch):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     sent = []
 
@@ -232,7 +232,7 @@ def test_state_loop_refreshes_authority_age_only_on_keepalive(monkeypatch):
 
 @pytest.mark.parametrize("move_cm", [False, True], ids=["parked", "one_cm_move"])
 def test_state_loop_ignores_float_noise_but_sends_motion(monkeypatch, move_cm):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     sent = []
 
@@ -277,7 +277,7 @@ def test_state_loop_ignores_float_noise_but_sends_motion(monkeypatch, move_cm):
 
 
 def test_state_loop_skips_robot_state_without_gui_clients(monkeypatch):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
 
     def should_not_build(_robot):
         raise AssertionError("robot_state should not be built without GUI clients")
@@ -332,7 +332,7 @@ def test_map_epoch_async_cache_miss_reads_sqlite_off_the_event_loop(monkeypatch)
 
 
 def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
-    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.api import state as app_module
     from swarmdeck_server.fleet.registry import OFFLINE_AFTER_S
 
     logged = []
@@ -354,3 +354,25 @@ def test_state_loop_keeps_alerts_and_logs_without_gui_clients(monkeypatch):
     ]
     assert "unattended" in logged_kinds
     assert "adapter_disconnect" in logged_kinds
+
+
+def test_camera_selection_does_not_send_unused_adapter_interest():
+    class Socket:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    socket = Socket()
+
+    async def scenario():
+        await handle_adapter_message(
+            {"type": "hello", "protocol": 2, "robot_id": "r0"}, socket
+        )
+        await handle_gui_message(
+            {"type": "switch_camera", "robot_id": "r0"}, source=object()
+        )
+
+    asyncio.run(scenario())
+    assert socket.messages == [{"type": "hello_ack", "robot_id": "r0"}]

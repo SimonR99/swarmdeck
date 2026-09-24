@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..bus import bus, stamps
+from ..bus import stamps
 
 
 class EventLogger:

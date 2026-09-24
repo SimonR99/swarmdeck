@@ -53,7 +53,9 @@ async def component(session_id, component_id):
     )
 
     active = os.environ.get("SWARMDECK_MISSION_ID")
-    if active and session_id != active:
+    if not active:
+        raise HTTPException(409, "no active mission")
+    if session_id != active:
         raise HTTPException(409, "Component is not in the live mission")
     try:
         if is_deployment_component(component_id):

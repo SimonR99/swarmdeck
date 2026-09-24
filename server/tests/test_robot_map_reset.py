@@ -47,7 +47,7 @@ def test_targeted_epoch_retirement_clears_only_target(monkeypatch):
     async def publish(message):
         return None
 
-    from swarmdeck_server.api import app
+    from swarmdeck_server.api import state as app
 
     monkeypatch.setattr(app, "CONFIG", {"map": {"start_poses": {"r0": {}}}})
     monkeypatch.setattr(app, "broadcast", publish)

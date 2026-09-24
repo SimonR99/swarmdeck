@@ -6,7 +6,8 @@ import argparse
 
 import uvicorn
 
-from .api.app import app, load_config
+from .api.app import app
+from .api.state import load_config
 
 
 def main() -> None:

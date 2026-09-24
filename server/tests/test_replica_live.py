@@ -37,6 +37,7 @@ def payload():
 
 @pytest.fixture
 def setup(monkeypatch):
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", MISSION)
     registry = Registry()
     sink = AsyncMock()
     registry.hello(
@@ -46,7 +47,6 @@ def setup(monkeypatch):
         dict(robot_id="r0", pose=dict(x=900, y=800), live_mapping=payload())
     )
     monkeypatch.setattr(replica_live, "registry", registry)
-    monkeypatch.setenv("SWARMDECK_MISSION_ID", MISSION)
 
     class Catalogue:
         def __init__(self):

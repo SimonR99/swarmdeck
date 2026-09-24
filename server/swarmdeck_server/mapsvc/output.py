@@ -23,22 +23,6 @@ FREE_RGB = (255, 255, 255)
 OCCUPIED_RGB = (52, 58, 68)
 
 
-def consolidate_voxel_centroids(
-    points: np.ndarray, voxel_size: float = 0.04
-) -> np.ndarray:
-    """Downsample and consolidate 3D points onto voxel centroids, denoising planar surfaces."""
-    if points.shape[0] <= 1:
-        return points
-    voxel_coords = np.floor(points / voxel_size).astype(np.int64)
-    _, unique_indices, inverse_indices, counts = np.unique(
-        voxel_coords, axis=0, return_index=True, return_inverse=True, return_counts=True
-    )
-    sum_points = np.zeros((len(unique_indices), 3), dtype=np.float64)
-    np.add.at(sum_points, inverse_indices, points.astype(np.float64))
-    centroids = sum_points / counts[:, None]
-    return centroids.astype(np.float32)
-
-
 def network_robot_ids(service: Any) -> list[str]:
     with service._state_lock:
         return list(service._network_grids)
