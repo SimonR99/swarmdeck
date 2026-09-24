@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import subprocess
 import time
 import sys
 from concurrent.futures import Future
@@ -95,11 +96,17 @@ def deployment(tmp_path, monkeypatch):
     running = set(names)
     planners = set(names)
     operations = []
+    cleanups = []
     crash = {}
 
     class Harness(Supervisor):
         def robot_command(self, arguments, environment, deadline):
             self.remaining(deadline)
+            if arguments[:2] == ["exec", "-T"]:
+                cleanups.append((arguments, deadline, list(operations)))
+                if "cleanup_error" in crash:
+                    raise crash["cleanup_error"]
+                return SimpleNamespace(stdout="0 zombie segments cleaned")
             robot = names[int(arguments[-1].removeprefix("peer"))]
             assert environment["SWARMDECK_MISSION_ID"] == MISSION
             assert environment["SWARMDECK_TEST_DOMAIN"] == "173"
@@ -195,11 +202,65 @@ def deployment(tmp_path, monkeypatch):
         running=running,
         planners=planners,
         operations=operations,
+        cleanups=cleanups,
         crash=crash,
         supervisor=supervisor,
         submit=submit,
         status=status,
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        OSError("docker unavailable"),
+        subprocess.CalledProcessError(1, "clean"),
+        subprocess.TimeoutExpired("clean", 3),
+    ],
+)
+def test_robot_reset_cleanup_is_bounded_and_never_fails_reset(
+    deployment, failure, capsys
+):
+    d = deployment
+    d.submit()
+    if failure is not None:
+        d.crash["cleanup_error"] = failure
+    before = time.monotonic()
+    assert d.supervisor().poll_robots()
+    assert d.status()["ok"] is True
+    assert len(d.cleanups) == 2
+    first, second = d.cleanups
+    for arguments, deadline, _ in d.cleanups:
+        assert arguments[:4] == ["exec", "-T", "sim", "timeout"]
+        assert arguments[4:7] == ["--kill-after=1", "2", "bash"]
+        assert "exec fastdds shm clean" in arguments[-1]
+        assert 0 < deadline - before <= 3.5
+    assert first[2] == []  # MGG stopped, before ROS quiesce.
+    assert second[2][-1] == ("stop", "robot_1")
+    output = capsys.readouterr().err
+    assert output.count("DDS SHM cleanup") == 1  # Rate-limited per supervisor.
+    assert ("failed" if failure else "completed") in output
+
+
+def test_robot_reset_probe_forces_udp_only(deployment, monkeypatch):
+    supervisor = deployment.supervisor()
+    calls = []
+
+    def command(arguments, environment, deadline):
+        calls.append(arguments)
+        return SimpleNamespace(stdout='{"ok": true}')
+
+    monkeypatch.setattr(supervisor, "robot_command", command)
+    request = deployment.submit()
+    Supervisor.robot_ros(supervisor, request, "verify", {}, time.monotonic() + 10)
+    assert calls[0][:5] == [
+        "exec",
+        "-T",
+        "-e",
+        "FASTRTPS_DEFAULT_PROFILES_FILE=/app/deploy/dds/fastdds_udp_only.xml",
+        "mgg",
+    ]
 
 
 def test_only_target_restarts_and_completed_request_survives_later_resets(deployment):

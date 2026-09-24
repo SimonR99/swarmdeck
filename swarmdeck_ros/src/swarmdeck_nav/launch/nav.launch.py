@@ -4,8 +4,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
-from launch_ros.descriptions import ParameterFile
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import ReplaceString, RewrittenYaml
 
@@ -78,28 +78,54 @@ def generate_launch_description() -> LaunchDescription:
         "remappings": [("/tf", tf_topic), ("/tf_static", tf_static_topic)],
     }
 
+    use_composition = LaunchConfiguration("use_composition")
+    controller_remappings = common["remappings"] + [
+        ("cmd_vel", controller_cmd_vel_topic)
+    ]
+    smoother_remappings = common["remappings"] + [
+        ("cmd_vel", controller_cmd_vel_topic),
+        ("cmd_vel_smoothed", output_cmd_vel_topic),
+    ]
+    container = ComposableNodeContainer(
+        package="rclcpp_components",
+        executable="component_container_isolated",
+        name="nav_container",
+        # The controller constructs its costmap internally; that child needs
+        # the whole YAML in process arguments, not only component overrides.
+        **common,
+        condition=IfCondition(use_composition),
+        composable_node_descriptions=[
+            ComposableNode(
+                package="nav2_controller",
+                plugin="nav2_controller::ControllerServer",
+                name="controller_server",
+                namespace=namespace,
+                parameters=common["parameters"],
+                remappings=controller_remappings,
+            ),
+            ComposableNode(
+                package="nav2_velocity_smoother",
+                plugin="nav2_velocity_smoother::VelocitySmoother",
+                name="velocity_smoother",
+                namespace=namespace,
+                parameters=common["parameters"],
+                remappings=smoother_remappings,
+            ),
+        ],
+    )
     controller = Node(
         package="nav2_controller",
         executable="controller_server",
         name="controller_server",
-        **{
-            **common,
-            "remappings": common["remappings"]
-            + [("cmd_vel", controller_cmd_vel_topic)],
-        },
+        condition=UnlessCondition(use_composition),
+        **{**common, "remappings": controller_remappings},
     )
     velocity_smoother = Node(
         package="nav2_velocity_smoother",
         executable="velocity_smoother",
         name="velocity_smoother",
-        **{
-            **common,
-            "remappings": common["remappings"]
-            + [
-                ("cmd_vel", controller_cmd_vel_topic),
-                ("cmd_vel_smoothed", output_cmd_vel_topic),
-            ],
-        },
+        condition=UnlessCondition(use_composition),
+        **{**common, "remappings": smoother_remappings},
     )
     bounded_startup = LaunchConfiguration("bounded_startup")
     managed_nodes = ["controller_server", "velocity_smoother"]
@@ -132,6 +158,8 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("namespace", default_value="robot_0"),
+            # Simulation opts in; hardware retains separate processes.
+            DeclareLaunchArgument("use_composition", default_value="false"),
             # Exactly one lifecycle owner: simulation uses bounded state-based
             # startup; hardware retains its existing Nav2 lifecycle manager.
             DeclareLaunchArgument("bounded_startup", default_value="false"),
@@ -166,6 +194,7 @@ def generate_launch_description() -> LaunchDescription:
                 "controller_cmd_vel_topic", default_value="cmd_vel_nav"
             ),
             DeclareLaunchArgument("output_cmd_vel_topic", default_value="cmd_vel"),
+            container,
             controller,
             velocity_smoother,
             lifecycle,

@@ -238,6 +238,8 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.sim
     image: swarmdeck-sim:local
+    # Peers/MGG join both this network and this private /dev/shm (see deploy/dds).
+    ipc: shareable
     depends_on:
       server:
         condition: service_healthy
@@ -249,6 +251,7 @@ services:
         condition: service_healthy
         required: false
     environment:
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/deploy/dds/fastdds_large_data.xml
       # Which sensor channels ARGoS streams to the external estimator.
       # Ultra-Fusion (lwio) never read the camera; FAST-LIVO2 needs it, and
       # without it emits no pose at all while logging nothing.
@@ -305,6 +308,7 @@ services:
       - ../../configs:/app/configs:ro
       - ../../swarmdeck_ros/src:/app/swarmdeck_ros/src:ro
       - ../../adapters:/app/adapters:ro
+      - ../dds:/app/deploy/dds:ro
       - swarmdeck_runtime:/run/swarmdeck
     shm_size: "2gb"
     restart: unless-stopped
@@ -389,10 +393,11 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mgg
     network_mode: service:sim
+    ipc: service:sim
     environment:
       SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/deploy/dds/fastdds_large_data.xml
       SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
       SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
       SWARMDECK_PEER_NAMES: "${SWARMDECK_PEER_NAMES:-}"
@@ -403,6 +408,7 @@ services:
     volumes:
       - ../../configs:/app/configs:ro
       - ../mgg:/app/deploy/mgg:ro
+      - ../dds:/app/deploy/dds:ro
       - ../../sessions/simulation-reset:/run/swarmdeck-reset
       - peer_maps:/maps:ro
     command: ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && exec python3 /app/deploy/mgg/supervisor.py"]
@@ -416,10 +422,11 @@ services:
       dockerfile: deploy/docker/Dockerfile.cslam
     image: swarmdeck-cslam:planning
     network_mode: service:sim
+    ipc: service:sim
     environment: &peer-env
       PYTHONPATH: /app
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/deploy/dds/fastdds_large_data.xml
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_PEER_NAMES: '${SWARMDECK_PEER_NAMES:-["robot_0","robot_1","robot_2","robot_3"]}'
       SWARMDECK_PEER_INDEX: "0"
@@ -438,6 +445,7 @@ services:
     volumes:
       - ../../autonomy:/app/autonomy:ro
       - ../autonomy:/app/deploy/autonomy:ro
+      - ../dds:/app/deploy/dds:ro
       - peer_maps:/maps
       - ../../sessions/simulation-reset:/run/swarmdeck-reset:ro
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
