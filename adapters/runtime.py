@@ -580,11 +580,6 @@ class AdapterGoalOwnershipMixin:
             self.nav_status = "active"
             return True
 
-    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
-        """Cancellation closes the velocity relay; only ownership needs checking."""
-        with self._goal_lock:
-            return expected_generation == self._goal_generation
-
 
 class AdapterTelemetryMixin:
     """Protocol `robot_state` envelope shared by every adapter."""

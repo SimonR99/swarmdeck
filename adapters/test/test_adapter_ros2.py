@@ -1191,14 +1191,6 @@ def test_hardware_pending_goal_reports_active_with_the_relay_closed(mod):
     assert bridge._nav_execution_enabled is False
 
 
-def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
-    bridge = _bridge(mod)
-    bridge._goal_generation = 3
-
-    assert bridge.wait_goal_quiet(2, 0.0) is False
-    assert bridge.wait_goal_quiet(3, 0.0) is True
-
-
 @pytest.mark.parametrize("terminal", ["success", "abort", "failure"])
 def test_hardware_terminal_result_stops_an_open_gate_once(mod, monkeypatch, terminal):
     bridge = _route_bridge(mod)

@@ -189,7 +189,6 @@ def _assert_cancelled_velocity_held_while_planning(bridge, generation):
     bridge.pub_cmd = SimpleNamespace(publish=velocities.append)
     bridge._on_nav_cmd_vel(SimpleNamespace(linear=SimpleNamespace(x=0.3)))
     assert velocities == []
-    assert bridge.wait_goal_quiet(generation, time.monotonic()) is True
 
 
 def test_sim_cancel_holds_velocity_without_waiting_for_terminal_result(sim_module):
@@ -504,13 +503,3 @@ def test_sim_pending_goal_reports_active(sim_module):
     assert bridge.nav_status == "active"
     assert bridge.set_nav_status_if_current(3, "active") is True
     assert bridge.nav_status == "active"
-
-
-def test_sim_wait_goal_quiet_only_checks_ownership(sim_module):
-    bridge = _bridge(sim_module)
-    bridge._goal_generation = 3
-
-    assert bridge.wait_goal_quiet(2, time.monotonic() + 1.0) is False
-    assert bridge.wait_goal_quiet(3, time.monotonic()) is True
-    bridge._nav_quiet_unknown = True
-    assert bridge.wait_goal_quiet(3, time.monotonic() + 1.0) is True
