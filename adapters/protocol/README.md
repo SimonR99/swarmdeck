@@ -120,6 +120,36 @@ Simulation retains its separate conservative recovery rule: loss of action
 monitoring suppresses automatic reverse escape, but does not prevent a new
 owned route from being planned.
 
+### Goal lock and the ROS spin thread
+
+The ROS 2 hardware and simulation bridges serialize goal ownership with one
+`_goal_lock`. Each bridge runs one ROS spin thread, and that thread processes
+service replies, action futures, subscriptions and timers. Its callbacks also
+take `_goal_lock`. The rule is:
+
+**Never hold `_goal_lock` while waiting on anything the ROS spin thread must
+process.**
+
+A holder that polls a service reply blocks the spin thread on the lock, so the
+reply never arrives and every wait runs to its timeout. The session therefore
+checks a body command's map epoch under the lock and then runs
+`body_command` without it. A body action does not use the map, so an epoch
+advance while it runs changes nothing it depends on.
+
+The periodic ROS-thread callbacks never wait for the lock: the link and
+deadman watchdogs, the latched manual drive, the route progress watchdog and
+the Nav2 velocity relay check cheaply without it, take it only if it is free,
+and otherwise skip to the next tick or velocity sample. The one-shot action
+callbacks and the exploration, goal-exploration, mapping-authority and
+objective-planning callbacks still take the lock with a blocking acquire. The
+rule above keeps those waits short.
+
+Known remaining risk: if a planner lacks `claim_objective`/`execute_claimed`,
+the session's fallback for `plan_objective` and `return_home` calls the
+bridge's planner with the lock held, and that planner waits on MGG replies.
+Neither in-tree bridge reaches this fallback, because their objective planner
+provides both methods.
+
 ## Collaborative graph
 
 Protocol 2 adapters may report graph health:

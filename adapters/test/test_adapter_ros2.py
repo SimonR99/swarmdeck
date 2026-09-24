@@ -1391,3 +1391,71 @@ def test_rejected_or_cancelled_hardware_goals_do_not_claim_acceptance(mod):
     bridge.exploration.controller_finished.assert_called_once_with()
     bridge.cancel_goal()
     bridge.exploration.controller_finished.assert_called_once_with()
+
+
+class _PendingTrigger:
+    """A Trigger service whose reply only the (simulated) ROS thread delivers."""
+
+    def __init__(self):
+        self.called = threading.Event()
+        self.replied = threading.Event()
+
+    def wait_for_service(self, timeout_sec=None):
+        return True
+
+    def call_async(self, _request):
+        self.called.set()
+        return self
+
+    def done(self):
+        return self.replied.is_set()
+
+    def result(self):
+        return SimpleNamespace(success=True, message="")
+
+
+def test_body_command_waits_on_its_service_without_holding_the_goal_lock(mod):
+    """C1: while a body command waits on a reply, the ROS thread's watchdog
+    and an action result callback both complete promptly and can deliver it."""
+    import asyncio
+    import time
+
+    from adapters.session import dispatch_command
+
+    bridge = _bridge(mod, {"link_timeout_s": 0.05})
+    bridge._pending_drive = None
+    trigger = _PendingTrigger()
+    bridge._body_clients = {"sit": trigger}
+    bridge.nav_status = "active"
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge._last_link_at = time.monotonic() - 1.0
+    generation = bridge._goal_generation
+    result = MagicMock()
+    result.result.side_effect = RuntimeError("result channel failed")
+    durations = {}
+
+    def ros_thread():
+        assert trigger.called.wait(2.0)
+        started = time.monotonic()
+        bridge._watchdogs()
+        durations["watchdog"] = time.monotonic() - started
+        started = time.monotonic()
+        # The watchdog's cancel made this result stale; it still takes the lock.
+        bridge._on_goal_result(result, generation)
+        durations["result"] = time.monotonic() - started
+        trigger.replied.set()
+
+    spin = threading.Thread(target=ros_thread, daemon=True)
+    spin.start()
+    started = time.monotonic()
+
+    async def body_command():
+        loop = asyncio.get_running_loop()
+        await dispatch_command(bridge, {"type": "body_command", "action": "sit"}, loop)
+
+    asyncio.run(body_command())
+    spin.join(2.0)
+
+    assert durations["watchdog"] < 0.1 and durations["result"] < 0.1
+    assert time.monotonic() - started < 1.0
+    assert bridge.nav_status == "cancelled"  # The stale-link cancel ran.

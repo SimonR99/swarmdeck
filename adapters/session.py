@@ -218,13 +218,15 @@ async def dispatch_command(
             height = msg.get("height")
 
             def body_if_current():
+                # Check under the lock, then run without it: a body command
+                # waits on service replies that the ROS spin thread must
+                # process, and that thread also takes _goal_lock. A body
+                # action does not use the map, so an epoch advance while it
+                # runs changes nothing it depends on.
                 with getattr(bridge, "_goal_lock", nullcontext()):
-                    if command_matches_map_epoch(bridge, msg):
-                        return (
-                            fn(action, height=height)
-                            if height is not None
-                            else fn(action)
-                        )
+                    if not command_matches_map_epoch(bridge, msg):
+                        return None
+                return fn(action, height=height) if height is not None else fn(action)
 
             await loop.run_in_executor(None, body_if_current)
 

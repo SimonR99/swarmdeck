@@ -307,6 +307,9 @@ class RobotBridge(
         self._detections: list[dict] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        # Never hold _goal_lock while waiting on anything the ROS spin thread
+        # must process (service replies, action futures): that thread's
+        # callbacks take this lock too. See adapters/protocol/README.md.
         self._goal_lock = threading.RLock()
         self._nav_execution_enabled = False
         self._last_link_at = 0.0
