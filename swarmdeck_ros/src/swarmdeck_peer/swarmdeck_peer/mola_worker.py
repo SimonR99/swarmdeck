@@ -14,8 +14,9 @@ complete generation is published as a self-described product under
 3. ``index.json``: atomically replaced last; its ``source_sha256`` and
    ``source_snapshot_id`` describe ``source.json``.
 
-Readers (``autonomy/mola_mapping.py`` for the indexed map server and the MGG
-planner's ``MolaMap`` loader) read ``index.json`` and then ``source.json`` and
+Readers (``autonomy/product_authority.py``'s ``read_published_product``,
+which gates the bridge's map authority, and the MGG planner's ``MolaMap``
+loader) read ``index.json`` and then ``source.json`` and
 require ``sha256(source.json bytes) == index.source_sha256`` and
 ``source.snapshot_id == index.source_snapshot_id``. A mismatch means the pair
 is mid-replacement and the reader retries briefly. Readers never read
