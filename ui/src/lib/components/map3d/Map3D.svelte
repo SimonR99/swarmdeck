@@ -28,7 +28,11 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
-  import { replicaSelectionKey, type ReplicaTacticalCloud } from './replicaTactical';
+  import {
+    replicaSelectionKey,
+    type ReplicaTacticalCloud,
+    type ReplicaTacticalSelection
+  } from './replicaTactical';
   import { ReplicaCloudLoad } from './replicaCloudLoad';
   import {
     liveRobotFreshness,
@@ -40,6 +44,7 @@
   import { LiveReplicaPoll } from './liveReplicaPoll';
   import { GaussianFetch } from './gaussianFetch';
   import { RenderLoop } from './renderLoop';
+  import { SceneInteraction, type InteractionScene, type NDC } from './sceneInteraction';
   import { sceneDrawInputs } from './sceneInputs';
   import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map/mapRobot';
@@ -107,12 +112,8 @@
   let ceilingMin = $state(0.0);
   let ceilingCutoff = $state(2.3); // Initial cutoff: open interior view
 
-  // Interaction State
+  // Interaction State: the gestures themselves live in sceneInteraction.ts.
   let dragging = $state(false);
-  let isPanning = false;
-  let pointerOrigin: { x: number; y: number } | null = null;
-  let pointerDownPos: { x: number; y: number } | null = null;
-  let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
   // The live robot telemetry over a replica, polled by liveReplicaPoll.ts.
@@ -501,72 +502,77 @@
   });
 
   // Pointer & RTS Mouse Interaction
-  function getNDC(e: PointerEvent): THREE.Vector2 {
-    if (!canvas) return new THREE.Vector2(0, 0);
+  function getNDC(e: PointerEvent): NDC {
+    if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const y = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
-    return new THREE.Vector2(x, y);
+    return { x, y };
   }
+
+  const ndcVector = (ndc: NDC) => new THREE.Vector2(ndc.x, ndc.y);
+
+  /** Map3DScene as pointer handling sees it. */
+  function interactionScene(): InteractionScene | null {
+    const current = scene;
+    if (!current) return null;
+    return {
+      get yaw() { return current.yaw; },
+      set yaw(value) { current.yaw = value; },
+      get pitch() { return current.pitch; },
+      set pitch(value) { current.pitch = value; },
+      panBy: (dx, dy) => current.panBy(dx, dy),
+      groundAt: (ndc) => current.raycastGround(ndcVector(ndc)),
+      robotAt: (ndc) => current.raycastRobot(ndcVector(ndc)),
+      detectionAt: (ndc) => current.layers.raycastDetection(ndcVector(ndc), current.camera),
+      reticle: current.layers.cursorReticle
+    };
+  }
+
+  const interaction = new SceneInteraction<ReplicaTacticalSelection>({
+    scene: interactionScene,
+    requestRender: () => requestRender(),
+    cameraMoved: () => onCameraInteraction?.(),
+    setDragging: (value) => (dragging = value),
+    setCursor: (point, planar) => {
+      cursor3D = point ? { x: point.x, y: point.y, z: point.z } : null;
+      onCursorChange?.(planar);
+    },
+    goalMode: () => navigation.goalMode,
+    replicaShown: () => Boolean(tacticalReplica),
+    liveReplica: () =>
+      tacticalReplica && liveTactical
+        ? {
+            selection: tacticalReplica,
+            solutionOrder: replicaCloud?.view.solution_order,
+            solutionOrderKnown: replicaCloud?.view.solution_order_known === true
+          }
+        : null,
+    drawnRobotIds: () => robotsOnMap().map((robot) => robot.robot_id),
+    selected: () => fleet.selected,
+    canNavigate: (id) => fleet.can(id, 'navigate'),
+    sendGoal: (live, id, goal) =>
+      postLiveReplicaGoal(live.selection, id, live.solutionOrder ?? null, goal, undefined, navigation.exploreIfUnknown),
+    goalFailed: (message) => (error = message),
+    cancelGoalMode: () => navigation.cancelGoalMode(),
+    finishGoal: (goal) => navigation.finishGoal(goal),
+    selectRobot: (id, additive) => {
+      fleet.select(id, additive);
+      actions.selectRobots(fleet.selected);
+    },
+    selectDetection: (id) => review.select(id),
+    detectionSelected: () => review.selected
+  });
 
   function onPointerDown(e: PointerEvent) {
     if (!canvas) return;
     canvas.setPointerCapture(e.pointerId);
-    pointerDownPos = { x: e.clientX, y: e.clientY };
-    pointerOrigin = pointerDownPos;
-    dragged = false;
-    dragging = true;
-    isPanning = e.button === 2 || e.button === 1 || e.shiftKey;
+    interaction.pointerDown({ x: e.clientX, y: e.clientY }, e.button, e.shiftKey);
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!scene || !canvas) return;
-    const ndc = getNDC(e);
-
-    if (dragging && pointerDownPos) {
-      const dx = e.clientX - pointerDownPos.x;
-      const dy = e.clientY - pointerDownPos.y;
-      if (
-        pointerOrigin &&
-        Math.hypot(e.clientX - pointerOrigin.x, e.clientY - pointerOrigin.y) > 5
-      ) {
-        dragged = true;
-        onCameraInteraction?.();
-      }
-
-      if (isPanning) {
-        scene.panBy(-dx * 0.8, -dy * 0.8);
-      } else {
-        scene.yaw -= dx * 0.007;
-        scene.pitch = Math.max(0.12, Math.min(1.48, scene.pitch + dy * 0.007));
-      }
-      pointerDownPos = { x: e.clientX, y: e.clientY };
-      requestRender();
-    } else {
-      // Hover raycasting
-      const reticle = scene.layers.cursorReticle;
-      const wasVisible = reticle.visible;
-      const groundHit = scene.raycastGround(ndc);
-      if (groundHit) {
-        cursor3D = { x: groundHit.x, y: groundHit.y, z: groundHit.z };
-        onCursorChange?.(tacticalReplica ? null : { x: groundHit.x, y: groundHit.y });
-
-        // Update 3D goal cursor reticle position
-        if (navigation.goalMode && Boolean(tacticalReplica && liveTactical)) {
-          reticle.visible = true;
-          reticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
-        } else {
-          reticle.visible = false;
-        }
-      } else {
-        cursor3D = null;
-        reticle.visible = false;
-        onCursorChange?.(null);
-      }
-      // Only the reticle follows the pointer; hovering an otherwise still
-      // scene is not a reason to redraw it.
-      if (reticle.visible || wasVisible) requestRender();
-    }
+    interaction.pointerMove({ x: e.clientX, y: e.clientY }, getNDC(e));
   }
 
   function onPointerUp(e: PointerEvent) {
@@ -574,86 +580,7 @@
     try {
       canvas.releasePointerCapture(e.pointerId);
     } catch {}
-    dragging = false;
-    if (!dragged && e.button === 0 && e.type !== 'pointercancel') {
-      handleClick(e);
-    }
-    pointerDownPos = null;
-    dragged = false;
-  }
-
-  async function handleClick(e: PointerEvent) {
-    if (!scene || !canvas) return;
-    const ndc = getNDC(e);
-    const selection = tacticalReplica;
-    const liveSelection = liveTactical;
-    const displayedSolutionOrder = replicaCloud?.view.solution_order;
-    if (selection && !liveSelection) return;
-
-    // 1. Goal Navigation Targeting (left click on ground)
-    if (navigation.goalMode && e.button === 0) {
-      const hit = scene.raycastGround(ndc);
-      if (hit) {
-        if (liveSelection && selection) {
-          if (replicaCloud?.view.solution_order_known !== true ||
-              displayedSolutionOrder === undefined) {
-            navigation.cancelGoalMode();
-            return;
-          }
-          const liveIds = new Set(robotsOnMap().map((robot) => robot.robot_id));
-          const eligible = fleet.selected.filter((id) => liveIds.has(id) && fleet.can(id, 'navigate'));
-          if (!eligible.length) {
-            navigation.cancelGoalMode();
-            return;
-          }
-          try {
-            for (const id of eligible) {
-              await postLiveReplicaGoal(
-                selection,
-                id,
-                displayedSolutionOrder,
-                { x: hit.x, y: hit.y, z: hit.z, yaw: 0 },
-                undefined,
-                navigation.exploreIfUnknown
-              );
-            }
-            navigation.finishGoal({ x: hit.x, y: hit.y });
-          } catch (reason) {
-            error = reason instanceof Error ? reason.message : String(reason);
-            navigation.cancelGoalMode();
-          }
-          scene.layers.cursorReticle.visible = false;
-          requestRender();
-          return;
-        }
-        navigation.cancelGoalMode();
-        scene.layers.cursorReticle.visible = false;
-        requestRender();
-        return;
-      }
-    }
-
-    // 2. Robot Selection (raycast robot meshes)
-    const clickedRobotId = scene.raycastRobot(ndc);
-    if (clickedRobotId) {
-      fleet.select(clickedRobotId, e.shiftKey);
-      actions.selectRobots(fleet.selected);
-      requestRender();
-      return;
-    }
-
-    // 3. Object Detection Picking
-    const detHit = scene.layers.raycastDetection(ndc, scene.camera);
-    if (detHit) {
-      review.select(detHit);
-      requestRender();
-      return;
-    }
-
-    // Clicking empty space deselects detection
-    if (review.selected) {
-      review.select(null);
-    }
+    void interaction.pointerUp(e.button, e.type === 'pointercancel', () => getNDC(e), e.shiftKey);
   }
 
   function onWheel(e: WheelEvent) {
