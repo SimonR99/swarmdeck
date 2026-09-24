@@ -89,6 +89,7 @@ from adapters.perception.depth_projection import (
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
+    AdapterGoalOwnershipMixin,
     AdapterHelloMixin,
     AdapterLinkMixin,
     AdapterSensorMixin,
@@ -170,6 +171,7 @@ OPTIONAL_BODY_SERVICES = frozenset({"power_on", "estop_release", "clear_keepaliv
 class HardwareBridge(
     AdapterHelloMixin,
     AdapterDetectionMixin,
+    AdapterGoalOwnershipMixin,
     AdapterLinkMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
@@ -1740,38 +1742,10 @@ class HardwareBridge(
             self._call_trigger_async("stop")
         return generation
 
-    def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
-        """Cancel only the command owning ``expected_generation``."""
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return None
-            self.cancel_goal()
-            if pending:
-                self.nav_status = "active"
-            return self._goal_generation
-
-    def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return False
-            if status != "active":
-                self._nav_execution_enabled = False
-            self.nav_status = status
-            return True
-
-    def set_goal_pending_if_current(self, expected_generation: int) -> bool:
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return False
-            self._nav_execution_enabled = False
-            self.nav_status = "active"
-            return True
-
-    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
-        # Conditional cancellation disables the hardware velocity relay before
-        # returning, so this does not wait for the remote action server.
-        with self._goal_lock:
-            return expected_generation == self._goal_generation
+    def _hold_goal_motion(self) -> None:
+        # Conditional cancellation closes the hardware velocity relay before
+        # returning, so wait_goal_quiet need not wait for the action server.
+        self._nav_execution_enabled = False
 
     def stop_for_exit(self) -> None:
         """Flush a synchronous SDK stop before the ROS executor is torn down."""

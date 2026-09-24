@@ -55,6 +55,7 @@ from adapters.perception.depth_projection import point_for_depth_image
 from adapters.perception.object_detector import ObjectDetector, track_ids
 from adapters.runtime import (
     AdapterDetectionMixin,
+    AdapterGoalOwnershipMixin,
     AdapterHelloMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
@@ -238,6 +239,7 @@ def _srv_type(module: str, name: str):
 class RobotBridge(
     AdapterHelloMixin,
     AdapterDetectionMixin,
+    AdapterGoalOwnershipMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
 ):
@@ -245,6 +247,9 @@ class RobotBridge(
 
     adapter_name = "adapter_sim/0.1.0"
     coordinate_frame = "local"
+    # Nav2 controls the simulated robot directly, so do not claim that a
+    # replacement route is executing while cancellation settles.
+    goal_pending_status = "idle"
     _TRACK_IDS = staticmethod(track_ids)
 
     def __init__(
@@ -1010,29 +1015,8 @@ class RobotBridge(
     def cancel_goal(self) -> int:
         return self.cancel()
 
-    def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
-        """Cancel only the command owning ``expected_generation``."""
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return None
-            self.cancel_goal()
-            if pending:
-                self.nav_status = "idle"
-            return self._goal_generation
-
-    def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
-        with self._goal_lock:
-            if expected_generation != self._goal_generation:
-                return False
-            if self._nav_quiet_unknown:
-                return False
-            self.nav_status = status
-            return True
-
-    def set_goal_pending_if_current(self, expected_generation: int) -> bool:
-        # Nav2 controls the simulated robot directly, so do not claim that a
-        # replacement route is executing while cancellation settles.
-        return self.set_nav_status_if_current(expected_generation, "idle")
+    def _goal_status_writable(self) -> bool:
+        return not self._nav_quiet_unknown
 
     def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
         """Wait off the ROS timer until the canceled simulated route settles."""

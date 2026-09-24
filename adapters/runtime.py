@@ -517,6 +517,64 @@ class AdapterLinkMixin:
             time.sleep(0.05)
 
 
+class AdapterGoalOwnershipMixin:
+    """Generation-guarded goal commands used by exploration and objective planning.
+
+    Each call acts only while ``expected_generation`` still owns the bridge's
+    goal, so a planner can never cancel or relabel a newer operator command.
+    The bridge provides ``_goal_lock``, ``_goal_generation``, ``nav_status``
+    and ``cancel_goal()``.
+    """
+
+    # Status reported while a replacement route waits for the controller.
+    goal_pending_status: str = "active"
+
+    def _goal_status_writable(self) -> bool:
+        """Whether the owning generation may still rewrite ``nav_status``."""
+        return True
+
+    def _hold_goal_motion(self) -> None:
+        """Stop relaying controller output while no accepted route executes."""
+
+    def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
+        """Cancel only the command owning ``expected_generation``."""
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return None
+            self.cancel_goal()
+            if pending:
+                self.nav_status = self.goal_pending_status
+            return self._goal_generation
+
+    def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
+        with self._goal_lock:
+            if (
+                expected_generation != self._goal_generation
+                or not self._goal_status_writable()
+            ):
+                return False
+            if status != "active":
+                self._hold_goal_motion()
+            self.nav_status = status
+            return True
+
+    def set_goal_pending_if_current(self, expected_generation: int) -> bool:
+        with self._goal_lock:
+            if (
+                expected_generation != self._goal_generation
+                or not self._goal_status_writable()
+            ):
+                return False
+            self._hold_goal_motion()
+            self.nav_status = self.goal_pending_status
+            return True
+
+    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
+        """Whether the owner may submit; a cancel that settles at once needs no wait."""
+        with self._goal_lock:
+            return expected_generation == self._goal_generation
+
+
 class AdapterTelemetryMixin:
     """Protocol `robot_state` envelope shared by every adapter."""
 
