@@ -54,6 +54,7 @@ from adapters.runtime import (
     AdapterTelemetryMixin,
     TRANSPORT_DEFAULTS,
     deep_merge,
+    goal_lock_if_free,
     stamp_seconds,
     yaw_of,
 )
@@ -1012,7 +1013,8 @@ class RobotBridge(
     def route_progress_watchdog(self) -> bool:
         """Cancel a FollowPath goal whose progress along the route stalled."""
         try:
-            return route_progress_tick(self)
+            with goal_lock_if_free(self) as held:
+                return held and route_progress_tick(self)
         except Exception as exc:
             # A supervisor must never take the state loop, and with it the
             # operator link, down with it.

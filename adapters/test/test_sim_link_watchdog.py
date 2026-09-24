@@ -100,3 +100,41 @@ def test_sim_timer_consumes_pending_drive_and_applies_deadman(sim_module, monkey
     assert bridge.mode == "idle"
     assert len(velocities) == 2
     assert velocities[-1].linear.x == velocities[-1].angular.z == 0.0
+
+
+def test_sim_timer_skips_a_held_goal_lock_and_cancels_on_the_next_tick(
+    sim_module, monkeypatch
+):
+    """C1: the timer runs on the executor thread; it must never block on the lock."""
+    import threading
+    import time as real_time
+
+    bridge, tick, clock, velocities = _timed_bridge(sim_module, monkeypatch)
+    bridge.nav_status, bridge.mode = "active", "nav"
+    bridge._goal_response(_ImmediateFuture(MagicMock(accepted=True)), 0)
+    bridge.note_link_activity()
+    velocities.clear()
+    clock["now"] += 2.0
+    taken, release = threading.Event(), threading.Event()
+
+    def hold():
+        with bridge._goal_lock:
+            taken.set()
+            release.wait(5.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert taken.wait(1.0)
+    try:
+        started = real_time.perf_counter()
+        tick()
+        assert real_time.perf_counter() - started < 0.1
+        assert bridge.nav_status == "active"
+        assert velocities == []
+    finally:
+        release.set()
+        holder.join(1.0)
+
+    tick()
+    assert bridge.nav_status == "cancelled"
+    assert velocities and velocities[-1].linear.x == 0.0

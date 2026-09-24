@@ -16,7 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -186,6 +186,28 @@ class AdapterHelloMixin:
             footprint=cfg.get("footprint"),
             coordinate_frame=self.coordinate_frame,
         )
+
+
+@contextmanager
+def goal_lock_if_free(bridge):
+    """Hold ``bridge._goal_lock`` only if it is free now; yield whether it is held.
+
+    For periodic ROS-thread callbacks: a blocking acquire there stalls the
+    executor that must process any reply a lock holder waits on. A caller that
+    gets False skips this tick or message and retries on the next one. A
+    bridge without the lock always proceeds.
+    """
+    lock = getattr(bridge, "_goal_lock", None)
+    if lock is None:
+        yield True
+        return
+    if not lock.acquire(blocking=False):
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock.release()
 
 
 def yaw_of(q) -> float:
@@ -446,11 +468,14 @@ class AdapterLinkMixin:
         self._last_link_at = time.monotonic()
 
     def apply_pending_drive(self) -> None:
-        pending = self._pending_drive
-        if pending is None:
+        if self._pending_drive is None:
             return
-        self._pending_drive = None
-        self.drive(*pending)
+        with goal_lock_if_free(self) as held:
+            pending = self._pending_drive
+            if not held or pending is None:
+                return
+            self._pending_drive = None
+            self.drive(*pending)
 
     def _watchdogs(self) -> None:
         self.apply_pending_drive()
@@ -465,7 +490,9 @@ class AdapterLinkMixin:
         from adapters.route_progress import route_progress_tick
 
         try:
-            route_progress_tick(self)
+            with goal_lock_if_free(self) as held:
+                if held:
+                    route_progress_tick(self)
         except Exception as exc:
             # A supervisor must never take the ROS timer, and with it the
             # deadman watchdogs, down with it.
@@ -474,7 +501,13 @@ class AdapterLinkMixin:
     def drive_watchdog(self) -> None:
         if self.mode != "teleop" or self._last_drive_at == 0.0:
             return
-        if time.monotonic() - self._last_drive_at > self.cfg["drive_timeout_s"]:
+        if time.monotonic() - self._last_drive_at <= self.cfg["drive_timeout_s"]:
+            return
+        with goal_lock_if_free(self) as held:
+            if not held or self.mode != "teleop" or self._last_drive_at == 0.0:
+                return
+            if time.monotonic() - self._last_drive_at <= self.cfg["drive_timeout_s"]:
+                return
             self.drive(0.0, 0.0)
             self.mode = "idle"
             self._last_drive_at = 0.0
@@ -488,8 +521,10 @@ class AdapterLinkMixin:
         self._last_link_at = time.monotonic()
 
     def link_watchdog(self) -> None:
-        with getattr(self, "_goal_lock", nullcontext()):
-            if self.nav_status != "active" or self.link_ok():
+        if self.nav_status != "active" or self.link_ok():
+            return
+        with goal_lock_if_free(self) as held:
+            if not held or self.nav_status != "active" or self.link_ok():
                 return
             self._log_warning(
                 f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
@@ -534,8 +569,11 @@ class AdapterGoalOwnershipMixin:
     """
 
     def _on_nav_cmd_vel(self, msg) -> None:
-        with self._goal_lock:
-            if not self._nav_execution_enabled:
+        if not self._nav_execution_enabled:
+            return
+        # A busy lock drops this sample; the controller sends the next one.
+        with goal_lock_if_free(self) as held:
+            if not held or not self._nav_execution_enabled:
                 return
             super()._on_nav_cmd_vel(msg)
 

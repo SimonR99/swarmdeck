@@ -912,6 +912,98 @@ def test_link_watchdog_ignores_a_robot_that_is_not_navigating(mod):
     bridge.pub_cmd.publish.assert_not_called()
 
 
+class _HeldGoalLock:
+    """Hold ``bridge._goal_lock`` from another thread, as a session worker does."""
+
+    def __init__(self, bridge):
+        self._lock = bridge._goal_lock
+        self._taken = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=self._hold, daemon=True)
+
+    def _hold(self):
+        with self._lock:
+            self._taken.set()
+            self._release.wait(5.0)
+
+    def __enter__(self):
+        self._thread.start()
+        assert self._taken.wait(1.0)
+        return self
+
+    def __exit__(self, *_exc):
+        self._release.set()
+        self._thread.join(1.0)
+
+
+def test_ros_thread_watchdog_never_waits_for_a_held_goal_lock(mod):
+    """C1: the 20 Hz timer shares the ROS thread with the replies a lock
+    holder may be waiting on, so it must skip a busy lock, not block on it."""
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge._pending_drive = None
+    bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge.goal = {"x": 1.0, "y": 2.0}
+    bridge._last_link_at = time.monotonic() - 1.0
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge._watchdogs()
+        assert time.monotonic() - started < 0.1
+        assert bridge.nav_status == "active"
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge._watchdogs()  # The next tick after release cancels the stale link.
+    assert bridge.nav_status == "cancelled"
+    assert bridge._goal_handle is None
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+def test_pending_drive_waits_for_the_next_tick_while_the_goal_lock_is_held(mod):
+    import time
+
+    bridge = _bridge(mod)
+    bridge._pending_drive = None
+    bridge.note_drive_command(0.2, -0.1)
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge.apply_pending_drive()
+        assert time.monotonic() - started < 0.1
+        assert bridge._pending_drive == (0.2, -0.1)
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge.apply_pending_drive()
+    assert bridge._pending_drive is None
+    sent = bridge.pub_cmd.publish.call_args[0][0]
+    assert sent.linear.x == 0.2 and sent.angular.z == -0.1
+
+
+def test_nav_cmd_vel_sample_is_dropped_while_the_goal_lock_is_held(mod):
+    import time
+
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
+    twist = MagicMock()
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge._on_nav_cmd_vel(twist)
+        assert time.monotonic() - started < 0.1
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_called_once_with(twist)
+
+
 def _link_bridge(mod, hooks):
     """A bridge that is nothing but the surface `run_robot` drives."""
 
