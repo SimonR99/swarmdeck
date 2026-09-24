@@ -82,13 +82,12 @@ Adapters send a complete `robot_state` at 5 Hz:
 { "type": "set_mode", "mode": "teleop" }
 { "type": "body_command", "action": "stand", "height": 0.0 }
 { "type": "explore", "enabled": true }
-{ "type": "reset" }
 ```
 
 MGG goals are navigation-frame goals. Objective planning resolves and validates
 mapping authority, then sends a trajectory to `FollowPath`; vendor adapters
 may pass a navigation-frame goal to their native controller. `stop`, manual
-drive, reset, and a replacement objective cancel active route execution.
+drive, and a replacement objective cancel active route execution.
 
 ## Collaborative graph
 
@@ -108,8 +107,9 @@ Protocol 2 adapters may report graph health:
 ## Detections and reset
 
 A `detections` message contains normalized image boxes and optional positions
-only when fresh depth and TF make the position valid. After simulation reset,
-adapters send `reset_done` with per-step results. Hardware adapters do not
+only when fresh depth and TF make the position valid. Simulation reset is not
+an adapter command: the host reset supervisor restarts the simulation in a
+fresh mission (docs/operations/simulation-reset.md). Hardware adapters do not
 advertise reset.
 
 ## Capabilities
@@ -122,7 +122,7 @@ advertise reset.
 | `network` | Include synchronized link quality |
 | `estop` | Accept `stop` |
 | `body` | Accept `body_command` |
-| `reset` | Accept simulation reset |
+| `reset` | Restartable by the simulation reset supervisor |
 | `explore` | Start/stop configured exploration |
 
 Never advertise a capability the adapter cannot honour.

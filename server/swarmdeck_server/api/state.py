@@ -69,33 +69,12 @@ _review_pushed_at = 0.0
 _review_dirty = False
 _review_saved_at = 0.0
 
-# How long to wait for adapters to report `reset_done` before clearing server
-# state. The adapters reset simulator poses, odometry, and navigation state.
-# Generous, because waiting too little can clear state while an adapter still
-# holds old navigation products.
-RESET_TIMEOUT_S = 25.0
-
-# Robots that have been sent `reset` and have not yet answered. Mutated from the
-# adapter socket, awaited by reset_fleet(); _reset_done fires when it empties.
-_reset_pending: set[str] = set()
-
 STATE_LOOP_INTERVAL_S = 0.2
 STATE_KEEPALIVE_S = 1.0
 # Compare floats at 1e-6 absolute resolution to ignore recomputation noise;
 # outgoing messages retain their original precision.
 STATE_SIGNATURE_FLOAT_DIGITS = 6
 _state_loop_cache: dict[str, tuple[str, float]] = {}
-# robot_id → the `steps` map from a reset_done that reported ok: false. Held
-# until reset_fleet() has finished clearing, so the alert survives that clear.
-_reset_failures: dict[str, dict[str, Any]] = {}
-# Created per reset, not at import. An asyncio.Event binds to the first loop
-# that awaits it and then refuses every other one, so a module-level Event
-# survives exactly one event loop — which is one more than a test suite gets,
-# and a landmine for anything that ever runs this app under a second loop.
-# `_reset_running` is a plain bool for the same reason: an asyncio.Lock would
-# reintroduce the binding this avoids.
-_reset_done: asyncio.Event | None = None
-_reset_running = False
 
 
 # ----------------------------------------------------------------- config
@@ -522,141 +501,46 @@ def cancel_departures() -> None:
 
 
 async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
-    """Put the simulation back to its start state.
+    """Ask the host reset supervisor to put the simulation back to its start state.
 
-    Adapters reset the simulator's model poses, odometry filter, and navigation
-    state, then report `reset_done`. Only after that acknowledgement does the
-    backend clear deployment raster and telemetry state. Clearing first would
-    race with an in-flight navigation product.
-
-    Backend state is cleared even when an adapter never answers. A stuck adapter
-    must not leave the operator staring at stale state forever; robots that
-    failed to confirm are named in the result.
+    The supervisor restarts the composition in a fresh mission and map epoch;
+    see docs/operations/simulation-reset.md. Without one configured there is
+    nothing that can reset the fleet, and the request fails without touching
+    any robot or any server state.
     """
     cancel_departures()
-    global _reset_done, _reset_running
 
     from .simulation_reset import request_reset, reset_root
 
     supervisor_root = reset_root()
-    if supervisor_root is not None:
-        result = request_reset(supervisor_root, request_id)
-        await broadcast(
-            {
-                "type": "sim_reset",
-                "phase": (
-                    "start"
-                    if result.get("phase")
-                    in {"accepted", "stopping", "starting", "verifying"}
-                    else "done"
-                ),
-                "request_id": result.get("request_id"),
-                "ok": result.get("ok"),
-                "error": result.get("error"),
-                "skipped": [],
-            }
-        )
-        return result
-
-    if _reset_running:
-        return {"ok": False, "error": "a reset is already running"}
-    _reset_running = True
-    _reset_done = asyncio.Event()
-    try:
-        # Capability-gated, and this is a safety boundary rather than a
-        # nicety: `reset` means "teleport to spawn and forget the map", which a
-        # physical robot cannot do and must never be asked to do. adapter_ros2
-        # does not advertise it. See adapters/protocol/README.md.
-        targets = {
-            rid for rid, r in registry.robots.items() if "reset" in r.capabilities
-        }
-        skipped = sorted(set(registry.robots) - targets)
-
-        events.log("reset_start", {"robots": sorted(targets), "skipped": skipped})
-        await broadcast(
-            {
-                "type": "sim_reset",
-                "phase": "start",
-                "robots": sorted(targets),
-                "skipped": skipped,
-            }
-        )
-
-        _reset_pending.clear()
-        _reset_failures.clear()
-        _reset_done.clear()
-        # Wait only on robots the command actually reached. A robot whose socket
-        # died between the capability check and the send would otherwise hold the
-        # whole reset until the timeout.
-        for rid in sorted(targets):
-            if await registry.send(rid, {"type": "reset", **stamps()}):
-                _reset_pending.add(rid)
-        unreachable = sorted(targets - _reset_pending)
-        if not _reset_pending:
-            _reset_done.set()
-
-        timed_out = False
-        try:
-            await asyncio.wait_for(_reset_done.wait(), RESET_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            timed_out = True
-        silent = sorted(_reset_pending)
-        _reset_pending.clear()
-
-        await broadcast({"type": "network_clear", "robot_id": None})
-        _detections.clear()
-        # Validated objects describe the world before the reset. Keeping them
-        # would leave confirmed markers floating over a map that no longer has
-        # the geometry they were placed against.
-        review_store.reset()
-        save_review(force=True)
-        # Alerts describe a world that no longer exists — an `unattended` warning
-        # for a robot now back at its spawn pose is stale by construction. The
-        # suppression window goes too, so a condition that genuinely returns
-        # after the reset is reported again rather than swallowed.
-        for alert_id in list(_alerts):
-            await clear_alert(alert_id)
-        _alert_suppress_until.clear()
-        for robot in registry.robots.values():
-            robot.goal = None
-            robot.planned_path = []
-            robot.global_planned_path = []
-            robot.local_planned_path = []
-            robot.nav_status = "idle"
-            robot.mode = "idle"
-
-        # Three distinct ways to not be reset, kept apart because they mean
-        # different things to an operator: the command never arrived, it arrived
-        # and was never answered, or it was answered with a failure.
-        partial = dict(_reset_failures)
-        _reset_failures.clear()
-        failed = sorted(set(silent) | set(unreachable) | set(partial))
+    if supervisor_root is None:
         result = {
-            "type": "sim_reset",
-            "phase": "done",
-            "ok": not failed,
-            "reset": sorted(targets - set(failed)),
-            "skipped": skipped,
-            "unreachable": unreachable,
-            "no_response": silent,
-            "partial": {rid: steps for rid, steps in partial.items()},
-            "failed": failed,
-            "timed_out": timed_out,
+            "version": 1,
+            "phase": "failed",
+            "ok": False,
+            "error": (
+                "simulation reset requires the reset supervisor "
+                "(SWARMDECK_SIM_RESET_DIR is not set)"
+            ),
         }
-        events.log("reset_done", {k: v for k, v in result.items() if k != "type"})
-        await broadcast(result)
-        await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
-        if failed:
-            await raise_alert(
-                "reset_incomplete",
-                "warn",
-                "fault",
-                f"Reset not confirmed by {', '.join(failed)} — their map may return",
-            )
-        return result
-    finally:
-        _reset_running = False
-        _reset_done = None
+    else:
+        result = request_reset(supervisor_root, request_id)
+    await broadcast(
+        {
+            "type": "sim_reset",
+            "phase": (
+                "start"
+                if result.get("phase")
+                in {"accepted", "stopping", "starting", "verifying"}
+                else "done"
+            ),
+            "request_id": result.get("request_id"),
+            "ok": result.get("ok"),
+            "error": result.get("error"),
+            "skipped": [],
+        }
+    )
+    return result
 
 
 def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | None:

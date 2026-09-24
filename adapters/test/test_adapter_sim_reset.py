@@ -31,7 +31,6 @@ def make_bridge(sim):
     bridge._nav_quiet_unknown = False
     bridge._last_drive_at = 12.0
     bridge._service_clients = {}
-    bridge._reset_report = None
     bridge.http_url = "http://server:8080"
     bridge.platform = "bunker"
     bridge.robot_type = "agilex_bunker"
@@ -50,21 +49,13 @@ def make_bridge(sim):
     return bridge
 
 
-def test_reset_refuses_and_reports_supervisor_required(sim):
-    """A per-robot reset never moves the world; it is refused and reported."""
+def test_reset_is_left_to_the_supervisor(sim):
+    """The adapter advertises `reset` for the supervisor but has no handler."""
     bridge = make_bridge(sim)
-    assert bridge.take_reset_report() is None
-
-    steps = bridge.reset()
-
-    assert steps == {"supervisor_required": False}
+    assert "reset" in bridge.capabilities()
+    assert not hasattr(bridge, "reset")
+    assert bridge.session_state_tick() is None
     bridge.pub_cmd.publish.assert_not_called()
-    report = bridge.take_reset_report()
-    assert report["type"] == "reset_done"
-    assert report["robot_id"] == "robot_0"
-    assert report["ok"] is False
-    assert report["steps"] == {"supervisor_required": False}
-    assert bridge.take_reset_report() is None
 
 
 def test_reset_readiness_requires_follow_path_and_planner_service(sim):

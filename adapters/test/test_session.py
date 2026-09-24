@@ -24,6 +24,23 @@ def test_unknown_command_types_are_ignored():
     asyncio.run(run())
 
 
+def test_a_legacy_reset_command_is_ignored():
+    """Resets go through the epoch supervisor; the adapter ignores `reset`."""
+    calls = []
+    bridge = SimpleNamespace(
+        reset=lambda: calls.append("reset"),
+        exploration=SimpleNamespace(stop=lambda: calls.append("stop_exploration")),
+        goal_exploration=SimpleNamespace(cancel=lambda: calls.append("cancel")),
+    )
+
+    async def run():
+        await dispatch_command(bridge, {"type": "reset"}, asyncio.get_running_loop())
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert calls == []
+
+
 def test_explore_command_binds_common_run_before_start():
     calls = []
     coordinator = SimpleNamespace(begin_run=lambda *args: calls.append(("run", *args)))

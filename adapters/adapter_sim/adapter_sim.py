@@ -325,7 +325,6 @@ class RobotBridge(
         self._nav_down_since = 0.0
         self._nav_recovered_at = 0.0
         self._service_clients: dict = {}
-        self._reset_report: dict | None = None
 
         node.create_subscription(Odometry, f"/{robot_id}/odom", self._on_odom, 10)
         # Depth chosen for the executor, not the publisher. TF arrives at 10 Hz,
@@ -485,7 +484,12 @@ class RobotBridge(
     # -- protocol side -------------------------------------------------
 
     def capabilities(self) -> list[str]:
-        """Advertise only what this process honours. `reset` is simulation-only."""
+        """Advertise only what this process honours.
+
+        `reset` marks a robot the simulation reset supervisor can restart; the
+        dashboard offers Reset only when a robot advertises it. The adapter
+        itself never receives a reset command.
+        """
         caps = ["navigate", "map", "camera", "estop", "reset"]
         if getattr(self, "exploration", None) is not None:
             caps.append("explore")
@@ -1013,8 +1017,6 @@ class RobotBridge(
                     self._cancel_events.pop(old, None)
             return True
 
-    # -- reset ---------------------------------------------------------
-
     def _lifecycle_service_response(
         self, name: str, srv_type, request, not_after: float
     ):
@@ -1057,46 +1059,10 @@ class RobotBridge(
             raise RuntimeError(f"service returned no response: {name}")
         return response
 
-    def reset(self) -> dict[str, bool]:
-        """Refuse the legacy per-robot reset. Runs on a worker thread.
-
-        ARGoS owns the physical world through its socket bridge and onboard
-        mapping requires a fresh frontend mission, so a reset is a
-        composition-wide lifecycle operation of the host reset supervisor.
-        The negative acknowledgement is queued for the session transmitter,
-        which owns the websocket, so a misconfigured legacy server fails
-        promptly instead of waiting the full fleet reset timeout for silence.
-        """
-        self.node.get_logger().warn(
-            f"[{self.id}] refusing legacy per-robot reset; "
-            "use the epoch-safe simulation reset supervisor"
-        )
-        steps = {"supervisor_required": False}
-        self._reset_report = {
-            "type": "reset_done",
-            "robot_id": self.id,
-            "t_mono": round(time.monotonic() - self.t0, 4),
-            "ok": False,
-            "steps": steps,
-        }
-        return steps
-
-    def take_reset_report(self) -> dict | None:
-        """Hand the reset verdict to the tx loop, which owns the socket.
-
-        Sending it from the reset's own thread would mean two coroutines writing
-        to one websocket concurrently. The tx loop already runs at 5 Hz, so this
-        costs at most 200 ms.
-        """
-        report = self._reset_report
-        self._reset_report = None
-        return report
-
-    def session_state_tick(self) -> dict | None:
+    def session_state_tick(self) -> None:
         self.drive_watchdog()
         self.escape_tick()
         self.route_progress_watchdog()
-        return self.take_reset_report()
 
     def route_progress_watchdog(self) -> bool:
         """Cancel a FollowPath goal whose progress along the route stalled."""

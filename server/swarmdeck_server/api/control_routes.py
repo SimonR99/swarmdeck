@@ -113,9 +113,8 @@ async def stop_session() -> dict[str, Any]:
 
 
 async def post_sim_reset(request_id: str | None = None) -> dict[str, Any]:
-    # reset_fleet owns both implementations: the legacy adapter handshake and
-    # the host-supervisor request plus its fleet-wide progress broadcast. Keep
-    # REST and websocket reset commands on that single observable path.
+    # reset_fleet owns the host-supervisor request and its fleet-wide progress
+    # broadcast. Keep REST and websocket reset commands on that single path.
     return await state.reset_fleet(request_id)
 
 
