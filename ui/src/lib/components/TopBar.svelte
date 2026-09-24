@@ -85,10 +85,9 @@
     session.connection === 'live' ? 'ok' : session.connection === 'mock' ? 'warn' : 'danger'
   );
 
-  // Capability-gated, not build-gated: this same GUI drives adapter_ros2 on real
-  // hardware, where "teleport to spawn and forget the map" is not a thing that
-  // can happen. No robot advertising `reset` means no button at all.
-  const canReset = $derived(fleet.robots.some((r) => r.capabilities?.includes('reset')));
+  // Only the host supervisor can reset a simulation; adapter capabilities
+  // alone do not make that operation available.
+  const canReset = $derived(session.resetSupervisorAvailable);
   const resetError = $derived(session.lastReset?.ok === false ? session.lastReset.error : null);
 
   // Which map the canvas is showing. This used to be a single button that

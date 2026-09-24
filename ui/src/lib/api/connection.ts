@@ -6,7 +6,7 @@ import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import type { MockFleet } from './mock';
-import { fetchJsonWithTimeout, resetRequestId, resetRobotMap } from './resetHttp';
+import { canResetSimulation, fetchJsonWithTimeout, resetRequestId, resetRobotMap } from './resetHttp';
 
 /**
  * Single connection to the backend. The local simulator is opt-in with
@@ -30,14 +30,23 @@ let started = false;
 let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
 let resetPollRequestId: string | null = null;
 
-type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus;
+type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus & {
+  supervisor_available?: boolean;
+};
 const RESET_POLL_TIMEOUT_MS = 600_000;
 const RESET_FETCH_TIMEOUT_MS = 5_000;
 
 async function fetchResetStatus(): Promise<[Response, ResetStatus]> {
-  return fetchJsonWithTimeout<ResetStatus>(
-    '/api/sim/reset', { cache: 'no-store' }, RESET_FETCH_TIMEOUT_MS
-  );
+  try {
+    const result = await fetchJsonWithTimeout<ResetStatus>(
+      '/api/sim/reset', { cache: 'no-store' }, RESET_FETCH_TIMEOUT_MS
+    );
+    session.setResetSupervisorAvailable(result[0].ok && canResetSimulation(result[1]));
+    return result;
+  } catch (error) {
+    session.setResetSupervisorAvailable(false);
+    throw error;
+  }
 }
 
 function publishResetStatus(status: ResetStatus) {
@@ -115,7 +124,7 @@ async function recoverLostResetResponse(
     if (!response.ok || status.phase === 'failed') {
       throw new Error(status.error ?? `simulation reset ${response.status}`);
     }
-    if (!status.request_id || status.phase === 'legacy' || status.phase === 'done') {
+    if (!status.request_id || status.phase === 'done') {
       return status;
     }
     return pollReset(status.request_id, deadline);
@@ -363,15 +372,9 @@ export const actions = {
       publishResetStatus(accepted);
       throw new Error(accepted.error ?? `simulation reset ${response.status}`);
     }
-    if (!accepted.request_id || accepted.phase === 'legacy') {
-      // Compatibility with a server that still performs the adapter reset and
-      // broadcasts progress over the fleet socket.
-      if (accepted.phase === 'legacy') sendAction({ type: 'reset_sim' });
-      return accepted;
-    }
     publishResetStatus(accepted);
     if (accepted.phase === 'done') return accepted;
-    return pollReset(accepted.request_id, deadline);
+    return pollReset(accepted.request_id ?? requestId, deadline);
   },
 
   /**

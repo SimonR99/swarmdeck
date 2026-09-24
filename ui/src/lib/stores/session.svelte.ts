@@ -35,6 +35,7 @@ const state = $state({
   // rather than set optimistically on click, so every operator watching the same
   // fleet sees the reset, not just the one who pressed the button.
   resetting: false,
+  resetSupervisorAvailable: false,
   lastReset: null as SimReset | null
 });
 
@@ -65,6 +66,12 @@ export const session = {
   },
   get criticalCount() {
     return state.alerts.filter((a) => !a.acknowledged && a.level === 'critical').length;
+  },
+  get resetSupervisorAvailable() {
+    return state.resetSupervisorAvailable;
+  },
+  setResetSupervisorAvailable(available: boolean) {
+    state.resetSupervisorAvailable = available;
   },
   get resetting() {
     return state.resetting;

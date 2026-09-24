@@ -29,7 +29,7 @@ an XML profile with `useBuiltinTransports=false`.
 
 Unlike a fleet reset, a per-robot reset keeps sim's shared `/dev/shm` alive.
 The peer stop has a five-second grace period, and MGG's planner supervisor can
-SIGKILL its process group after three seconds. Either forced stop can leave
+SIGKILL its process group after ten seconds. Either forced stop can leave
 Fast DDS segments/ports behind. The short-lived `robot_reset.py` quiesce and
 readiness probes therefore explicitly use the UDP-only XML.
 
@@ -41,11 +41,14 @@ results are logged at most once per 30 seconds per outcome. Fast DDS 2.14.6's
 cleaner checks file locks (`flock`), retaining live owners even in another PID
 namespace; it does not guess ownership from process IDs or delete all SHM files.
 
-MGG stops outside this host reset path still need mitigation in its own
-supervisor: allow more graceful shutdown time and/or perform bounded,
-best-effort `fastdds shm clean` after killing the owned process group. That
-separate supervisor change is pending controller integration. Do not replace
-lock-aware cleanup with `rm /dev/shm/fastrtps*`.
+MGG's supervisor allows ten seconds for ROS launch to stop its children,
+including launch's SIGTERM escalation after five seconds. A normal stop is
+unaffected: the wait returns as soon as launch exits. Only a planner that ignores
+SIGTERM now waits up to ten seconds before SIGKILL; that delay adds to a
+per-robot reset. The host's bounded cleanup above covers forced kills on the
+reset path. Stops outside that path gain the longer grace period but do not run
+SHM cleanup, so an unresponsive planner can still leave stale objects there.
+Do not replace lock-aware cleanup with `rm /dev/shm/fastrtps*`.
 
 Live leak check: with the same fleet running, record `du -sh /dev/shm` and
 `find /dev/shm -maxdepth 1 -name 'fastrtps_*' | wc -l` inside sim. Run **N=10**
