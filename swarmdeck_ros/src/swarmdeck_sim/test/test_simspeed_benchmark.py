@@ -73,3 +73,29 @@ def test_benchmark_order_balances_every_position_over_three_rounds():
     ]
     for position in range(3):
         assert set(order[position::3]) == {"baseline", "lidar5", "parked2"}
+
+
+def test_missing_gpu_samples_preserve_measured_rtf(tmp_path, monkeypatch):
+    import json
+
+    benchmark = runpy.run_path(str(SCRIPT))
+
+    class MissingGpu:
+        def __init__(self, *args, **kwargs):
+            kwargs["stdout"].write("NVML unavailable\n")
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            return 1
+
+    monkeypatch.setattr(benchmark["subprocess"], "Popen", MissingGpu)
+    output = tmp_path / "window"
+    with pytest.raises(RuntimeError, match="GPU utilization"):
+        benchmark["run_window"](
+            output, 60, lambda _: {"rtf": 2.0, "sim_s": 120, "wall_s": 60}
+        )
+    saved = json.loads(output.with_suffix(".json").read_text())
+    assert saved["rtf"] == {"rtf": 2.0, "sim_s": 120, "wall_s": 60}
+    assert "GPU utilization" in saved["gpu"]["error"]

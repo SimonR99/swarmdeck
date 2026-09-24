@@ -102,15 +102,21 @@ def run_window(output: Path, window: float, probe) -> dict:
         finally:
             gpu.terminate()
             gpu.wait(timeout=10)
+    try:
+        gpu_result = gpu_summary(output.with_suffix(".gpu.csv"))
+    except RuntimeError as exc:
+        gpu_result = {"error": str(exc)}
     record = {
         "before": before,
         "after": host_sample(),
         "rtf": result,
-        "gpu": gpu_summary(output.with_suffix(".gpu.csv")),
+        "gpu": gpu_result,
     }
     output.with_suffix(".json").write_text(json.dumps(record, indent=2) + "\n")
     if "error" in result:
         raise RuntimeError(result["error"])
+    if "error" in gpu_result:
+        raise RuntimeError(gpu_result["error"])
     return record
 
 
