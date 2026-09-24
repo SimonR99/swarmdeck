@@ -1,4 +1,4 @@
-"""Calibrated color projection shared by capture and cloud upload (no ROS imports)."""
+"""Calibrated color projection for the peer bridge's RGB-D captures (no ROS imports)."""
 
 from __future__ import annotations
 import numpy as np

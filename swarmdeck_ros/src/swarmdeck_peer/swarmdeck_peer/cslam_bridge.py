@@ -763,7 +763,7 @@ class Bridge(Node):
 
     def _capture_colors(self, points_base, capture_header):
         """Return measured RGBA only for a timestamp-qualified RGB-D observation."""
-        from adapters.reconstruction import colorize_ros_rgbd
+        from swarmdeck_peer.colorize import colorize_ros_rgbd
 
         self.color_capture_attempts += 1
         try:
