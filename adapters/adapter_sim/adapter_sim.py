@@ -26,8 +26,6 @@ import urllib.request
 import zlib
 from pathlib import Path
 
-import cv2
-import numpy as np
 import rclpy
 import websockets
 from action_msgs.msg import GoalStatus
@@ -1214,25 +1212,12 @@ class RobotBridge(
         msg = self._camera_frame
 
         try:
-            rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.step)
-            encoding = msg.encoding.lower()
-            if encoding in ("rgb8", "8uc3"):
-                rgb = rows[:, : msg.width * 3].reshape(msg.height, msg.width, 3)
-                image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            elif encoding == "bgr8":
-                image = rows[:, : msg.width * 3].reshape(msg.height, msg.width, 3)
-            elif encoding == "rgba8":
-                rgba = rows[:, : msg.width * 4].reshape(msg.height, msg.width, 4)
-                image = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-            elif encoding == "bgra8":
-                bgra = rows[:, : msg.width * 4].reshape(msg.height, msg.width, 4)
-                image = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
-            elif encoding == "mono8":
-                image = rows[:, : msg.width].reshape(msg.height, msg.width)
-            else:
+            image = self._image_to_bgr(msg)
+            if image is None:
                 if not self._camera_encoding_warned:
                     self.node.get_logger().warn(
-                        f"[{self.id}] unsupported camera encoding: {msg.encoding}"
+                        f"[{self.id}] cannot decode camera encoding "
+                        f"{msg.encoding!r}; detection has no frames"
                     )
                     self._camera_encoding_warned = True
                 return

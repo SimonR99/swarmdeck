@@ -322,3 +322,71 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     assert (
         detections and detections[0]["class"] == "rubber_duck"
     ), "detection must still run for an unwatched camera"
+
+
+def _camera_bridge(sim_module):
+    import threading
+    from unittest.mock import MagicMock
+
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.node = MagicMock()
+    bridge.id = "robot_0"
+    bridge._upload_lock = threading.Lock()
+    bridge._camera_encoding_warned = False
+    bridge.frames = []
+    bridge._detect_bgr = lambda image, **_: bridge.frames.append(image)
+    return bridge
+
+
+def _camera_frame(encoding, width, height, channels, pad):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    step = width * channels + pad
+    rows = np.zeros((height, step), dtype=np.uint8)
+    rows[:, : width * channels] = np.arange(width * channels, dtype=np.uint8)
+    rows[:, width * channels :] = 255
+    return SimpleNamespace(
+        encoding=encoding,
+        width=width,
+        height=height,
+        step=step,
+        data=rows.tobytes(),
+        header=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "encoding, channels, shape",
+    [
+        ("rgb8", 3, (2, 3, 3)),
+        ("8UC3", 3, (2, 3, 3)),
+        ("bgr8", 3, (2, 3, 3)),
+        ("rgba8", 4, (2, 3, 4)),
+        ("bgra8", 4, (2, 3, 4)),
+        ("mono8", 1, (2, 3)),
+    ],
+)
+def test_camera_decoding_drops_row_padding(sim_module, encoding, channels, shape):
+    bridge = _camera_bridge(sim_module)
+    bridge._camera_frame = _camera_frame(encoding, 3, 2, channels, pad=5)
+    bridge._camera_dirty = True
+
+    bridge.process_camera()
+
+    (image,) = bridge.frames
+    assert image.shape == shape
+    assert (image != 255).all(), "row padding reached the detector"
+    assert bridge._camera_dirty is False
+
+
+def test_unsupported_camera_encoding_warns_once(sim_module):
+    bridge = _camera_bridge(sim_module)
+    for _ in range(2):
+        bridge._camera_frame = _camera_frame("yuv422", 3, 2, 2, pad=0)
+        bridge._camera_dirty = True
+        bridge.process_camera()
+
+    assert bridge.frames == []
+    bridge.node.get_logger().warn.assert_called_once()
