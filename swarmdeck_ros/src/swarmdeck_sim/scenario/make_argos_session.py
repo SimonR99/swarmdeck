@@ -39,6 +39,7 @@ measure nothing.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import math
 import os
 import re
@@ -378,7 +379,12 @@ def generate_argos_xml(
             f"fleet.lidar.profile to vlp16 or generic_32."
         )
 
-    simulation = cfg.get("simulation") or {}
+    simulation = cfg.get("simulation", {})
+    if not isinstance(simulation, Mapping):
+        raise ValueError("simulation must be a mapping")
+    unknown = set(simulation) - {"realtime_factor", "parked_lidar_rate"}
+    if unknown:
+        raise ValueError(f"unknown simulation keys: {sorted(map(str, unknown))}")
     realtime_factor = simulation.get("realtime_factor", 1)
     if (
         isinstance(realtime_factor, bool)

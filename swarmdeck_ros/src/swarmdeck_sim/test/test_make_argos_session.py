@@ -912,3 +912,17 @@ def test_lidar_rate_must_be_representable_by_physics_ticks(tmp_path, cfg, rate):
     path.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError, match="fleet.lidar.rate"):
         mas.generate_argos_xml(path)
+
+
+@pytest.mark.parametrize(
+    "simulation", [5, [], "bad", False, None, {"parked_lidar_hz": 2}]
+)
+def test_simulation_block_rejects_non_mappings_and_unknown_keys(
+    tmp_path, cfg, simulation
+):
+    config = yaml.safe_load(yaml.safe_dump(cfg))
+    config["simulation"] = simulation
+    path = tmp_path / "invalid-simulation.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="simulation"):
+        mas.generate_argos_xml(path)

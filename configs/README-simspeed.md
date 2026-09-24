@@ -13,6 +13,9 @@ simulation:
   parked_lidar_rate: 2
 ```
 
+`simulation` must be a mapping containing only `parked_lidar_rate` and/or
+`realtime_factor`; unknown keys are rejected rather than silently ignored.
+
 Rebuild the ARGoS image: its camera-pool patch implements this setting. After
 one simulated second with an exactly unchanged physical sensor anchor, lidar
 rendering drops to 2 Hz. Any position or orientation change immediately restores
