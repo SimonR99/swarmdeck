@@ -287,7 +287,11 @@ the sender's planning frame (`robot_N/odom`) into the receiver's, never an
 assumed identity: `deploy/mgg/robot_poses.py` publishes those transforms on
 `/robot_N/mgg/neighbour_transforms` (MGG `neighbour_pose_source: topic`), and
 MGG drops a roadmap whose transform is missing or older than
-`neighbour_transform_ttl_sec` (5 s). The source is selected with
+`neighbour_transform_ttl_sec` (5 s). `robot_poses.py` stops publishing a
+transform once either robot's placement has not been refreshed for 3 s (no map
+authority, or no paired ground truth and odometry), and before every plan MGG
+disconnects a merged roadmap whose transform is no longer current; a current
+transform joins it again. The source is selected with
 `--robot-poses` in `scripts/sim-up` (`ROBOT_POSES=` for `make up-sim`,
 `SWARMDECK_ROBOT_POSES` in the `mgg` service):
 
@@ -311,9 +315,12 @@ driving height and the receiver raises them by its own, so a Spot's roadmap
 lands at a Bunker's driving height. The receiver does not take over an edge
 that exceeds its own step and grade limits (a Spot's 0.30 m step is not a
 Bunker's). Merged vertices follow the transform when it moves them by more than
-5 cm. A neighbour whose roadmap no longer holds a vertex it sent, or holds it
-elsewhere in its own frame, restarted (a map reset restarts its planner): what
-was merged from its old run is cut out and its new roadmap merged afresh.
+5 cm, and all their edges are judged again where they now stand. A neighbour
+whose roadmap no longer holds a vertex it sent, or holds it elsewhere in its
+own frame, restarted (a map reset restarts its planner): what was merged from
+its old run is cut out and its new roadmap merged afresh. All planners must run
+the same MGG revision: an MGG from before roadmap sharing sends driving height,
+not ground height.
 MGG's communication range (15 m between the robots' latest positions) still
 applies.
 
