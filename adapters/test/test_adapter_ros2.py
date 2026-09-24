@@ -858,6 +858,9 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     )
     bridge.nav_status = "active"
     bridge._nav_execution_enabled = True
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge.goal = {"x": 1.0, "y": 2.0}
+    bridge.planned_path = [{"x": 1.0, "y": 2.0}]
     bridge.note_link_activity()
 
     # Fresh link: autonomy is relayed as before.
@@ -872,6 +875,9 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
         "on nav_status, so leaving it active lets Nav2's next sample overwrite "
         "the stop within milliseconds"
     )
+    assert bridge._goal_handle is None
+    assert bridge.goal is None
+    assert bridge.planned_path == []
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 

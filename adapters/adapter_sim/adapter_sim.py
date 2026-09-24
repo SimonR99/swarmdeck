@@ -369,6 +369,9 @@ class RobotBridge(
 
         configure_exploration(self)
         configure_objective_planning(self)
+        # Keep deadman/link cancellation independent of the websocket state
+        # loop, using the same 20 Hz ROS watchdog as hardware.
+        self._watchdog_timer = node.create_timer(0.05, self._watchdogs)
 
     def _on_odom(self, msg: Odometry) -> None:
         """Wheel odometry — a FALLBACK only. See map_pose() for why."""
@@ -1004,9 +1007,7 @@ class RobotBridge(
         return response
 
     def session_state_tick(self) -> None:
-        self.drive_watchdog()
         self.escape_tick()
-        self.route_progress_watchdog()
 
     def route_progress_watchdog(self) -> bool:
         """Cancel a FollowPath goal whose progress along the route stalled."""

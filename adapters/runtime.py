@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -433,7 +434,7 @@ class AdapterDetectionMixin:
 
 
 class AdapterLinkMixin:
-    """Deadman and websocket freshness policy shared by hardware bridges."""
+    """Shared sim/hardware velocity gating, deadman and link watchdog policy."""
 
     def _on_nav_cmd_vel(self, msg) -> None:
         if self.nav_status == "active" and self.pub_cmd is not None:
@@ -487,14 +488,18 @@ class AdapterLinkMixin:
         self._last_link_at = time.monotonic()
 
     def link_watchdog(self) -> None:
-        if self.nav_status != "active" or self.link_ok():
-            return
-        self._log_warning(
-            f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
-            "with a goal active; cancelling and stopping"
-        )
-        self.cancel_goal()
-        self.drive(0.0, 0.0)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if self.nav_status != "active" or self.link_ok():
+                return
+            self._log_warning(
+                f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
+                "with a goal active; cancelling and stopping"
+            )
+            self.cancel_goal()
+            self.drive(0.0, 0.0)
+            # A manual zero drive retains each adapter's normal semantics;
+            # this watchdog stop is the terminal cancellation of its route.
+            self.nav_status = "cancelled"
 
     def stop(self) -> None:
         exploration = getattr(self, "exploration", None)
@@ -522,8 +527,10 @@ class AdapterGoalOwnershipMixin:
 
     Each call acts only while ``expected_generation`` still owns the bridge's
     goal, so a planner can never cancel or relabel a newer operator command.
-    The bridge provides ``_goal_lock``, ``_goal_generation``, ``nav_status``
-    and ``cancel_goal()``.
+    The bridge provides ``_goal_lock``, ``_goal_generation``, ``nav_status``,
+    ``_nav_execution_enabled``, ``pub_cmd`` and ``cancel_goal()``. Place this
+    mixin before ``AdapterLinkMixin`` to gate its velocity relay on accepted
+    execution as well as link freshness.
     """
 
     def _on_nav_cmd_vel(self, msg) -> None:

@@ -97,7 +97,12 @@ The simulation session remaps Nav2's smoothed output to
 `/<robot_id>/cmd_vel_adapter`. The simulation adapter uses the same velocity
 gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
 only an accepted, current route with an active status and fresh operator link
-can relay Nav2 output. Pending routes, cancellation, stop, and manual drive
+can relay Nav2 output. Both adapters run the shared 20 Hz ROS watchdog separately
+from websocket telemetry: a stale link cancels active navigation, publishes
+a stop and reports `cancelled` rather than merely holding the velocity relay
+closed. The same watchdog
+consumes pending manual-drive commands and enforces their deadman timeout.
+Pending routes, cancellation, stop, and manual drive
 close the relay; manual drive and recovery still publish directly through the
 adapter. On sim and hardware, a terminal result that closes an open relay also
 publishes one zero velocity, so the driver cannot retain the last moving
