@@ -61,6 +61,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -1171,12 +1172,9 @@ def main() -> None:
         type=int,
         default=int(os.getenv("SWARMDECK_MOLA_MAX_MAPS", DEFAULT_MAX_MAPS)),
     )
-    parser.add_argument(
-        "--mode",
-        choices=("persistent", "oneshot"),
-        default=os.getenv("SWARMDECK_MOLA_MODE", "persistent"),
-        help="native importer lifecycle; oneshot is the explicit compatibility mode",
-    )
+    # Deprecated: the native runtime is always persistent. `--mode persistent`
+    # is still accepted so compose files written for older images keep working.
+    parser.add_argument("--mode", choices=("persistent",), help=argparse.SUPPRESS)
     parser.add_argument(
         "--parallel-peers",
         type=_positive_int,
@@ -1200,6 +1198,13 @@ def main() -> None:
         help="explicitly enable legacy discovery across every mission directory",
     )
     args = parser.parse_args()
+    if args.mode is not None:
+        print(
+            "swarmdeck-mola-worker: --mode is deprecated; the runtime is always "
+            "persistent",
+            file=sys.stderr,
+            flush=True,
+        )
     if args.all_missions and args.mission_id is not None:
         parser.error("--all-missions conflicts with --mission-id/SWARMDECK_MISSION_ID")
     if not args.all_missions and args.mission_id is None:
@@ -1215,7 +1220,6 @@ def main() -> None:
         max_points_per_map=args.max_points_per_map,
         max_resident_points=args.max_resident_points,
         max_maps=args.max_maps,
-        mode=args.mode,
         planner_maps=args.planner_maps,
         mission_id=None if args.all_missions else args.mission_id,
         parallel_peers=args.parallel_peers,

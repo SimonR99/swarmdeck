@@ -62,7 +62,7 @@ cp "$tmp/fixture/chunks/"* "$tmp/maps/$mission/$robot/geometry/chunks/"
 docker run -d --init --network none --user "$(id -u):$(id -g)" --name "$name" \
   -e "SWARMDECK_MISSION_ID=$mission" \
   -v "$tmp/maps:/maps" "$image" swarmdeck-mola-worker \
-  --mode persistent --maps-root /maps --timeout 30 --poll 1 --retry 2 \
+  --maps-root /maps --timeout 30 --poll 1 --retry 2 \
   --max-output-bytes 268435456 --keep-generations 2 >/dev/null
 
 for _ in $(seq 1 30); do

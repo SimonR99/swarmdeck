@@ -1352,6 +1352,35 @@ def test_cli_parses_parallel_peers_flag_and_environment_default(
         MolaWorker(Path("/maps"), mode="oneshot", parallel_peers=0)
 
 
+def test_cli_accepts_the_deprecated_persistent_mode_and_rejects_oneshot(
+    monkeypatch, capsys
+) -> None:
+    created: list[dict[str, object]] = []
+
+    class RecordingWorker:
+        def __init__(self, maps_root, **kwargs):
+            created.append(kwargs)
+
+        def run_forever(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "MolaWorker", RecordingWorker)
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", "12345678-1234-5678-9234-567812345678")
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--mode", "persistent"])
+    worker_module.main()
+    assert len(created) == 1 and "mode" not in created[0]
+    assert "--mode is deprecated" in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker"])
+    worker_module.main()
+    assert "deprecated" not in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--mode", "oneshot"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    assert len(created) == 2
+
+
 def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
     from autonomy.map_epochs import claim_map_epoch, read_map_epoch, write_peer_epochs
 
