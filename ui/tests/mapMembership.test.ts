@@ -1,21 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  globalMapMembers,
-  projectRobotToRaster,
-  type FrameTransforms
-} from '../src/lib/components/map2d/mapFrames.ts';
-import {
-  localRobotOf,
-  membersOnMap,
-  slamMergeMembers
-} from '../src/lib/components/map/mapMembership.ts';
+import { projectRobotToRaster, type FrameTransforms } from '../src/lib/components/map2d/mapFrames.ts';
+import { globalMapMembers, localRobotOf, membersOnMap } from '../src/lib/components/map/mapMembership.ts';
 import type { RobotState } from '../src/lib/types/protocol.ts';
 
 /*
- * Which robots the 2D canvas and the 3D scene draw. The two views used to
- * decide this separately; these cases pin what each decided before the rule
- * was shared, using the views' own code as it stood.
+ * Which robots the 2D canvas and the 3D scene draw. Both take the global
+ * map's members from one source, the displayed map (`mapStore.globalMapMembers`),
+ * and with no merge information both show every enabled robot. Before this was
+ * shared the 2D canvas showed nobody in that case and the 3D scene read the
+ * SLAM merge instead; the operator chose the 3D behaviour, since hiding robots
+ * is the worse failure. The one remaining difference is that the 2D canvas
+ * cannot draw a robot its raster has no transform for.
  */
 
 function robot(robot_id: string, navigation_transform?: { x: number; y: number; yaw: number }): RobotState {
@@ -40,45 +36,36 @@ interface ViewInput {
 
 const enabled = (input: ViewInput) => (id: string) => !(input.disabled ?? []).includes(id);
 
-/** MapView.svelte's robotsOnMap at 20279c1, with the stores passed in. */
-function legacy2D(input: ViewInput): string[] {
-  const isEnabled = enabled(input);
-  const fleetRobots = input.robots.filter((r) => isEnabled(r.robot_id));
-  const project = (r: RobotState) => projectRobotToRaster(r, input.transforms);
-  if (input.viewMode === 'local' && input.viewRobot) {
-    if (!isEnabled(input.viewRobot)) return [];
-    const r = input.robots.find((candidate) => candidate.robot_id === input.viewRobot);
-    const shown = r ? project(r) : null;
-    return shown ? [shown.robot_id] : [];
-  }
-  const members = globalMapMembers({
+/** mapStore.globalMapMembers with the stores passed in. */
+function displayedMembers(input: ViewInput) {
+  return globalMapMembers({
     showingOptimizedGrid: true,
     optimizedRobots: input.optimizedRobots,
     transforms: input.transforms,
     globalMembers: input.globalMembers
   });
-  if (members.length === 0) return [];
-  return fleetRobots
-    .filter((r) => members.includes(r.robot_id) && isEnabled(r.robot_id))
-    .map(project)
+}
+
+/** The robots either view has on its map, before the 2D canvas projects them. */
+function sharedMembers(input: ViewInput): RobotState[] {
+  return membersOnMap(input.robots, {
+    localRobot: localRobotOf(input.viewMode, input.viewRobot),
+    members: displayedMembers(input),
+    isEnabled: enabled(input)
+  });
+}
+
+/** MapView.svelte's robotsOnMap: the shared members its raster can place. */
+function view2D(input: ViewInput): string[] {
+  return sharedMembers(input)
+    .map((r) => projectRobotToRaster(r, input.transforms))
     .filter((r): r is RobotState => r !== null)
     .map((r) => r.robot_id);
 }
 
-/** Map3D.svelte's robotsOnMap at 20279c1 without a replica selected. */
-function legacy3D(input: ViewInput): string[] {
-  const isEnabled = enabled(input);
-  const fleetRobots = input.robots.filter((r) => isEnabled(r.robot_id));
-  if (input.viewMode === 'local' && input.viewRobot) {
-    if (!isEnabled(input.viewRobot)) return [];
-    const r = input.robots.find((candidate) => candidate.robot_id === input.viewRobot);
-    return r ? [r.robot_id] : [];
-  }
-  const members = input.globalMembers;
-  if (members && members.length > 0) {
-    return fleetRobots.filter((r) => members.includes(r.robot_id) && isEnabled(r.robot_id)).map((r) => r.robot_id);
-  }
-  return fleetRobots.filter((r) => isEnabled(r.robot_id)).map((r) => r.robot_id);
+/** Map3D.svelte's robotsOnMap without a replica selected. */
+function view3D(input: ViewInput): string[] {
+  return sharedMembers(input).map((r) => r.robot_id);
 }
 
 interface TacticalInput {
@@ -101,59 +88,52 @@ function legacyTactical(input: TacticalInput): string[] {
 const fleet3 = [robot('r0'), robot('r1'), robot('r2')];
 const placed = { r0: { x: 0, y: 0, yaw: 0 }, r1: { x: 1, y: 0, yaw: 0 } };
 
-const viewCases: { name: string; input: ViewInput; view2D: string[]; view3D: string[] }[] = [
+/** Both views draw `shown`, except where the 2D raster cannot place a member. */
+const viewCases: { name: string; input: ViewInput; shown: string[]; only2D?: string[] }[] = [
   {
     name: 'a local view shows its robot alone',
     input: { viewMode: 'local', viewRobot: 'r1', robots: fleet3, globalMembers: ['r0'] },
-    view2D: ['r1'],
-    view3D: ['r1']
+    shown: ['r1']
   },
   {
     name: 'a local view of a disabled robot shows nobody',
     input: { viewMode: 'local', viewRobot: 'r1', robots: fleet3, disabled: ['r1'] },
-    view2D: [],
-    view3D: []
+    shown: []
   },
   {
     name: 'a local view of an unknown robot shows nobody',
     input: { viewMode: 'local', viewRobot: 'r9', robots: fleet3 },
-    view2D: [],
-    view3D: []
-  },
-  {
-    name: 'a local view the raster cannot place shows nobody in 2D',
-    input: {
-      viewMode: 'local',
-      viewRobot: 'r1',
-      robots: [robot('r0'), robot('r1', { x: 0, y: 0, yaw: 0 })],
-      transforms: {}
-    },
-    view2D: [],
-    view3D: ['r1']
+    shown: []
   },
   {
     name: 'local mode without a robot is the global view',
     input: { viewMode: 'local', viewRobot: null, robots: fleet3, optimizedRobots: ['r2'], globalMembers: ['r0'] },
-    view2D: ['r2'],
-    view3D: ['r0']
+    shown: ['r2']
   },
   {
-    name: 'the global raster shows its catalogue scope in fleet order',
+    name: 'the global map shows its catalogue scope in fleet order',
     input: { viewMode: 'global', viewRobot: null, robots: fleet3, optimizedRobots: ['r2', 'r0'], globalMembers: ['r1'] },
-    view2D: ['r0', 'r2'],
-    view3D: ['r1']
+    shown: ['r0', 'r2']
   },
   {
-    name: 'without a scope the raster shows who its transforms placed',
+    name: 'without a scope the global map shows who its transforms placed',
     input: { viewMode: 'global', viewRobot: null, robots: fleet3, optimizedRobots: [], transforms: placed },
-    view2D: ['r0', 'r1'],
-    view3D: ['r0', 'r1', 'r2']
+    shown: ['r0', 'r1']
   },
   {
-    name: 'nothing known places nobody in 2D and everybody in 3D',
+    name: 'nothing known places every robot',
     input: { viewMode: 'global', viewRobot: null, robots: fleet3 },
-    view2D: [],
-    view3D: ['r0', 'r1', 'r2']
+    shown: ['r0', 'r1', 'r2']
+  },
+  {
+    name: 'empty merge information places every robot',
+    input: { viewMode: 'global', viewRobot: null, robots: fleet3, optimizedRobots: [], transforms: {}, globalMembers: [] },
+    shown: ['r0', 'r1', 'r2']
+  },
+  {
+    name: 'the SLAM merge alone does not name the displayed map\'s members',
+    input: { viewMode: 'global', viewRobot: null, robots: fleet3, globalMembers: ['r1'] },
+    shown: ['r0', 'r1', 'r2']
   },
   {
     name: 'disabled robots are never drawn globally',
@@ -161,18 +141,37 @@ const viewCases: { name: string; input: ViewInput; view2D: string[]; view3D: str
       viewMode: 'global', viewRobot: null, robots: fleet3, disabled: ['r0'],
       optimizedRobots: ['r0', 'r1'], globalMembers: ['r0', 'r2']
     },
-    view2D: ['r1'],
-    view3D: ['r2']
+    shown: ['r1']
   },
   {
-    name: 'a member the raster cannot place is dropped in 2D only',
+    name: 'disabled robots are never drawn when nothing is known',
+    input: { viewMode: 'global', viewRobot: null, robots: fleet3, disabled: ['r2'] },
+    shown: ['r0', 'r1']
+  }
+];
+
+/* The exception: the canvas cannot draw a robot its raster has no transform for. */
+const rasterCases: typeof viewCases = [
+  {
+    name: 'a local view the raster cannot place',
+    input: {
+      viewMode: 'local',
+      viewRobot: 'r1',
+      robots: [robot('r0'), robot('r1', { x: 0, y: 0, yaw: 0 })],
+      transforms: {}
+    },
+    shown: ['r1'],
+    only2D: []
+  },
+  {
+    name: 'a member the raster cannot place',
     input: {
       viewMode: 'global', viewRobot: null,
       robots: [robot('r0', { x: 0, y: 0, yaw: 0 }), robot('r1', { x: 0, y: 0, yaw: 0 })],
       optimizedRobots: ['r0', 'r1'], transforms: { r0: { x: 0, y: 0, yaw: 0 } }, globalMembers: ['r0', 'r1']
     },
-    view2D: ['r0'],
-    view3D: ['r0', 'r1']
+    shown: ['r0', 'r1'],
+    only2D: ['r0']
   }
 ];
 
@@ -201,36 +200,7 @@ const tacticalCases: { name: string; input: TacticalInput; expected: string[] }[
   }
 ];
 
-/** MapView.svelte's robotsOnMap on the shared rule. */
-function shared2D(input: ViewInput): string[] {
-  const isEnabled = enabled(input);
-  const members = globalMapMembers({
-    showingOptimizedGrid: true,
-    optimizedRobots: input.optimizedRobots,
-    transforms: input.transforms,
-    globalMembers: input.globalMembers
-  });
-  return membersOnMap(input.robots.filter((r) => isEnabled(r.robot_id)), {
-    localRobot: localRobotOf(input.viewMode, input.viewRobot),
-    members,
-    isEnabled
-  })
-    .map((r) => projectRobotToRaster(r, input.transforms))
-    .filter((r): r is RobotState => r !== null)
-    .map((r) => r.robot_id);
-}
-
-/** Map3D.svelte's robotsOnMap on the shared rule, without a replica. */
-function shared3D(input: ViewInput): string[] {
-  const isEnabled = enabled(input);
-  return membersOnMap(input.robots.filter((r) => isEnabled(r.robot_id)), {
-    localRobot: localRobotOf(input.viewMode, input.viewRobot),
-    members: slamMergeMembers(input.globalMembers),
-    isEnabled
-  }).map((r) => r.robot_id);
-}
-
-/** Map3D.svelte's robotsOnMap on the shared rule, on a live replica frame. */
+/** Map3D.svelte's robotsOnMap on a live replica frame. */
 function sharedTactical(input: TacticalInput): string[] {
   return membersOnMap(input.frameRobots.filter((r) => r.fresh), {
     localRobot: input.scope === 'robot' ? input.robotId : null,
@@ -239,12 +209,17 @@ function sharedTactical(input: TacticalInput): string[] {
   }).map((r) => r.robot_id);
 }
 
-for (const { name, input, view2D, view3D } of viewCases) {
-  test(`2D and 3D membership: ${name}`, () => {
-    assert.deepEqual(legacy2D(input), view2D, '2D');
-    assert.deepEqual(legacy3D(input), view3D, '3D');
-    assert.deepEqual(shared2D(input), view2D, 'shared 2D');
-    assert.deepEqual(shared3D(input), view3D, 'shared 3D');
+for (const { name, input, shown } of viewCases) {
+  test(`2D and 3D show the same robots: ${name}`, () => {
+    assert.deepEqual(view2D(input), shown, '2D');
+    assert.deepEqual(view3D(input), shown, '3D');
+  });
+}
+
+for (const { name, input, shown, only2D } of rasterCases) {
+  test(`only the 2D canvas drops a robot it cannot place: ${name}`, () => {
+    assert.deepEqual(view3D(input), shown, '3D');
+    assert.deepEqual(view2D(input), only2D, '2D');
   });
 }
 

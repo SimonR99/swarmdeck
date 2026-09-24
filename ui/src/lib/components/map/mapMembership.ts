@@ -1,12 +1,14 @@
+import type { FrameTransforms } from './overlayFrame.ts';
+
 /**
  * Which robots a map draws: the one rule the 2D canvas and the 3D scene share.
  *
  * A robot is drawn when it is enabled and belongs to what the map shows. A
- * local view belongs to one robot. A global view shows the members of its
- * source, which each view names: the displayed raster's scope for the canvas
- * (`globalMapMembers` in map2d/mapFrames.ts), the SLAM merge for the 3D scene
- * without a replica (`slamMergeMembers`), and every robot a live replica frame
- * carries (`members: null`).
+ * local view belongs to one robot. A global view shows the members of the
+ * displayed map (`globalMapMembers`), the same for both views, and every robot
+ * a live replica frame carries (`members: null`). With no merge information at
+ * all, a global view shows every enabled robot: hiding robots from the
+ * operator is the worse failure.
  */
 export interface MapMembership {
   /** The robot a local view belongs to; null for a global view. */
@@ -35,7 +37,29 @@ export function localRobotOf(viewMode: 'global' | 'local', viewRobot: string | n
   return viewMode === 'local' ? viewRobot : null;
 }
 
-/** The SLAM merged map's members, or every robot while it reports none. */
-export function slamMergeMembers(globalMembers: readonly string[] | null | undefined): readonly string[] | null {
-  return globalMembers && globalMembers.length > 0 ? globalMembers : null;
+/** What the displayed global map knows about who belongs on it. */
+export interface GlobalMapSource {
+  showingOptimizedGrid: boolean;
+  optimizedRobots?: readonly string[] | null;
+  transforms: FrameTransforms;
+  globalMembers?: readonly string[] | null;
+}
+
+/**
+ * Robot ids that belong on the displayed global map, or null when nothing
+ * names them and every robot is shown. While an optimized raster is on show,
+ * the merged SLAM map's membership says nothing about it (the central SLAM
+ * service can be idle with an empty merged grid while the composite or a
+ * merged component is displayed), so the members are the robots the displayed
+ * scope lists in the catalogue, else every robot the raster's transform header
+ * placed. Otherwise the SLAM merged map's own members.
+ */
+export function globalMapMembers(source: GlobalMapSource): readonly string[] | null {
+  const { showingOptimizedGrid, optimizedRobots, transforms, globalMembers } = source;
+  if (showingOptimizedGrid) {
+    if (optimizedRobots && optimizedRobots.length > 0) return [...optimizedRobots];
+    const placed = Object.keys(transforms ?? {});
+    return placed.length > 0 ? placed : null;
+  }
+  return globalMembers && globalMembers.length > 0 ? [...globalMembers] : null;
 }

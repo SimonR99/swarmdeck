@@ -3,11 +3,7 @@
   import { CanvasViewport, type CanvasView } from './canvasViewport';
   import { CanvasInteraction, qualifiedNavigateTargets } from './canvasInteraction';
   import { MAP_POLL_TICK_MS, MapPollScheduler } from './mapPollScheduler';
-  import {
-    globalMapMembers,
-    RasterRobotProjectionCache,
-    RasterTrailProjectionCache
-  } from './mapFrames';
+  import { RasterRobotProjectionCache, RasterTrailProjectionCache } from './mapFrames';
   import { localRobotOf, membersOnMap } from '../map/mapMembership';
   import {
     Box,
@@ -117,18 +113,9 @@
   const { screenOf } = viewport;
 
   function robotsOnMap() {
-    // The displayed raster decides who is on it: the optimized scope's robots
-    // (the composite or a merged component may be shown while the SLAM merged
-    // map reports no members at all), else the robots its transforms placed.
-    const members = globalMapMembers({
-      showingOptimizedGrid: mapStore.showingOptimizedGrid,
-      optimizedRobots: mapStore.globalOptimizedRobots,
-      transforms: mapStore.info?.transforms,
-      globalMembers: mapStore.status?.global_members
-    });
     return membersOnMap(fleet.robots, {
       localRobot: localRobotOf(mapStore.viewMode, mapStore.viewRobot),
-      members,
+      members: mapStore.globalMapMembers,
       isEnabled: (id) => fleet.isEnabled(id)
     })
       .map((robot) => overlayCache.project(robot, mapStore.info?.transforms))

@@ -5,7 +5,6 @@ import {
   routePositions
 } from '../src/lib/components/map3d/mapFrames.ts';
 import {
-  globalMapMembers,
   hasQualifiedRasterFrame,
   projectRobotToRaster,
   projectTrailToRaster,
@@ -13,6 +12,7 @@ import {
   RasterRobotProjectionCache,
   RasterTrailProjectionCache
 } from '../src/lib/components/map2d/mapFrames.ts';
+import { globalMapMembers } from '../src/lib/components/map/mapMembership.ts';
 import {
   applyPlanarTransform,
   overlayFrameOnGlobalGrid,
@@ -196,16 +196,18 @@ test('the SLAM merged grid keeps its own membership', () => {
   );
   assert.deepEqual(
     globalMapMembers({ showingOptimizedGrid: false, transforms: undefined, globalMembers: [] }),
-    []
+    null
   );
 });
 
-test('nothing known about the global map places nobody on it', () => {
-  assert.deepEqual(globalMapMembers({ showingOptimizedGrid: false, transforms: undefined }), []);
-  assert.deepEqual(globalMapMembers({ showingOptimizedGrid: true, transforms: undefined }), []);
-  assert.deepEqual(
+test('nothing known about the global map places every robot on it', () => {
+  // Operator decision: hiding robots is the worse failure, so both views show
+  // everyone rather than nobody (the 2D canvas used to show nobody here).
+  assert.equal(globalMapMembers({ showingOptimizedGrid: false, transforms: undefined }), null);
+  assert.equal(globalMapMembers({ showingOptimizedGrid: true, transforms: undefined }), null);
+  assert.equal(
     globalMapMembers({ showingOptimizedGrid: true, optimizedRobots: null, transforms: {}, globalMembers: null }),
-    []
+    null
   );
 });
 
