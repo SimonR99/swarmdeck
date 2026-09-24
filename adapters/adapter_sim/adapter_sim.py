@@ -54,6 +54,7 @@ from adapters.runtime import (
     AdapterTelemetryMixin,
     TRANSPORT_DEFAULTS,
     deep_merge,
+    goal_lock_if_free,
     stamp_seconds,
     yaw_of,
 )
@@ -306,6 +307,9 @@ class RobotBridge(
         self._detections: list[dict] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        # Never hold _goal_lock while waiting on anything the ROS spin thread
+        # must process (service replies, action futures): that thread's
+        # callbacks take this lock too. See adapters/protocol/README.md.
         self._goal_lock = threading.RLock()
         self._nav_execution_enabled = False
         self._last_link_at = 0.0
@@ -925,6 +929,8 @@ class RobotBridge(
         if exploration is not None:
             exploration.stop()
         with self._goal_lock:
+            # A latched drive must not re-apply after this stop.
+            self._pending_drive = None
             self._cancel_nav()
             self.pub_cmd.publish(Twist())
             self.goal = None
@@ -954,6 +960,8 @@ class RobotBridge(
 
     def cancel(self) -> int:
         with self._goal_lock:
+            # A latched drive must not re-apply after a cancel.
+            self._pending_drive = None
             self._cancel_nav()
             self.pub_cmd.publish(Twist())
             self.goal = None
@@ -1012,7 +1020,8 @@ class RobotBridge(
     def route_progress_watchdog(self) -> bool:
         """Cancel a FollowPath goal whose progress along the route stalled."""
         try:
-            return route_progress_tick(self)
+            with goal_lock_if_free(self) as held:
+                return held and route_progress_tick(self)
         except Exception as exc:
             # A supervisor must never take the state loop, and with it the
             # operator link, down with it.

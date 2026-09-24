@@ -796,6 +796,8 @@ class HardwareBridge(
         self.pub_nav_joy.publish(msg)
 
     def cancel_goal(self) -> None:
+        # A latched drive must not re-apply after a cancel or stop.
+        self._pending_drive = None
         self._goal_generation += 1
         if self.nav_client is not None:
             try:

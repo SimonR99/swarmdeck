@@ -912,6 +912,98 @@ def test_link_watchdog_ignores_a_robot_that_is_not_navigating(mod):
     bridge.pub_cmd.publish.assert_not_called()
 
 
+class _HeldGoalLock:
+    """Hold ``bridge._goal_lock`` from another thread, as a session worker does."""
+
+    def __init__(self, bridge):
+        self._lock = bridge._goal_lock
+        self._taken = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=self._hold, daemon=True)
+
+    def _hold(self):
+        with self._lock:
+            self._taken.set()
+            self._release.wait(5.0)
+
+    def __enter__(self):
+        self._thread.start()
+        assert self._taken.wait(1.0)
+        return self
+
+    def __exit__(self, *_exc):
+        self._release.set()
+        self._thread.join(1.0)
+
+
+def test_ros_thread_watchdog_never_waits_for_a_held_goal_lock(mod):
+    """C1: the 20 Hz timer shares the ROS thread with the replies a lock
+    holder may be waiting on, so it must skip a busy lock, not block on it."""
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge._pending_drive = None
+    bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge.goal = {"x": 1.0, "y": 2.0}
+    bridge._last_link_at = time.monotonic() - 1.0
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge._watchdogs()
+        assert time.monotonic() - started < 0.1
+        assert bridge.nav_status == "active"
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge._watchdogs()  # The next tick after release cancels the stale link.
+    assert bridge.nav_status == "cancelled"
+    assert bridge._goal_handle is None
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+def test_pending_drive_waits_for_the_next_tick_while_the_goal_lock_is_held(mod):
+    import time
+
+    bridge = _bridge(mod)
+    bridge._pending_drive = None
+    bridge.note_drive_command(0.2, -0.1)
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge.apply_pending_drive()
+        assert time.monotonic() - started < 0.1
+        assert bridge._pending_drive == (0.2, -0.1)
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge.apply_pending_drive()
+    assert bridge._pending_drive is None
+    sent = bridge.pub_cmd.publish.call_args[0][0]
+    assert sent.linear.x == 0.2 and sent.angular.z == -0.1
+
+
+def test_nav_cmd_vel_sample_is_dropped_while_the_goal_lock_is_held(mod):
+    import time
+
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
+    twist = MagicMock()
+
+    with _HeldGoalLock(bridge):
+        started = time.monotonic()
+        bridge._on_nav_cmd_vel(twist)
+        assert time.monotonic() - started < 0.1
+        bridge.pub_cmd.publish.assert_not_called()
+
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_called_once_with(twist)
+
+
 def _link_bridge(mod, hooks):
     """A bridge that is nothing but the surface `run_robot` drives."""
 
@@ -1299,3 +1391,85 @@ def test_rejected_or_cancelled_hardware_goals_do_not_claim_acceptance(mod):
     bridge.exploration.controller_finished.assert_called_once_with()
     bridge.cancel_goal()
     bridge.exploration.controller_finished.assert_called_once_with()
+
+
+class _PendingTrigger:
+    """A Trigger service whose reply only the (simulated) ROS thread delivers."""
+
+    def __init__(self):
+        self.called = threading.Event()
+        self.replied = threading.Event()
+
+    def wait_for_service(self, timeout_sec=None):
+        return True
+
+    def call_async(self, _request):
+        self.called.set()
+        return self
+
+    def done(self):
+        return self.replied.is_set()
+
+    def result(self):
+        return SimpleNamespace(success=True, message="")
+
+
+def test_body_command_waits_on_its_service_without_holding_the_goal_lock(mod):
+    """C1: while a body command waits on a reply, the ROS thread's watchdog
+    and an action result callback both complete promptly and can deliver it."""
+    import asyncio
+    import time
+
+    from adapters.session import dispatch_command
+
+    bridge = _bridge(mod, {"link_timeout_s": 0.05})
+    bridge._pending_drive = None
+    trigger = _PendingTrigger()
+    bridge._body_clients = {"sit": trigger}
+    bridge.nav_status = "active"
+    bridge._goal_handle = MagicMock(accepted=True)
+    bridge._last_link_at = time.monotonic() - 1.0
+    generation = bridge._goal_generation
+    result = MagicMock()
+    result.result.side_effect = RuntimeError("result channel failed")
+    durations = {}
+
+    def ros_thread():
+        assert trigger.called.wait(2.0)
+        started = time.monotonic()
+        bridge._watchdogs()
+        durations["watchdog"] = time.monotonic() - started
+        started = time.monotonic()
+        # The watchdog's cancel made this result stale; it still takes the lock.
+        bridge._on_goal_result(result, generation)
+        durations["result"] = time.monotonic() - started
+        trigger.replied.set()
+
+    spin = threading.Thread(target=ros_thread, daemon=True)
+    spin.start()
+    started = time.monotonic()
+
+    async def body_command():
+        loop = asyncio.get_running_loop()
+        await dispatch_command(bridge, {"type": "body_command", "action": "sit"}, loop)
+
+    asyncio.run(body_command())
+    spin.join(2.0)
+
+    assert durations["watchdog"] < 0.1 and durations["result"] < 0.1
+    assert time.monotonic() - started < 1.0
+    assert bridge.nav_status == "cancelled"  # The stale-link cancel ran.
+
+
+@pytest.mark.parametrize("command", ["stop", "cancel_goal"])
+def test_stop_and_cancel_drop_a_latched_drive(mod, command):
+    """M1: Stop inside the 50 ms latch window must not be overwritten."""
+    bridge = _bridge(mod)
+    bridge.note_drive_command(0.3, 0.0)
+
+    getattr(bridge, command)()
+    bridge.pub_cmd.publish.reset_mock()
+    bridge.apply_pending_drive()
+
+    assert bridge._pending_drive is None
+    bridge.pub_cmd.publish.assert_not_called()

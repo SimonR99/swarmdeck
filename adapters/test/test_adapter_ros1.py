@@ -571,3 +571,17 @@ def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
     }
     assert subscribed[bridge.cfg["topics"]["odom"]] is mod.Odometry
     assert subscribed[bridge.cfg["topics"]["plan"]] is mod.NavPath
+
+
+@pytest.mark.parametrize("command", ["stop", "cancel_goal"])
+def test_stop_and_cancel_drop_a_latched_drive(mod, command):
+    """M1: a latched drive must not re-apply after the command that ended it."""
+    bridge = _bridge(mod)
+    bridge.note_drive_command(0.3, 0.0)
+
+    getattr(bridge, command)()
+    bridge.pub_cmd.publish.reset_mock()
+    bridge.apply_pending_drive()
+
+    assert bridge._pending_drive is None
+    bridge.pub_cmd.publish.assert_not_called()

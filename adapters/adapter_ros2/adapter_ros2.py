@@ -212,6 +212,9 @@ class HardwareBridge(
         self.goal: dict[str, float] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        # Never hold _goal_lock while waiting on anything the ROS spin thread
+        # must process (service replies, action futures): that thread's
+        # callbacks take this lock too. See adapters/protocol/README.md.
         self._goal_lock = threading.RLock()
         self._nav_execution_enabled = False
         self._nav_enable_on_accept = False
@@ -1689,6 +1692,8 @@ class HardwareBridge(
 
     def cancel_goal(self) -> int:
         with self._goal_lock:
+            # A latched drive must not re-apply after a cancel or stop.
+            self._pending_drive = None
             self._goal_generation += 1
             generation = self._goal_generation
             self._nav_execution_enabled = False

@@ -98,8 +98,9 @@ The simulation session remaps Nav2's smoothed output to
 gate as ROS 2 hardware and is the sole publisher to `/<robot_id>/cmd_vel`:
 only an accepted, current route with an active status and fresh operator link
 can relay Nav2 output. Both adapters run the shared 20 Hz ROS watchdog separately
-from websocket telemetry: a stale link cancels active navigation, publishes
-a stop and reports `cancelled` rather than merely holding the velocity relay
+from websocket telemetry (20 Hz of simulation time in the sim, whose node runs on
+`use_sim_time`, so the rate follows the real-time factor): a stale link cancels
+active navigation, publishes a stop and reports `cancelled` rather than merely holding the velocity relay
 closed. The same watchdog
 consumes pending manual-drive commands and enforces their deadman timeout.
 Pending routes, cancellation, stop, and manual drive
@@ -119,6 +120,44 @@ action's terminal result. Generation checks still reject superseded commands.
 Simulation retains its separate conservative recovery rule: loss of action
 monitoring suppresses automatic reverse escape, but does not prevent a new
 owned route from being planned.
+
+Known gap: the simulation adapter asks `navigation_startup` to recover Nav2
+only while the controller's `FollowPath` action server cannot be discovered.
+Once `navigation_startup` has used up its automatic retries (see
+`deploy/dds/README.md`), a controller that is visible but not active, for
+example because its velocity smoother is missing, is never recovered
+automatically: the robot rejects every goal. The operator must restart the
+simulation.
+
+### Goal lock and the ROS spin thread
+
+The ROS 2 hardware and simulation bridges serialize goal ownership with one
+`_goal_lock`. Each bridge runs one ROS spin thread, and that thread processes
+service replies, action futures, subscriptions and timers. Its callbacks also
+take `_goal_lock`. The rule is:
+
+**Never hold `_goal_lock` while waiting on anything the ROS spin thread must
+process.**
+
+A holder that polls a service reply blocks the spin thread on the lock, so the
+reply never arrives and every wait runs to its timeout. The session therefore
+checks a body command's map epoch under the lock and then runs
+`body_command` without it. A body action does not use the map, so an epoch
+advance while it runs changes nothing it depends on.
+
+The periodic ROS-thread callbacks never wait for the lock: the link and
+deadman watchdogs, the latched manual drive, the route progress watchdog and
+the Nav2 velocity relay check cheaply without it, take it only if it is free,
+and otherwise skip to the next tick or velocity sample. The one-shot action
+callbacks and the exploration, goal-exploration, mapping-authority and
+objective-planning callbacks still take the lock with a blocking acquire. The
+rule above keeps those waits short.
+
+Known remaining risk: if a planner lacks `claim_objective`/`execute_claimed`,
+the session's fallback for `plan_objective` and `return_home` calls the
+bridge's planner with the lock held, and that planner waits on MGG replies.
+Neither in-tree bridge reaches this fallback, because their objective planner
+provides both methods.
 
 ## Collaborative graph
 
