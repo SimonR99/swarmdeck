@@ -261,6 +261,8 @@ def test_sim_planners_share_roadmaps_on_one_topic(launch_module, monkeypatch, tm
         assert ("neighbour_graph_out", "/mgg/graphs") in planner.remappings
         assert ("neighbour_graph_in", "/mgg/graphs") in planner.remappings
         assert planner.parameters[-1]["neighbour_pose_source"] == "topic"
+        # No static offset names a real (1-based) robot id.
+        assert planner.parameters[-1]["neighbour_offsets"] == [0.0, 0.0, 0.0, 0.0]
     # One transform publisher per robot, naming the other robots; cslam is
     # the default source.
     processes = robot_pose_processes(nodes)

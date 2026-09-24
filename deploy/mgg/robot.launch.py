@@ -81,8 +81,11 @@ def robot_nodes(
         # simulation policy did before the ros2 port.
         "allow_unknown_lattice_body": sim_time,
         # Other robots' roadmaps are placed with live inter-robot transforms
-        # from robot_poses.py, never the parameter file's static offsets.
+        # from robot_poses.py, never the parameter file's static offsets
+        # (all zero in bistro.yaml). The offsets name only robot id 0, which
+        # no planner has, so an MGG without the topic source merges nothing.
         "neighbour_pose_source": "topic",
+        "neighbour_offsets": [0.0, 0.0, 0.0, 0.0],
     }
     overrides.update(planner_overrides or {})
     overrides.update(map_backend_parameters(robot))
