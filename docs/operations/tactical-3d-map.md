@@ -114,7 +114,7 @@ only for a forward/left/up camera frame with a corresponding calibrated TF.
 
 Hardware adapters no longer color or upload registered scans and optimized
 keyframes. The former `map_color` profile block and `camera_color_info` adapter
-topic do not enable map coloring. Configure the peer mapper's calibrated
+topic (it is still used to align detections with depth) do not enable map coloring. Configure the peer mapper's calibrated
 RGB/depth inputs above instead; hardware bring-up must qualify those inputs
 before measured Camera coloring is available. In the 3D viewer, select
 **Camera** once newly captured colored submaps arrive. Historical XYZ-only
