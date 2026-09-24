@@ -9,7 +9,7 @@ Provides CLI and programmatic tools for Cortex and operators to:
 - Stop robot(s) immediately
 - Inspect vision / camera frames ("what are you seeing on this robot")
 - Explain media-pipeline access for retired camera snapshot commands
-- Inspect image files for multimodal understanding
+- Report unavailable image-file inspection
 - Inspect YOLOE live detections and operator proposals
 - Diagnose telemetry, camera, RTSP, SSH, and required robot services in one call
 """
@@ -1131,14 +1131,13 @@ def main() -> None:
 
     # inspect
     p_inspect = subparsers.add_parser(
-        "inspect", help="Inspect and analyze an image file"
+        "inspect", help="Report unavailable image-file inspection"
     )
     p_inspect.add_argument("image_path", help="Path to image file")
 
     def _run_inspect(args):
-        from agent.tools.vision import cmd_inspect
-
-        cmd_inspect(args)
+        print("image inspection is not available in robot_tool", file=sys.stderr)
+        sys.exit(1)
 
     p_inspect.set_defaults(func=_run_inspect)
 
