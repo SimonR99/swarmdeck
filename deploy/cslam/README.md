@@ -22,7 +22,11 @@
   nonfinite-point rejection are unchanged.
 
 The bridge normalizes directly in the cloud callback and flushes captures on
-keyframe and raw-provenance events. There are no idle 20 Hz normalization or
+keyframe and raw-provenance events. Each DDS-delivered cloud is now considered:
+the previous 50 ms latest-cloud coalescing is gone. At the configured 10 Hz lidar
+rate this does not increase normal work, but under executor overload up to the
+sensor QoS queue depth (5) of queued clouds can be considered. A newer cloud still
+replaces an older cloud waiting for capture-time TF. There are no idle 20 Hz normalization or
 10 Hz capture-join polls. Missing capture-time TF arms an on-demand steady-clock
 retry, backing off from 50 ms to 1 s. A pending cloud is discarded after the
 existing 3 s sensor-freshness limit, with a rate-limited warning; a newer cloud
