@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { fetchJsonWithTimeout, resetRequestId, resetRobotMap } from '../src/lib/api/resetHttp.ts';
+import { canResetSimulation, fetchJsonWithTimeout, resetRequestId, resetRobotMap } from '../src/lib/api/resetHttp.ts';
+
+test('simulation reset is visible only with an explicitly available supervisor', () => {
+  assert.equal(canResetSimulation({ supervisor_available: true }), true);
+  assert.equal(canResetSimulation({ supervisor_available: false }), false);
+  assert.equal(canResetSimulation({}), false);
+  assert.equal(canResetSimulation(undefined), false);
+  assert.equal(canResetSimulation({ supervisor_available: 'true' }), false);
+});
 
 test('reset request IDs use getRandomValues and set UUID v4/variant bits', () => {
   const id = resetRequestId((bytes) => {

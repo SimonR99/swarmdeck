@@ -47,8 +47,12 @@ explicitly unavailable rather than falling back to a rendered-map clear.
 ## Reset the entire simulation
 
 The simulation reset uses a host-side supervisor, configured on the server by
-`SWARMDECK_SIM_RESET_DIR`. Without it, a reset request fails with an error and
-changes nothing.
+`SWARMDECK_SIM_RESET_DIR`. The dashboard's **Reset sim** button appears only
+when `GET /api/sim/reset` reports `supervisor_available: true`, not merely when
+a robot advertises a reset capability. Without a supervisor,
+`POST /api/sim/reset` fails and changes nothing: detections, alerts and goals
+are not cleared. Hardware fleets reset maps per robot through the epoch path
+above (with a qualified robot-local supervisor), not through simulation reset.
 
 The server writes a bounded request to the shared reset directory and returns
 immediately. The supervisor stops the configured simulation services, writes a
