@@ -1109,7 +1109,9 @@ def main() -> None:
     )
     p_snap.add_argument("robot_id", help="Target robot ID")
     p_snap.add_argument(
-        "--save", default=None, help="File path to save the JPEG snapshot"
+        "--save",
+        default=None,
+        help="Ignored compatibility option; snapshots are not saved",
     )
 
     def _run_snap(args):
@@ -1125,7 +1127,9 @@ def main() -> None:
     p_snapshot = subparsers.add_parser("snapshot", help="Alias for snap")
     p_snapshot.add_argument("robot_id", help="Target robot ID")
     p_snapshot.add_argument(
-        "--save", default=None, help="File path to save the JPEG snapshot"
+        "--save",
+        default=None,
+        help="Ignored compatibility option; snapshots are not saved",
     )
     p_snapshot.set_defaults(func=_run_snap)
 

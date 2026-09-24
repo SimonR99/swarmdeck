@@ -25,3 +25,19 @@ def test_snapshot_command_exits_cleanly_with_media_pipeline_guidance(command, tm
     )
     assert "Traceback" not in result.stdout + result.stderr
     assert not output.exists()
+
+
+@pytest.mark.parametrize("command", ["snap", "snapshot"])
+def test_snapshot_help_marks_save_as_ignored_compatibility_option(command):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "robot_tool.py"
+    result = subprocess.run(
+        [sys.executable, str(script), command, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0
+    help_text = " ".join(result.stdout.split())
+    assert "--save SAVE" in help_text
+    assert "Ignored compatibility option; snapshots are not saved" in help_text
