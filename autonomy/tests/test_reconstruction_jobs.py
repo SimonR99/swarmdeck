@@ -244,7 +244,7 @@ def test_bridge_source_contract_has_dynamic_keyframe_and_atomic_solution_outputs
     source = (
         Path(__file__)
         .parents[2]
-        .joinpath("deploy", "autonomy", "cslam_bridge.py")
+        .joinpath("swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/cslam_bridge.py")
         .read_text()
     )
     assert 'f"/{self.robot}/keyframes"' in source

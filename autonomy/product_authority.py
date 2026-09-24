@@ -40,7 +40,7 @@ from .map_epochs import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .cslam import FrameState
 
-# Matches MAX_SNAPSHOT_BYTES (deploy/autonomy/mola_worker.py, the source.json
+# Matches MAX_SNAPSHOT_BYTES (swarmdeck_peer/mola_worker.py, the source.json
 # the worker reads to build this product) and MGG's own product limit: a
 # reader must never reject a product the worker and MGG both accept. 4 MiB
 # was a latent failure at about 2,400 keyframes.
@@ -49,7 +49,7 @@ MAX_PRODUCT_COMPONENTS = 256
 DEFAULT_READ_ATTEMPTS = 3
 READ_RETRY_PAUSE_S = 0.005
 # ``<peer>/mola/worker.json``: the worker's last build attempt for the peer
-# (``deploy/autonomy/mola_worker.py``, ``WORKER_STATUS_VERSION``).
+# (``swarmdeck_peer/mola_worker.py``, ``WORKER_STATUS_VERSION``).
 MAX_WORKER_STATUS_BYTES = 64 * 1024
 WORKER_STATUS_VERSION = 1
 MAX_WORKER_ERROR_CHARS = 2000

@@ -33,8 +33,8 @@ def test_mapping_image_builds_and_smokes_the_persistent_runtime():
     assert "swarmdeck-mola-import" in dockerfile
     assert "swarmdeck-mola-import --serve" in dockerfile
     assert (
-        "COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py"
-        in dockerfile
+        "COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_process.py"
+        " /usr/local/bin/mola_process.py" in dockerfile
     )
     assert "COPY swarmdeck_ros/src/swarmdeck_mola src/swarmdeck_mola" in dockerfile
     assert "--packages-select swarmdeck_mapping swarmdeck_mola" in dockerfile

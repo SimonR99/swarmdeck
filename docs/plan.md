@@ -40,9 +40,9 @@ hard constraints, enforced as edge admissibility while the graphs are built.
 | Concern | Authority | Source |
 | --- | --- | --- |
 | Continuous local motion estimate | One selected odometry frontend per robot and session | `adapters/`, estimator containers |
-| Collaborative keyframe poses and component membership | Peer Swarm-SLAM solution adapter | `deploy/cslam/`, `deploy/autonomy/` |
+| Collaborative keyframe poses and component membership | Peer Swarm-SLAM solution adapter | `deploy/cslam/`, `swarmdeck_ros/src/swarmdeck_peer/` |
 | Occupancy, surface geometry, map revisions | Native MOLA mapper | `swarmdeck_ros/src/swarmdeck_mapping/` |
-| Snapshot contracts and coordination | Peer mapping layer | `autonomy/`, `deploy/autonomy/` |
+| Snapshot contracts and coordination | Peer mapping layer | `autonomy/`, `swarmdeck_ros/src/swarmdeck_peer/` |
 | Robot feasibility | Shared traversal model, used by both planners and the controller | `deploy/mgg/` |
 | Exploration routes and navigation goals | MGG graph and grid planning | `deploy/mgg/` |
 | Actuator commands and cancellation | Onboard command arbiter in the adapter | `adapters/` |

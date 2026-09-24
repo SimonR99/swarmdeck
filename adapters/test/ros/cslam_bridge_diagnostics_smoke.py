@@ -16,8 +16,8 @@ from adapters import reconstruction  # cslam_bridge imports colorize from here
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
-from deploy.autonomy import cslam_bridge
-from deploy.autonomy.cslam_bridge import Bridge
+from swarmdeck_peer import cslam_bridge
+from swarmdeck_peer.cslam_bridge import Bridge
 from rclpy.clock import ClockType
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor

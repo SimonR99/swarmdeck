@@ -37,9 +37,9 @@ services:
       SWARMDECK_MISSION_GC_DRY_RUN: "${SWARMDECK_MISSION_GC_DRY_RUN:-false}"
     volumes:
       - ../../autonomy:/app/autonomy:ro
-      - ../autonomy:/app/deploy/autonomy:ro
+      - ../../swarmdeck_ros/src/swarmdeck_peer:/cslam_ws/src/swarmdeck_peer:ro
       - onboard_peer_maps:/maps
-    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch swarmdeck_peer peer.launch.py"]
     restart: "no"
 
   # Server-independent MOLA serialization of the peer's coherent snapshots.

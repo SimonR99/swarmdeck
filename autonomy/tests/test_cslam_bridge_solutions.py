@@ -1,6 +1,6 @@
 """The bridge's optimizer-result statistics follow the core's adoption rule.
 
-``deploy/autonomy/cslam_bridge.py`` imports the ROS stack at module scope,
+``swarmdeck_peer/cslam_bridge.py`` imports the ROS stack at module scope,
 but ``Bridge.optimized`` is pure bookkeeping over ``CslamMapper.solution``
 and deserves to run under pytest: it drifted once already, counting
 acceptance by the adopted order after the core moved acceptance to
@@ -27,7 +27,7 @@ from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 
 REPO = Path(__file__).resolve().parents[2]
-BRIDGE_SOURCE = REPO / "deploy" / "autonomy" / "cslam_bridge.py"
+BRIDGE_SOURCE = REPO / "swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/cslam_bridge.py"
 
 STUBBED_ROS_MODULES = [
     "rclpy",
@@ -68,11 +68,11 @@ def bridge_module():
     tf2.Buffer, tf2.TransformListener = MagicMock(), MagicMock()
     tf2.TransformException = type("TransformException", (Exception,), {})
     sys.modules["tf2_ros"] = tf2
-    sys.modules.pop("deploy.autonomy.cslam_bridge", None)
+    sys.modules.pop("swarmdeck_peer.cslam_bridge", None)
     try:
-        yield importlib.import_module("deploy.autonomy.cslam_bridge")
+        yield importlib.import_module("swarmdeck_peer.cslam_bridge")
     finally:
-        sys.modules.pop("deploy.autonomy.cslam_bridge", None)
+        sys.modules.pop("swarmdeck_peer.cslam_bridge", None)
         for name, value in saved.items():
             if value is None:
                 sys.modules.pop(name, None)

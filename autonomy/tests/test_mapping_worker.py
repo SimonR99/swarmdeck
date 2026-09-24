@@ -13,7 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-MODULE_PATH = Path(__file__).parents[2] / "deploy/autonomy/mola_worker.py"
+MODULE_PATH = (
+    Path(__file__).parents[2]
+    / "swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_worker.py"
+)
 SPEC = importlib.util.spec_from_file_location("swarmdeck_mola_worker", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 worker_module = importlib.util.module_from_spec(SPEC)
@@ -960,7 +963,7 @@ def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -
 def test_native_artifact_claim_mismatch_keeps_last_complete_index(tmp_path) -> None:
     """A native response whose claimed output size disagrees with the file it
     actually wrote is still rejected: the worker trusts a fresh output's
-    reported hash (deploy/autonomy/mola_worker.py `_stat_matches`), but
+    reported hash (swarmdeck_peer/mola_worker.py `_stat_matches`), but
     `stat`s its size rather than trusting that blindly too.
     """
     peer = tmp_path / "mission" / "robot_0"

@@ -75,8 +75,8 @@ from autonomy.map_epochs import (
 
 try:
     from mola_process import MolaProcessError, NativeRequestError, PersistentImporter
-except ModuleNotFoundError:  # Imported as deploy.autonomy.mola_worker in tests.
-    from deploy.autonomy.mola_process import (
+except ModuleNotFoundError:  # Imported as swarmdeck_peer.mola_worker in tests.
+    from swarmdeck_peer.mola_process import (
         MolaProcessError,
         NativeRequestError,
         PersistentImporter,

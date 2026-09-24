@@ -141,10 +141,10 @@ def generate_launch_description():
         },
     ]
     bridge = Node(
-        executable="/usr/bin/python3",
+        package="swarmdeck_peer",
+        executable="cslam_bridge.py",
         name="onboard_mapper",
         namespace=f"r{index}",
-        arguments=[str(Path(__file__).with_name("cslam_bridge.py"))],
         parameters=[
             {
                 "robot_id": robot,

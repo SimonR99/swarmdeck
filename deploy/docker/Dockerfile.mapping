@@ -36,10 +36,9 @@ COPY autonomy /opt/swarmdeck/autonomy
 # Keep the worker's package import path available to deployment fixtures and
 # service wrappers. The executable copies below remain the installed CLI entry
 # points used by the runtime image.
-COPY deploy/autonomy/mola_worker.py /opt/swarmdeck/deploy/autonomy/mola_worker.py
-COPY deploy/autonomy/mola_process.py /opt/swarmdeck/deploy/autonomy/mola_process.py
-COPY deploy/autonomy/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
-COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py
+COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer /opt/swarmdeck/swarmdeck_peer
+COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
+COPY swarmdeck_ros/src/swarmdeck_peer/swarmdeck_peer/mola_process.py /usr/local/bin/mola_process.py
 COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py
 COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py
 

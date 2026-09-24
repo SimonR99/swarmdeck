@@ -174,13 +174,16 @@ RUN . /opt/ros/jazzy/setup.sh \
 
 # SwarmDeck's own wiring, built on top of the cslam workspace. Last layer, so
 # editing the launch/config rebuilds in seconds rather than re-running apt.
+# swarmdeck_peer is the peer runtime (bridge, launch file); symlink-install
+# links its installed files to /cslam_ws/src, where compose may bind-mount the
+# checkout.
 COPY swarmdeck_ros/src/swarmdeck_cslam /cslam_ws/src/swarmdeck_cslam
+COPY swarmdeck_ros/src/swarmdeck_peer /cslam_ws/src/swarmdeck_peer
 COPY adapters /app/adapters
 COPY autonomy /app/autonomy
-COPY deploy/autonomy /app/deploy/autonomy
 ENV PYTHONPATH=/app
 RUN . /opt/ros/jazzy/setup.sh \
     && . /cslam_ws/install/setup.sh \
-    && colcon build --symlink-install --packages-select swarmdeck_cslam
+    && colcon build --symlink-install --packages-select swarmdeck_cslam swarmdeck_peer
 
 CMD ["bash"]
