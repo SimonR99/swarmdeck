@@ -15,7 +15,7 @@ int main() {
   graph->emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
       0, 1, gtsam::Pose3(), noise);
   assert(!cache.matches(graph, values, {0, 0}, 0));
-  cache.remember(graph, values, {0, 0}, 0);
+  cache.remember(graph, values, {0, 0}, 0, *values);
   int skipped = 0;
   for (int i = 0; i < 100; ++i) {
     auto collected_graph = boost::make_shared<gtsam::NonlinearFactorGraph>();

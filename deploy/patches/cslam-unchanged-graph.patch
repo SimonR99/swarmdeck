@@ -16,7 +16,7 @@
        result = *initial;
      }
    }
-@@ -1025,7 +1027,17 @@
+@@ -1025,7 +1027,20 @@
      logger_->log_initial_global_pose_graph(aggregate_pose_graph_.first, aggregate_pose_graph_.second);
    }
  
@@ -25,6 +25,9 @@
 +  if (unchanged_graph_.matches(aggregate_pose_graph_.first,
 +                               aggregate_pose_graph_.second,
 +                               optimization_epochs_, origin_robot_id_)) {
++    // Consumers rely on periodic reports for deferred adoption and recovery.
++    // Reuse only the solve; share still advances the causal solution clock.
++    share_optimized_estimates(unchanged_graph_.result());
 +    optimizer_state_ = OptimizerState::IDLE;
 +    return;
 +  }
@@ -34,14 +37,14 @@
    optimization_result_ =
        std::async(std::launch::async, &DecentralizedPGO::optimize, this, aggregate_pose_graph_.first,
                   aggregate_pose_graph_.second);
-@@ -1045,6 +1057,11 @@
+@@ -1045,6 +1060,11 @@
        return;
      }
      optimization_count_++;
 +    if (optimization_succeeded_) {
 +      unchanged_graph_.remember(aggregate_pose_graph_.first,
 +                                aggregate_pose_graph_.second,
-+                                optimization_epochs_, origin_robot_id_);
++                                optimization_epochs_, origin_robot_id_, result);
 +    }
  
      // Share results
@@ -67,7 +70,7 @@
              optimizer_state_publisher_;
 --- /dev/null
 +++ b/cslam/include/cslam/back_end/unchanged_graph.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,41 @@
 +#pragma once
 +
 +#include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -89,15 +92,20 @@
 +
 +  void remember(const gtsam::NonlinearFactorGraph::shared_ptr& graph,
 +                const gtsam::Values::shared_ptr& values,
-+                const std::vector<uint64_t>& epochs, unsigned int origin) {
++                const std::vector<uint64_t>& epochs, unsigned int origin,
++                const gtsam::Values& result) {
 +    // Inputs are immutable once dispatched to the async optimizer.
 +    graph_ = graph;
 +    values_ = values;
 +    epochs_ = epochs;
 +    origin_ = origin;
++    result_ = result;
 +  }
 +
++  const gtsam::Values& result() const { return result_; }
++
 + private:
++  gtsam::Values result_;
 +  gtsam::NonlinearFactorGraph::shared_ptr graph_;
 +  gtsam::Values::shared_ptr values_;
 +  std::vector<uint64_t> epochs_;

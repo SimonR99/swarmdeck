@@ -6,9 +6,9 @@
 - `cslam-unchanged-graph.patch` still collects peer graphs, but skips the solver
   when the complete aggregate factors (including priors), initial poses, map
   epochs and origin exactly match a successful solve. A remote-only change
-  invalidates the cache. Failed solves are retried. Unchanged rounds no longer
-  emit new optimizer solution versions; the existing bridge authority heartbeat
-  remains independent and unchanged.
+  invalidates the cache. Failed solves are retried. Unchanged rounds publish the
+  cached successful result with a new solution clock, preserving deferred adoption
+  and restarted-consumer recovery. The bridge authority heartbeat is unchanged.
 - `cslam-scancontext-index.patch` retains a ring-key KD-tree and searches up to
   63 newly appended keys directly. Every 64 additions rebuild the index. Ties
   fall back to the full tree to preserve upstream candidate ordering. Scoring,
