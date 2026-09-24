@@ -73,10 +73,8 @@ odometry message at the same timestamp.
 | `SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG` | Defaults to 8 degrees/s. An integrity gate, not a performance setting to disable to increase map updates. |
 
 Environment settings must reach the process/container that reads them. Inspect
-the resolved Compose configuration when adding overrides. The adapter's display
-cloud uses a separate 0.10 m voxel grid; changing keyframe resolution does not
-change that display transport. A two-second minimum keyframe interval and
-bounded upload queue already limit downstream work.
+the resolved Compose configuration when adding overrides. A two-second minimum
+keyframe interval and bounded upload queue already limit downstream work.
 
 Fast-LIVO2 raw image channel conversion and PNG encoding now run only when the
 corresponding publisher has subscribers. Standard PNG bytes preserve RGB;
@@ -85,28 +83,15 @@ Camera calibration continues to publish independently.
 
 ## Reproduce CPU measurements
 
-From the repository root, with development dependencies installed:
+From the repository root, with development dependencies installed, the
+focused regression tests cover the adapter and bridge hot paths:
 
 ```sh
-server/.venv/bin/python scripts/benchmark-sim.py
 server/.venv/bin/python -m pytest -q adapters/test swarmdeck_ros/src/swarmdeck_sim/test swarmdeck_ros/src/swarmdeck_bringup/test
 ```
 
-A local run on September 7, 2026 measured the following medians over 30 warmed
-iterations. Inputs are deterministic synthetic points and a noisy RGB image;
-these are CPU microbenchmarks, not guarantees for a particular GPU or scenario.
-
-| Operation | Median |
-|---|---:|
-| 32,000 voxel keys, former structured `np.unique(axis=0)` | 16.40 ms |
-| Same keys, shared packed-integer deduplication | 3.92 ms |
-| 32,000 hits, planar and proximity projections together | 0.18 ms |
-| 320×240 noisy RGB, PNG encoding | 4.27 ms |
-
-The adapter display-cloud upload now uses the packed helper already used by
-keyframe downsampling. It preserves first-point selection and wire order, with
-the existing overflow fallback. PNG cost is eliminated when no compressed-image
-subscriber exists. Existing vectorized scan projections are retained.
+Stack-level CPU and cadence reports come from `scripts/profile_stack.py`; see
+[performance.md](performance.md).
 
 For end-to-end evaluation, record the scenario, robot count, rendering backend,
 odometry profile, sensor rates, and container revisions. Compare simulation-time

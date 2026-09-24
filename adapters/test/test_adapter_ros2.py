@@ -1128,3 +1128,141 @@ def test_pose_lookup_uses_navigation_frame_and_base_frame(mod):
     assert pose["x"] == pytest.approx(1.25)
     assert pose["y"] == pytest.approx(-0.75)
     assert pose["yaw"] == pytest.approx(0.5)
+
+
+def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
+    """__init__ subscribes odom and plan, so their message types must import."""
+    node = MagicMock()
+    bridge = mod.HardwareBridge(node, "r0", mod.load_config(None), "http://backend")
+
+    subscribed = {
+        call.args[1]: call.args[0] for call in node.create_subscription.call_args_list
+    }
+    assert subscribed["odom"] is mod.Odometry
+    assert subscribed["plan"] is mod.NavPath
+    assert bridge.navigation_frame == "odom"
+
+
+# -- goal ownership: behaviours the hardware bridge differs on -------------
+#
+# adapter_sim pins its own answers to the same calls. Here a cancel closes the
+# Nav2 velocity relay at once, so nothing waits for the action server, and a
+# replacement route keeps the public status "active" while it is prepared.
+
+
+@pytest.mark.parametrize("pending, status", [(False, "cancelled"), (True, "active")])
+def test_hardware_conditional_cancel_reports_pending_as_active(mod, pending, status):
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    bridge._goal_generation = 3
+    bridge.nav_status, bridge.mode = "active", "nav"
+    bridge._nav_execution_enabled = True
+
+    assert bridge.cancel_goal_if_current(3, pending=pending) == 4
+
+    assert bridge._goal_generation == 4
+    assert bridge.nav_status == status
+    assert bridge.mode == "idle"
+    assert bridge._nav_execution_enabled is False
+    bridge.pub_cmd.publish.assert_called_once()
+
+
+def test_hardware_status_write_closes_the_relay_unless_active(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+    bridge._nav_execution_enabled = True
+
+    assert bridge.set_nav_status_if_current(3, "active") is True
+    assert bridge._nav_execution_enabled is True
+    assert bridge.set_nav_status_if_current(3, "failed") is True
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_execution_enabled is False
+
+
+def test_hardware_pending_goal_reports_active_with_the_relay_closed(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+    bridge.nav_status = "failed"
+    bridge._nav_execution_enabled = True
+
+    assert bridge.set_goal_pending_if_current(2) is False
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_execution_enabled is True
+    assert bridge.set_goal_pending_if_current(3) is True
+    assert bridge.nav_status == "active"
+    assert bridge._nav_execution_enabled is False
+
+
+def test_hardware_wait_goal_quiet_only_checks_ownership(mod):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 3
+
+    assert bridge.wait_goal_quiet(2, 0.0) is False
+    assert bridge.wait_goal_quiet(3, 0.0) is True
+
+
+def test_hardware_state_probes_link_quality_towards_the_backend(mod, monkeypatch):
+    import adapters.runtime as runtime
+
+    calls = []
+    monkeypatch.setattr(
+        runtime,
+        "read_link_quality",
+        lambda iface, **target: calls.append((iface, target)) or {"quality": 1.0},
+    )
+    bridge = _bridge(mod, {"network_iface": "wlan0"})
+    bridge.http_url = "http://backend:8080"
+    bridge.battery = None
+    bridge.planned_path = []
+
+    assert bridge.state()["network"] == {"quality": 1.0}
+    assert calls == [("wlan0", {"host": "backend", "port": 8080})]
+
+
+def test_hardware_reports_controller_acceptance_and_terminal_to_exploration(
+    mod, monkeypatch
+):
+    """Exploration replans on the controller's terminal event, as in simulation."""
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    generation, handle = _submit_route(bridge, _route_plan())
+
+    bridge.exploration.controller_accepted.assert_called_once_with(generation)
+    bridge.exploration.controller_finished.assert_not_called()
+
+    goal_status = type("GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5})
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    outcome = MagicMock()
+    outcome.result.return_value = SimpleNamespace(
+        status=4, result=SimpleNamespace(success=True)
+    )
+    bridge._on_goal_result(outcome, generation, handle)
+
+    assert bridge.nav_status == "succeeded"
+    bridge.exploration.controller_finished.assert_called_once_with()
+
+
+def test_hardware_route_stall_reports_the_controller_terminal(mod):
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    generation, _handle = _submit_route(bridge, _route_plan())
+
+    assert bridge._fail_route_progress(generation, "stalled") is True
+
+    assert bridge.nav_status == "failed"
+    bridge.exploration.controller_finished.assert_called_once_with()
+
+
+def test_rejected_or_cancelled_hardware_goals_do_not_claim_acceptance(mod):
+    bridge = _route_bridge(mod)
+    bridge.exploration = MagicMock()
+    rejected = MagicMock()
+    rejected.accepted = False
+    bridge.path_client.send_goal_async.return_value = _ImmediateFuture(rejected)
+
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        bridge.follow_path(_route_plan())
+
+    bridge.exploration.controller_accepted.assert_not_called()
+    bridge.exploration.controller_finished.assert_called_once_with()
+    bridge.cancel_goal()
+    bridge.exploration.controller_finished.assert_called_once_with()

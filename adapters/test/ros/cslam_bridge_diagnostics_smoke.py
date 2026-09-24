@@ -12,7 +12,7 @@ from builtin_interfaces.msg import Time as TimeMsg
 import numpy as np
 import rclpy
 
-from adapters import reconstruction
+from adapters import reconstruction  # cslam_bridge imports colorize from here
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore

@@ -350,7 +350,6 @@ def clock(sim_module, monkeypatch):
 def test_sim_tick_cancels_a_stalled_route_as_a_no_progress_failure(sim_module, clock):
     """The Bistro ridge: 0.3 m of rocking at 2.5 m, nav_status active forever."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     generation, handle = _submit(bridge, _plan())
 
     _rock(bridge, clock, 29.6)
@@ -388,7 +387,6 @@ def test_sim_tick_cancels_a_stalled_route_as_a_no_progress_failure(sim_module, c
 
 def test_sim_tick_leaves_a_route_alone_while_the_robot_advances(sim_module, clock):
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     generation, handle = _submit(bridge, _plan())
     for tick in range(600):  # two minutes at 0.05 m/s
         clock[0] += 0.2
@@ -400,7 +398,6 @@ def test_sim_tick_leaves_a_route_alone_while_the_robot_advances(sim_module, cloc
 
 def test_sim_tick_restarts_the_clock_for_a_replacement_route(sim_module, clock):
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     generation, first = _submit(bridge, _plan())
     _rock(bridge, clock, 20.0)
     # A replacement submitted under the same generation, as recovery does.
@@ -420,7 +417,6 @@ def test_sim_tick_restarts_the_clock_for_a_replacement_route(sim_module, clock):
 def test_sim_tick_waits_for_the_controller_to_accept_the_goal(sim_module, clock):
     """Before acceptance there is no handle to cancel, so there is no verdict."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     bridge.path_client.send_goal_async.return_value = Future()  # never answers
     with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
         bridge.follow_path(_plan())
@@ -431,7 +427,6 @@ def test_sim_tick_waits_for_the_controller_to_accept_the_goal(sim_module, clock)
 
 def test_sim_tick_is_disabled_by_a_zero_timeout(sim_module, clock):
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=0)
-    bridge.take_reset_report = lambda: None
     generation, handle = _submit(bridge, _plan())
     _rock(bridge, clock, 120.0)
     assert bridge.nav_status == "active"
@@ -442,7 +437,6 @@ def test_sim_tick_supervises_a_route_in_the_odometry_frame(sim_module, clock):
     """Routes are planned in the odometry frame: the odom -> base_link link is
     the pose there, with the wheel topic as the fallback map_pose uses."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     bridge.map_pose = lambda: {"x": 99.0, "y": 99.0, "yaw": 0.0}
     generation, handle = _submit(bridge, _plan(frame="r0/odom"))
     ticks = int(round(31.0 / 0.2))
@@ -464,7 +458,6 @@ def test_sim_tick_supervises_a_route_in_the_odometry_frame(sim_module, clock):
 def test_sim_tick_does_not_supervise_a_route_in_another_frame(sim_module, clock):
     """Neither the map nor the odometry frame: fail closed, warn once."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     generation, handle = _submit(bridge, _plan(frame="r0/other"))
     _rock(bridge, clock, 60.0)
     assert bridge.nav_status == "active"
@@ -492,7 +485,6 @@ def test_sim_watchdog_failure_reaches_exploration_recovery(sim_module, clock):
     from adapters.test.test_exploration import path as planner_msg, rig
 
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
-    bridge.take_reset_report = lambda: None
     bridge.node.get_clock().now().nanoseconds = 1_000_000_000
     _mock_bridge, explorer = rig()
     explorer.bridge = bridge

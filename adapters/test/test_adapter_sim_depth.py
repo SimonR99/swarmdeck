@@ -273,7 +273,6 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     sim_module, monkeypatch
 ):
     """Perception stays local and never posts a JPEG preview."""
-    import threading
     from unittest.mock import MagicMock
 
     import numpy as np
@@ -282,7 +281,6 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     bridge.node = MagicMock()
     bridge.id = "robot_0"
     bridge.http_url = "http://backend:8080"
-    bridge._upload_lock = threading.Lock()
     bridge._camera_dirty = True
     bridge._detection_enabled = True
     bridge._detection_period_s = 0.2
@@ -322,3 +320,83 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     assert (
         detections and detections[0]["class"] == "rubber_duck"
     ), "detection must still run for an unwatched camera"
+
+
+def _camera_bridge(sim_module):
+    from unittest.mock import MagicMock
+
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.node = MagicMock()
+    bridge.id = "robot_0"
+    bridge._camera_encoding_warned = False
+    bridge.frames = []
+    bridge._detect_bgr = lambda image, **_: bridge.frames.append(image)
+    return bridge
+
+
+def _camera_frame(encoding, width, height, channels, pad):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    step = width * channels + pad
+    rows = np.zeros((height, step), dtype=np.uint8)
+    rows[:, : width * channels] = np.arange(width * channels, dtype=np.uint8)
+    rows[:, width * channels :] = 255
+    return SimpleNamespace(
+        encoding=encoding,
+        width=width,
+        height=height,
+        step=step,
+        data=rows.tobytes(),
+        header=None,
+    )
+
+
+# Each wire channel k of column c holds c * channels + k (see _camera_frame);
+# `order` lists which wire channels land in the decoded B, G, R planes.
+@pytest.mark.parametrize(
+    "encoding, channels, order",
+    [
+        ("rgb8", 3, (2, 1, 0)),
+        ("8UC3", 3, (2, 1, 0)),
+        ("bgr8", 3, (0, 1, 2)),
+        ("rgba8", 4, (2, 1, 0)),
+        ("bgra8", 4, (0, 1, 2)),
+        ("mono8", 1, None),
+    ],
+)
+def test_camera_decoding_drops_row_padding_and_reorders_to_bgr(
+    sim_module, encoding, channels, order
+):
+    import numpy as np
+
+    bridge = _camera_bridge(sim_module)
+    bridge._camera_frame = _camera_frame(encoding, 3, 2, channels, pad=5)
+    bridge._camera_dirty = True
+
+    bridge.process_camera()
+
+    (image,) = bridge.frames
+    columns = np.arange(3) * channels
+    if order is None:
+        expected = np.broadcast_to(columns, (2, 3))
+    else:
+        expected = np.broadcast_to(
+            np.stack([columns + k for k in order], axis=-1), (2, 3, 3)
+        )
+    assert image.shape == expected.shape
+    assert image.dtype == np.uint8
+    np.testing.assert_array_equal(image, expected)
+    assert bridge._camera_dirty is False
+
+
+def test_unsupported_camera_encoding_warns_once(sim_module):
+    bridge = _camera_bridge(sim_module)
+    for _ in range(2):
+        bridge._camera_frame = _camera_frame("yuv422", 3, 2, 2, pad=0)
+        bridge._camera_dirty = True
+        bridge.process_camera()
+
+    assert bridge.frames == []
+    bridge.node.get_logger().warn.assert_called_once()

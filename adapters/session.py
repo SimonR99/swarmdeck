@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 from contextlib import nullcontext
 
-from adapters.live_mapping import live_state
+from adapters.navigation_display import live_state
 
 from adapters.runtime import (
     RECONNECT_BACKOFF_S,
@@ -100,7 +100,6 @@ async def dispatch_command(
         "cancel_goal",
         "drive",
         "stop",
-        "reset",
         "body_command",
     ):
         # Any operator command supersedes exploring toward a goal.
@@ -134,7 +133,6 @@ async def dispatch_command(
             "cancel_goal",
             "drive",
             "stop",
-            "reset",
             "body_command",
         ):
             exploration.stop()
@@ -229,10 +227,6 @@ async def dispatch_command(
                         )
 
             await loop.run_in_executor(None, body_if_current)
-    elif kind == "reset":
-        fn = getattr(bridge, "reset", None)
-        if callable(fn):
-            loop.run_in_executor(None, fn)
 
 
 async def _rx(bridge: Any, ws: Any) -> None:
@@ -253,9 +247,7 @@ async def _tx_state(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
         exploration = getattr(bridge, "exploration", None)
         if exploration is not None:
             exploration.last_link = time.monotonic()
-        extra = _call(bridge, "session_state_tick")
-        if extra is not None:
-            await send(extra)
+        _call(bridge, "session_state_tick")
         _call(bridge, "note_link_activity")
         await asyncio.sleep(period)
 

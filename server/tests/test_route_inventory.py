@@ -97,7 +97,6 @@ def test_inbound_websocket_message_inventory():
         "hello",
         "robot_state",
         "detections",
-        "reset_done",
     }
     assert message_types(handle_gui_message) == {
         "acknowledge_alert",

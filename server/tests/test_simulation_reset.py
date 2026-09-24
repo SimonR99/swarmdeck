@@ -482,3 +482,50 @@ def test_rendered_onboard_compose_uses_one_resettable_ros_domain():
         services[name]["environment"]["ROS_DOMAIN_ID"]
         for name in ("sim", "mgg", "peer0")
     } == {"201"}
+
+
+def test_fleet_reset_without_supervisor_fails_without_touching_adapters(monkeypatch):
+    """Every adapter resets through the epoch supervisor; there is no fallback."""
+    import asyncio
+
+    from swarmdeck_server.api import state
+
+    class Sink:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    monkeypatch.delenv("SWARMDECK_SIM_RESET_DIR", raising=False)
+    registry = Registry()
+    sink = Sink()
+    registry.hello({"robot_id": "robot_0", "capabilities": ["navigate", "reset"]}, sink)
+    registry.robots["robot_0"].goal = {"x": 1.0, "y": 2.0}
+    broadcasts = []
+
+    async def broadcast(message):
+        broadcasts.append(message)
+
+    monkeypatch.setattr(state, "registry", registry)
+    monkeypatch.setattr(state, "broadcast", broadcast)
+    monkeypatch.setitem(state._detections, "kept", {"id": "kept"})
+
+    result = asyncio.run(state.reset_fleet())
+
+    assert result["phase"] == "failed"
+    assert result["ok"] is False
+    assert "SWARMDECK_SIM_RESET_DIR" in result["error"]
+    assert sink.messages == []
+    assert registry.robots["robot_0"].goal == {"x": 1.0, "y": 2.0}
+    assert "kept" in state._detections
+    assert broadcasts == [
+        {
+            "type": "sim_reset",
+            "phase": "done",
+            "request_id": None,
+            "ok": False,
+            "error": result["error"],
+            "skipped": [],
+        }
+    ]

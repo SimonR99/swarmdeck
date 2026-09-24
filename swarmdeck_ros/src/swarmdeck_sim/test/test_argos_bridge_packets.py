@@ -399,3 +399,152 @@ def test_unrendered_scan_does_not_poison_laser_calibration(rig, max_range):
     read(node, sock)
     robot.pub_scan.publish.assert_called_once()
     robot.pub_points.publish.assert_called_once()
+
+
+def full_packet(sensor_tick=90):
+    """Every optional block present: encoders, IMU, a mixed scan and RGB-D."""
+    half = np.sqrt(0.5)
+    truth = (3.0, -1.0, 0.2, half, 0.0, 0.0, half, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+    odom = (1.0, 2.0, 0.3, half, 0.0, 0.0, half, 0.5, 0.0, 0.0, 0.0, 0.0, 0.25)
+    points = np.zeros(4, dtype=bridge.LIDAR_DTYPE)
+    points["x"] = [2.0, 0.0, -3.0, 1.0]
+    points["y"] = [0.0, 2.5, 0.0, 1.0]
+    points["z"] = [0.0, 0.01, -0.3, 0.0]
+    points["range"] = np.hypot(points["x"], points["y"])
+    points["ring"] = [1, 2, 3, 4]
+    points["hit"] = [1, 1, 1, 0]
+    return (
+        (
+            b"\x01r"
+            + struct.pack("<13d", *truth)
+            + struct.pack("<BB13dI", 1, 1, *odom, sensor_tick)
+            + struct.pack("<B4d", 1, 0.1, 0.2, 3.0, 4.0)
+            + struct.pack("<B6d", 1, 0.01, 0.02, 0.03, 0.1, 0.2, 9.8)
+            + struct.pack("<BIIIfI", 1, sensor_tick, 16, 360, 20.0, 4)
+            + points.tobytes()
+            + struct.pack("<BIIIf", 1, sensor_tick, 2, 1, 90.0)
+            + bytes(range(6))
+            + b"\x01"
+            + struct.pack("<2f", 1.5, 2.5)
+        ),
+        points,
+        odom,
+    )
+
+
+def published(publisher):
+    (call,) = publisher.publish.call_args_list
+    return call.args[0]
+
+
+def test_full_observation_publishes_every_product(rig, monkeypatch):
+    node, robot = rig
+    monkeypatch.setattr(
+        bridge,
+        "Imu",
+        lambda: message(orientation_covariance=[0.0] * 9),
+        raising=False,
+    )
+    robot.pub_imu = Mock()
+    robot.frame_imu = "imu"
+    data, points, odom_origin = full_packet()
+    sock = Socket(data)
+
+    assert read(node, sock) == "r"
+    assert sock.recv(1) == b"", "encoder and IMU blocks must be drained exactly"
+
+    truth = published(robot.pub_truth)
+    assert (truth.header.frame_id, truth.child_frame_id) == ("world", "base")
+    assert vars(truth.twist.twist.angular) == {"x": 0.4, "y": 0.5, "z": 0.6}
+
+    odo = bridge._base_pose_from_origin(odom_origin, robot.base_height)
+    odom = published(robot.pub_odom)
+    assert (odom.header.frame_id, odom.child_frame_id) == ("odom", "base")
+    assert vars(odom.pose.pose.position) == {"x": odo[0], "y": odo[1], "z": odo[2]}
+    assert vars(odom.twist.twist.linear) == {"x": odo[7], "y": odo[8], "z": odo[9]}
+    tf = published(robot.pub_tf).transforms
+    assert [t.child_frame_id for t in tf] == ["base", "nav_scan", "nav_prox"]
+    assert vars(tf[1].transform.translation) == {"x": odo[0], "y": odo[1], "z": 0.0}
+    assert tf[2].transform.rotation.w == pytest.approx(np.sqrt(0.5))
+    assert tf[2].transform.rotation.z == pytest.approx(np.sqrt(0.5))
+
+    imu = published(robot.pub_imu)
+    assert imu.header.frame_id == "imu"
+    assert vars(imu.angular_velocity) == {"x": 0.01, "y": 0.02, "z": 0.03}
+    assert vars(imu.linear_acceleration) == {"x": 0.1, "y": 0.2, "z": 9.8}
+    assert imu.orientation_covariance[0] == -1.0
+
+    hits = points[points["hit"] != 0]
+    cloud = published(robot.pub_points)
+    assert (cloud.width, cloud.point_step, cloud.row_step) == (3, 16, 48)
+    expected_cloud = np.stack(
+        [hits["x"], hits["y"], hits["z"], hits["ring"].astype("<f4")], axis=1
+    ).astype("<f4")
+    assert cloud.data == expected_cloud.tobytes()
+    capture = json.loads(published(robot.pub_capture).data)
+    assert capture["point_count"] == 3
+    assert (
+        capture["points_sha256"]
+        == hashlib.sha256(expected_cloud[:, :3].tobytes()).hexdigest()
+    )
+
+    nav_pose = robot.odom_pose_history[90]
+    expected = {
+        "scan": ("lidar", 20.0, bridge.project_laserscan_slice(hits, range_max=20.0)),
+        "prox": (
+            "base",
+            robot.prox_range_max,
+            bridge.project_laserscan_proximity(
+                hits,
+                robot.lidar_x,
+                robot.lidar_z,
+                robot.base_height,
+                prox_min_height=robot.prox_min_height,
+                prox_range_max=robot.prox_range_max,
+            ),
+        ),
+        "nav_scan": (
+            "nav_scan",
+            20.0,
+            bridge.project_laserscan_navigation(
+                hits, robot.lidar_x, robot.lidar_z, nav_pose, range_max=20.0
+            ),
+        ),
+        "nav_prox": (
+            "nav_prox",
+            robot.prox_range_max,
+            bridge.project_laserscan_proximity_navigation(
+                hits,
+                robot.lidar_x,
+                robot.lidar_z,
+                robot.base_height,
+                nav_pose,
+                prox_min_height=robot.prox_min_height,
+                prox_range_max=robot.prox_range_max,
+            ),
+        ),
+    }
+    for name, (frame, range_max, ranges) in expected.items():
+        scan = published(getattr(robot, "pub_" + name))
+        assert scan.header.frame_id == frame
+        assert (scan.header.stamp.sec, scan.header.stamp.nanosec) == (0, 900_000_000)
+        assert (scan.angle_min, scan.angle_max, scan.angle_increment) == (
+            float(bridge.SCAN_ANGLE_MIN),
+            float(bridge.SCAN_ANGLE_MAX),
+            float(bridge.SCAN_ANGLE_INC),
+        )
+        assert (scan.time_increment, scan.scan_time) == (0.0, bridge.SCAN_TIME)
+        assert (scan.range_min, scan.range_max) == (bridge.SCAN_RANGE_MIN, range_max)
+        assert scan.ranges == ranges.tolist()
+
+    image = published(robot.pub_image)
+    assert (image.height, image.width, image.step) == (1, 2, 6)
+    assert (image.encoding, image.data) == ("rgb8", bytes(range(6)))
+    info = published(robot.pub_info)
+    focal = 1 / (2.0 * np.tan(np.radians(90.0) / 2.0))
+    assert info.k == pytest.approx([focal, 0.0, 1.0, 0.0, focal, 0.5, 0.0, 0.0, 1.0])
+    assert info.p[:7] == pytest.approx([focal, 0.0, 1.0, 0.0, 0.0, focal, 0.5])
+    assert (info.distortion_model, info.d) == ("plumb_bob", [0.0] * 5)
+    depth = published(robot.pub_depth)
+    assert (depth.encoding, depth.step) == ("32FC1", 8)
+    assert depth.data == struct.pack("<2f", 1.5, 2.5)

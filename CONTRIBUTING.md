@@ -59,7 +59,7 @@ are not evidence of sustained performance on a particular GPU.
 
 Keep operational warnings actionable and rate-limited. Avoid per-frame logging
 in sensor, map, and rendering loops; use focused regression tests or the
-[simulation benchmark](scripts/benchmark-sim.py) for investigations. Keep local
+[stack profiler](scripts/profile_stack.py) for investigations. Keep local
 captures and temporary reproductions outside tracked source. Document current
 contracts and reproducible commands; Git history holds resolved incident detail.
 

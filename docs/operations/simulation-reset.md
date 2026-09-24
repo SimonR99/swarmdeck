@@ -46,8 +46,9 @@ explicitly unavailable rather than falling back to a rendered-map clear.
 
 ## Reset the entire simulation
 
-The simulation reset uses a host-side supervisor when
-`SWARMDECK_SIM_RESET_DIR` is configured on the server.
+The simulation reset uses a host-side supervisor, configured on the server by
+`SWARMDECK_SIM_RESET_DIR`. Without it, a reset request fails with an error and
+changes nothing.
 
 The server writes a bounded request to the shared reset directory and returns
 immediately. The supervisor stops the configured simulation services, writes a
@@ -120,5 +121,6 @@ separate inactive profile, so it is absent from this service list. A non-test
 stack that uses Fast-LIVO2 must include that service and its exact GPU or DRI
 overlay in both the initial Compose invocation and the supervisor command.
 
-Without `SWARMDECK_SIM_RESET_DIR`, the endpoint retains the legacy in-process
-adapter reset for deployments that do not run onboard peer mapping.
+Without `SWARMDECK_SIM_RESET_DIR` there is no in-process fallback: the
+server no longer sends adapters a `reset` command. `GET /api/sim/reset` still
+reports `phase: "legacy"` in that case, meaning no supervisor is configured.

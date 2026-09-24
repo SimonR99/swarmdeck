@@ -27,7 +27,10 @@ not create independent fleet instances: this remains one fleet per process.
 
 The server still starts without `SWARMDECK_MISSION_ID` for `make server`,
 `make mock`, and `make demo`. Missionless mock fleets retain telemetry, drive,
-body commands, goals, exploration, and the legacy adapter reset handshake.
+body commands, goals, and exploration. The legacy adapter reset handshake is
+gone: `POST /api/sim/reset` and the `reset_sim` GUI message go to the host
+reset supervisor, and fail with an error when `SWARMDECK_SIM_RESET_DIR` is not
+set. Adapters no longer receive `reset` or send `reset_done`.
 Mock adapters' per-robot replica session IDs do not configure a server mission.
 
 Live mapping authority (`live_mapping` and `peer_slam`) is admitted only with

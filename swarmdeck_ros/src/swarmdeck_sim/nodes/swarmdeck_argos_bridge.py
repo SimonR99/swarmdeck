@@ -55,7 +55,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 
@@ -403,6 +403,249 @@ def recv_exact(sock: socket.socket, count: int) -> bytes:
     return b"".join(chunks) if len(chunks) > 1 else chunks[0]
 
 
+def _read_flag(sock: socket.socket) -> bool:
+    """Read one presence byte: whether the optional block after it is on the wire."""
+    return bool(struct.unpack("<B", recv_exact(sock, 1))[0])
+
+
+def _publish_odometry(robot: "RobotInterface", odo, odom_stamp) -> None:
+    """Publish an estimator pose as odometry and its three transforms."""
+    odom = Odometry()
+    odom.header.stamp = odom_stamp
+    odom.header.frame_id = robot.frame_odom
+    odom.child_frame_id = robot.frame_base
+    odom.pose.pose.position = Point(x=odo[0], y=odo[1], z=odo[2])
+    odom.pose.pose.orientation = Quaternion(w=odo[3], x=odo[4], y=odo[5], z=odo[6])
+    odom.twist.twist.linear = Vector3(x=odo[7], y=odo[8], z=odo[9])
+    odom.twist.twist.angular = Vector3(x=odo[10], y=odo[11], z=odo[12])
+    robot.pub_odom.publish(odom)
+
+    transform = TransformStamped()
+    transform.header.stamp = odom_stamp
+    transform.header.frame_id = robot.frame_odom
+    transform.child_frame_id = robot.frame_base
+    transform.transform.translation = Vector3(x=odo[0], y=odo[1], z=odo[2])
+    transform.transform.rotation = odom.pose.pose.orientation
+
+    # These frames are intentionally planar navigation products, not aliases
+    # for base_link. Apply the complete SE(3) pose to each hit before
+    # flattening its endpoint; the TF below carries the matching XY pose and
+    # yaw only.
+    qw, qx, qy, qz = (float(value) for value in odo[3:7])
+    yaw = math.atan2(
+        2.0 * (qx * qy + qz * qw),
+        1.0 - 2.0 * (qy * qy + qz * qz),
+    )
+    planar_rotation = Quaternion(
+        w=math.cos(yaw / 2.0), x=0.0, y=0.0, z=math.sin(yaw / 2.0)
+    )
+    nav_scan_tf = TransformStamped()
+    nav_scan_tf.header.stamp = odom_stamp
+    nav_scan_tf.header.frame_id = robot.frame_odom
+    nav_scan_tf.child_frame_id = robot.frame_nav_scan
+    nav_scan_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
+    nav_scan_tf.transform.rotation = planar_rotation
+    nav_prox_tf = TransformStamped()
+    nav_prox_tf.header.stamp = odom_stamp
+    nav_prox_tf.header.frame_id = robot.frame_odom
+    nav_prox_tf.child_frame_id = robot.frame_nav_prox
+    nav_prox_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
+    nav_prox_tf.transform.rotation = planar_rotation
+    robot.pub_tf.publish(TFMessage(transforms=[transform, nav_scan_tf, nav_prox_tf]))
+
+
+def _laser_scan(stamp, frame_id: str, range_max: float, ranges) -> "LaserScan":
+    """One of the four planar scans; they differ only in frame, reach and ranges."""
+    scan = LaserScan()
+    scan.header.stamp = stamp
+    scan.header.frame_id = frame_id
+    scan.angle_min = float(SCAN_ANGLE_MIN)
+    scan.angle_max = float(SCAN_ANGLE_MAX)
+    scan.angle_increment = float(SCAN_ANGLE_INC)
+    scan.time_increment = 0.0
+    scan.scan_time = float(SCAN_TIME)
+    scan.range_min = float(SCAN_RANGE_MIN)
+    scan.range_max = float(range_max)
+    scan.ranges = ranges
+    return scan
+
+
+class ScanDemand(NamedTuple):
+    """Which lidar products have subscribers, sampled once per frame.
+
+    The projection and the publisher must agree: a product built for nobody
+    is wasted work, and one published without being built has no data.
+    """
+
+    points: bool
+    capture: bool
+    scan: bool
+    prox: bool
+    nav_scan: bool
+    nav_prox: bool
+
+    @classmethod
+    def of(cls, robot: "RobotInterface") -> "ScanDemand":
+        return cls(
+            points=robot.pub_points.get_subscription_count() > 0,
+            capture=robot.pub_capture.get_subscription_count() > 0,
+            scan=robot.pub_scan.get_subscription_count() > 0,
+            prox=robot.pub_prox.get_subscription_count() > 0,
+            nav_scan=robot.pub_nav_scan.get_subscription_count() > 0,
+            nav_prox=robot.pub_nav_prox.get_subscription_count() > 0,
+        )
+
+
+class ScanProducts(NamedTuple):
+    """Everything one raycast projects to; None where nobody asked for it."""
+
+    max_range: float
+    hits: Optional[int]
+    cloud_data: Optional[bytes]
+    points_sha256: Optional[str]
+    scan_ranges: Optional[list]
+    prox_ranges: Optional[list]
+    nav_scan_ranges: Optional[list]
+    nav_prox_ranges: Optional[list]
+    nav_pose_key: Optional[bytes]
+
+
+def _capture_pose(robot: "RobotInterface", scan_tick: int):
+    """The newest estimator pose at or before the scan's capture tick."""
+    nav_pose = robot.odom_pose_history.get(scan_tick)
+    if nav_pose is None:
+        nav_pose_tick = max(
+            (tick for tick in robot.odom_pose_history if tick <= scan_tick),
+            default=-1,
+        )
+        nav_pose = robot.odom_pose_history.get(nav_pose_tick)
+    return nav_pose
+
+
+def project_scan(
+    robot: "RobotInterface",
+    raw: bytes,
+    max_range: float,
+    scan_tick: int,
+    demand: ScanDemand,
+) -> ScanProducts:
+    """Project one raw raycast into the products ``demand`` asks for.
+
+    A parked robot's raycast repeats byte for byte, so the previous frame's
+    products are reused where the rays and, for the flattened navigation
+    scans, the capture-time pose are unchanged.
+    """
+    nav_pose = _capture_pose(robot, scan_tick)
+    # The projection uses position and quaternion, not velocities. Compare
+    # the seven pose components bit-for-bit: a tolerance could hide a change
+    # at a scan bin/range boundary.
+    nav_pose_key = struct.pack("<7d", *nav_pose[:7]) if nav_pose is not None else None
+    previous = robot.last_scan_products
+    if (
+        raw == robot.last_scan_raw
+        and previous is not None
+        and previous.max_range == max_range
+    ):
+        products = previous
+    else:
+        products = ScanProducts(max_range, *(None,) * 8)
+    # The raw rays determine the packed cloud and physical scans; only the
+    # flattened projections depend on capture-time pose.
+    if products.nav_pose_key != nav_pose_key:
+        products = products._replace(
+            nav_scan_ranges=None, nav_prox_ranges=None, nav_pose_key=nav_pose_key
+        )
+
+    need_hits = demand.points or demand.capture
+    need_rays = (
+        (need_hits and (products.cloud_data is None or products.hits is None))
+        or (demand.capture and products.hits and products.points_sha256 is None)
+        or (demand.scan and products.scan_ranges is None)
+        or (demand.prox and products.prox_ranges is None)
+        or (demand.nav_scan and products.nav_scan_ranges is None)
+        or (demand.nav_prox and products.nav_prox_ranges is None)
+    )
+    if need_rays:
+        products = _project_rays(robot, raw, products, demand, nav_pose)
+    if need_hits and products.hits is None:
+        products = products._replace(hits=0)
+    return products
+
+
+def _project_rays(
+    robot: "RobotInterface",
+    raw: bytes,
+    products: ScanProducts,
+    demand: ScanDemand,
+    nav_pose,
+) -> ScanProducts:
+    """Build the demanded products still missing from ``products``."""
+    arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
+    hit_mask = arr["hit"] != 0
+    hits = int(np.count_nonzero(hit_mask))
+    hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
+    cloud_data, points_sha256 = products.cloud_data, products.points_sha256
+    need_hits = demand.points or demand.capture
+    if need_hits and cloud_data is None and hits:
+        out = np.empty((hits, 4), dtype="<f4")
+        out[:, 0] = hit_pts["x"]
+        out[:, 1] = hit_pts["y"]
+        out[:, 2] = hit_pts["z"]
+        out[:, 3] = hit_pts["ring"]
+        cloud_data = out.tobytes()
+        points_sha256 = (
+            hashlib.sha256(
+                np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
+            ).hexdigest()
+            if demand.capture
+            else None
+        )
+    elif demand.capture and hits and points_sha256 is None:
+        xyz = np.empty((hits, 3), dtype="<f4")
+        xyz[:, 0], xyz[:, 1], xyz[:, 2] = hit_pts["x"], hit_pts["y"], hit_pts["z"]
+        points_sha256 = hashlib.sha256(xyz.tobytes()).hexdigest()
+    products = products._replace(
+        hits=hits, cloud_data=cloud_data, points_sha256=points_sha256
+    )
+    max_range = float(products.max_range)
+    if demand.scan and products.scan_ranges is None:
+        products = products._replace(
+            scan_ranges=project_laserscan_slice(hit_pts, range_max=max_range).tolist()
+        )
+    if demand.prox and products.prox_ranges is None:
+        products = products._replace(
+            prox_ranges=project_laserscan_proximity(
+                hit_pts,
+                robot.lidar_x,
+                robot.lidar_z,
+                robot.base_height,
+                prox_min_height=robot.prox_min_height,
+                prox_range_max=robot.prox_range_max,
+            ).tolist()
+        )
+    if nav_pose is None:
+        return products
+    if demand.nav_scan and products.nav_scan_ranges is None:
+        products = products._replace(
+            nav_scan_ranges=project_laserscan_navigation(
+                hit_pts, robot.lidar_x, robot.lidar_z, nav_pose, range_max=max_range
+            ).tolist()
+        )
+    if demand.nav_prox and products.nav_prox_ranges is None:
+        products = products._replace(
+            nav_prox_ranges=project_laserscan_proximity_navigation(
+                hit_pts,
+                robot.lidar_x,
+                robot.lidar_z,
+                robot.base_height,
+                nav_pose,
+                prox_min_height=robot.prox_min_height,
+                prox_range_max=robot.prox_range_max,
+            ).tolist()
+        )
+    return products
+
+
 class RobotInterface:
     """Publishers, subscribers and pending commands for one simulated robot."""
 
@@ -428,7 +671,7 @@ class RobotInterface:
         # the previous readings are kept so an identical frame only costs a
         # comparison and the messages, which consumers still expect per tick.
         self.last_scan_raw: Optional[bytes] = None
-        self.last_scan_products: Optional[tuple] = None
+        self.last_scan_products: Optional[ScanProducts] = None
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -697,12 +940,34 @@ class ArgosBridge(Node):
         )
 
     def _read_robot(self, sock, stamp, ticks_per_second, seconds=0.0, tick=0) -> str:
+        """Decode one robot's observation block and publish what it carries.
+
+        The blocks are read in wire order, and each reader drains its whole
+        payload whether or not anything is published, so the next field (and
+        the next robot) stays aligned on the socket.
+        """
         robot_id = recv_exact(sock, struct.unpack("<B", recv_exact(sock, 1))[0]).decode(
             "utf-8"
         )
         robot = self._robot(robot_id)
+        self._read_ground_truth(sock, robot, stamp)
+        if _read_flag(sock):
+            self._read_odometry(sock, robot, robot_id, tick, ticks_per_second)
+        if _read_flag(sock):
+            # Wheel encoders (2 velocities, 2 distances). Nothing reads them:
+            # the estimator takes encoders through its own ARGoS channel. The
+            # loop function still sends them, so drain them for framing until
+            # the wire format drops the block.
+            recv_exact(sock, 4 * 8)
+        if _read_flag(sock):
+            self._read_imu(sock, robot, stamp)
+        if _read_flag(sock):
+            self._read_lidar(sock, robot, stamp, ticks_per_second, tick)
+        if _read_flag(sock):
+            self._read_camera(sock, robot, ticks_per_second, tick)
+        return robot_id
 
-        # -- ground truth ---------------------------------------------------
+    def _read_ground_truth(self, sock, robot: RobotInterface, stamp) -> None:
         gt = struct.unpack("<13d", recv_exact(sock, 13 * 8))
         gt_pose = _base_pose_from_origin(tuple(gt), robot.base_height)
         truth = Odometry()
@@ -717,458 +982,261 @@ class ArgosBridge(Node):
         truth.twist.twist.angular = Vector3(x=gt_pose[10], y=gt_pose[11], z=gt_pose[12])
         robot.pub_truth.publish(truth)
 
-        # -- odometry -------------------------------------------------------
-        if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            valid = struct.unpack("<B", recv_exact(sock, 1))[0]
-            odo = struct.unpack("<13d", recv_exact(sock, 13 * 8))
-            (odom_tick,) = struct.unpack("<I", recv_exact(sock, 4))
-            # Repeating an old estimate at a new time fabricates motion history.
-            if valid and robot.last_odom_tick < odom_tick <= tick:
-                odo = _base_pose_from_origin(odo, robot.base_height)
-                robot.last_odom_tick = odom_tick
-                robot.last_odom_pose = tuple(odo)
-                robot.odom_pose_history[odom_tick] = robot.last_odom_pose
-                for old_tick in tuple(robot.odom_pose_history):
-                    if old_tick < odom_tick - 200:
-                        del robot.odom_pose_history[old_tick]
-                odom_stamp = _stamp_of(odom_tick, ticks_per_second)
-                odom = Odometry()
-                odom.header.stamp = odom_stamp
-                odom.header.frame_id = robot.frame_odom
-                odom.child_frame_id = robot.frame_base
-                odom.pose.pose.position = Point(x=odo[0], y=odo[1], z=odo[2])
-                odom.pose.pose.orientation = Quaternion(
-                    w=odo[3], x=odo[4], y=odo[5], z=odo[6]
-                )
-                odom.twist.twist.linear = Vector3(x=odo[7], y=odo[8], z=odo[9])
-                odom.twist.twist.angular = Vector3(x=odo[10], y=odo[11], z=odo[12])
-                robot.pub_odom.publish(odom)
-
-                transform = TransformStamped()
-                transform.header.stamp = odom_stamp
-                transform.header.frame_id = robot.frame_odom
-                transform.child_frame_id = robot.frame_base
-                transform.transform.translation = Vector3(x=odo[0], y=odo[1], z=odo[2])
-                transform.transform.rotation = odom.pose.pose.orientation
-
-                # These frames are intentionally planar navigation products,
-                # not aliases for base_link.  Apply the complete SE(3) pose
-                # to each hit before flattening its endpoint; the TF below
-                # carries the matching XY pose and yaw only.
-                qw, qx, qy, qz = (float(value) for value in odo[3:7])
-                yaw = math.atan2(
-                    2.0 * (qx * qy + qz * qw),
-                    1.0 - 2.0 * (qy * qy + qz * qz),
-                )
-                planar_rotation = Quaternion(
-                    w=math.cos(yaw / 2.0), x=0.0, y=0.0, z=math.sin(yaw / 2.0)
-                )
-                nav_scan_tf = TransformStamped()
-                nav_scan_tf.header.stamp = odom_stamp
-                nav_scan_tf.header.frame_id = robot.frame_odom
-                nav_scan_tf.child_frame_id = robot.frame_nav_scan
-                nav_scan_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
-                nav_scan_tf.transform.rotation = planar_rotation
-                nav_prox_tf = TransformStamped()
-                nav_prox_tf.header.stamp = odom_stamp
-                nav_prox_tf.header.frame_id = robot.frame_odom
-                nav_prox_tf.child_frame_id = robot.frame_nav_prox
-                nav_prox_tf.transform.translation = Vector3(x=odo[0], y=odo[1], z=0.0)
-                nav_prox_tf.transform.rotation = planar_rotation
-                robot.pub_tf.publish(
-                    TFMessage(transforms=[transform, nav_scan_tf, nav_prox_tf])
-                )
-            elif not valid and not robot._warned_invalid:
-                robot._warned_invalid = True
-                # Not an error: an external estimator needs motion and a few
-                # seconds of sensor data before it has a pose at all. Publishing
-                # a placeholder would put the robot at the origin of its own map.
-                self.get_logger().info(
-                    f"[{robot_id}] estimator has no pose yet; withholding "
-                    f"/{robot_id}/odom and odom->base_link until it converges"
-                )
-
-        # -- wheel encoders --------------------------------------------------
-        # The estimator consumes encoders through its own ARGoS channel.
-        # Drain this unused payload to preserve observation packet framing.
-        if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            recv_exact(sock, 4 * 8)
-
-        # -- IMU -------------------------------------------------------------
-        if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            imu_data = struct.unpack("<6d", recv_exact(sock, 6 * 8))
-            imu = Imu()
-            imu.header.stamp = stamp
-            imu.header.frame_id = robot.frame_imu
-            imu.angular_velocity = Vector3(x=imu_data[0], y=imu_data[1], z=imu_data[2])
-            imu.linear_acceleration = Vector3(
-                x=imu_data[3], y=imu_data[4], z=imu_data[5]
+    def _read_odometry(
+        self, sock, robot: RobotInterface, robot_id: str, tick, ticks_per_second
+    ) -> None:
+        valid = struct.unpack("<B", recv_exact(sock, 1))[0]
+        odo = struct.unpack("<13d", recv_exact(sock, 13 * 8))
+        (odom_tick,) = struct.unpack("<I", recv_exact(sock, 4))
+        # Repeating an old estimate at a new time fabricates motion history.
+        if valid and robot.last_odom_tick < odom_tick <= tick:
+            odo = _base_pose_from_origin(odo, robot.base_height)
+            robot.last_odom_tick = odom_tick
+            robot.last_odom_pose = tuple(odo)
+            robot.odom_pose_history[odom_tick] = robot.last_odom_pose
+            for old_tick in tuple(robot.odom_pose_history):
+                if old_tick < odom_tick - 200:
+                    del robot.odom_pose_history[old_tick]
+            _publish_odometry(robot, odo, _stamp_of(odom_tick, ticks_per_second))
+        elif not valid and not robot._warned_invalid:
+            robot._warned_invalid = True
+            # Not an error: an external estimator needs motion and a few
+            # seconds of sensor data before it has a pose at all. Publishing
+            # a placeholder would put the robot at the origin of its own map.
+            self.get_logger().info(
+                f"[{robot_id}] estimator has no pose yet; withholding "
+                f"/{robot_id}/odom and odom->base_link until it converges"
             )
-            # No orientation estimate: this is a 6-DOF IMU, and -1 in the first
-            # covariance element is how sensor_msgs/Imu says so. Filling it from
-            # ground truth would hand a localizer the answer.
-            imu.orientation_covariance[0] = -1.0
-            robot.pub_imu.publish(imu)
 
-        # -- lidar ------------------------------------------------------------
-        if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
-                "<IIIfI", recv_exact(sock, 20)
+    def _read_imu(self, sock, robot: RobotInterface, stamp) -> None:
+        imu_data = struct.unpack("<6d", recv_exact(sock, 6 * 8))
+        imu = Imu()
+        imu.header.stamp = stamp
+        imu.header.frame_id = robot.frame_imu
+        imu.angular_velocity = Vector3(x=imu_data[0], y=imu_data[1], z=imu_data[2])
+        imu.linear_acceleration = Vector3(x=imu_data[3], y=imu_data[4], z=imu_data[5])
+        # No orientation estimate: this is a 6-DOF IMU, and -1 in the first
+        # covariance element is how sensor_msgs/Imu says so. Filling it from
+        # ground truth would hand a localizer the answer.
+        imu.orientation_covariance[0] = -1.0
+        robot.pub_imu.publish(imu)
+
+    def _read_lidar(
+        self, sock, robot: RobotInterface, stamp, ticks_per_second: int, tick: int
+    ) -> None:
+        scan_tick, _rings, _azimuths, max_range, readings = struct.unpack(
+            "<IIIfI", recv_exact(sock, 20)
+        )
+        # Rendering and socket exchange run on separate schedules. Use
+        # capture time for every projection so TF lookup does not rotate
+        # old geometry using the robot's current heading.
+        scan_age_ticks = tick - scan_tick
+        scan_tick_valid = 0 <= scan_age_ticks <= ticks_per_second
+        if scan_tick_valid:
+            scan_stamp = _stamp_of(scan_tick, ticks_per_second)
+        else:
+            scan_stamp = stamp
+            self._warn_scan_tick(scan_tick, tick)
+        # The payload is always drained, duplicate or not: it is framed on
+        # the socket and the next field starts after it either way.
+        raw = recv_exact(sock, readings * LIDAR_READING.size)
+        # ARGoS's unrendered SScan starts with MaxRange=0. Publishing it
+        # can make SLAM Toolbox cache an unusable laser model for this frame.
+        # TF2 treats zero as "latest", losing the capture pose during
+        # startup settling. Drain tick-zero scans without publishing; the
+        # exchange tick must also support a nonzero fallback timestamp.
+        usable_scan = (
+            tick > 0
+            and scan_tick > 0
+            and math.isfinite(max_range)
+            and max_range > SCAN_RANGE_MIN
+        )
+        duplicate = robot.last_scan_tick == scan_tick
+        if usable_scan:
+            robot.last_scan_tick = scan_tick
+        # A duplicate frame is not a new observation. Publishing it would
+        # hand every consumer two readings where the sensor produced one,
+        # with identical stamps, which is the zero interval that defeats
+        # the turn-rate gate downstream.
+        if duplicate or not usable_scan:
+            return
+        demand = ScanDemand.of(robot)
+        products = project_scan(robot, raw, max_range, scan_tick, demand)
+        robot.last_scan_raw = raw
+        robot.last_scan_products = products
+        self._publish_scan(robot, products, demand, scan_stamp, scan_tick_valid)
+
+    def _publish_scan(
+        self,
+        robot: RobotInterface,
+        products: "ScanProducts",
+        demand: "ScanDemand",
+        scan_stamp,
+        scan_tick_valid: bool,
+    ) -> None:
+        hits = products.hits
+        # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
+        if demand.points and hits:
+            cloud = PointCloud2()
+            cloud.header.stamp = scan_stamp
+            cloud.header.frame_id = robot.frame_lidar
+            cloud.height = 1
+            cloud.width = hits
+            # `intensity` carries the laser channel index. A real unit puts
+            # return strength there, which this sensor does not model; the
+            # ring is what a 3D SLAM front-end actually wants from the
+            # fourth field, and it costs nothing to carry.
+            cloud.fields = LIDAR_POINT_FIELDS
+            cloud.is_bigendian = False
+            cloud.point_step = 16
+            cloud.row_step = 16 * hits
+            cloud.is_dense = True
+            cloud.data = products.cloud_data
+            robot.pub_points.publish(cloud)
+        if demand.capture and hits and scan_tick_valid:
+            robot.pub_capture.publish(
+                String(data=self._capture_provenance(robot, products, scan_stamp))
             )
-            # Rendering and socket exchange run on separate schedules. Use
-            # capture time for every projection so TF lookup does not rotate
-            # old geometry using the robot's current heading.
-            scan_age_ticks = tick - scan_tick
-            scan_tick_valid = 0 <= scan_age_ticks <= ticks_per_second
-            if scan_tick_valid:
-                scan_stamp = _stamp_of(scan_tick, ticks_per_second)
-            else:
-                scan_stamp = stamp
-                self._warn_scan_tick(scan_tick, tick)
-            # The payload is always drained, duplicate or not: it is framed on
-            # the socket and the next field starts after it either way.
-            raw = recv_exact(sock, readings * LIDAR_READING.size)
-            # ARGoS's unrendered SScan starts with MaxRange=0. Publishing it
-            # can make SLAM Toolbox cache an unusable laser model for this frame.
-            # TF2 treats zero as "latest", losing the capture pose during
-            # startup settling. Drain tick-zero scans without publishing; the
-            # exchange tick must also support a nonzero fallback timestamp.
-            usable_scan = (
-                tick > 0
-                and scan_tick > 0
-                and math.isfinite(_max_range)
-                and _max_range > SCAN_RANGE_MIN
+
+        # 2. Planar LaserScan (horizontal ring slice in sensor frame)
+        if demand.scan:
+            robot.pub_scan.publish(
+                _laser_scan(
+                    scan_stamp,
+                    robot.frame_lidar,
+                    products.max_range,
+                    products.scan_ranges,
+                )
             )
-            duplicate = robot.last_scan_tick == scan_tick
-            if usable_scan:
-                robot.last_scan_tick = scan_tick
-            # A duplicate frame is not a new observation. Publishing it would
-            # hand every consumer two readings where the sensor produced one,
-            # with identical stamps, which is the zero interval that defeats
-            # the turn-rate gate downstream.
-            if not duplicate and usable_scan:
-                nav_pose_tick = max(
-                    (
-                        old_tick
-                        for old_tick in robot.odom_pose_history
-                        if old_tick <= scan_tick
-                    ),
-                    default=-1,
-                )
-                nav_pose = robot.odom_pose_history.get(scan_tick)
-                if nav_pose is None:
-                    nav_pose = robot.odom_pose_history.get(nav_pose_tick)
-                # The projection uses position and quaternion, not velocities.
-                # Compare the seven pose components bit-for-bit: a tolerance
-                # could hide a change at a scan bin/range boundary.
-                nav_pose_key = (
-                    struct.pack("<7d", *nav_pose[:7]) if nav_pose is not None else None
-                )
-                points_needed = robot.pub_points.get_subscription_count() > 0
-                capture_needed = robot.pub_capture.get_subscription_count() > 0
-                scan_needed = robot.pub_scan.get_subscription_count() > 0
-                prox_needed = robot.pub_prox.get_subscription_count() > 0
-                nav_scan_needed = robot.pub_nav_scan.get_subscription_count() > 0
-                nav_prox_needed = robot.pub_nav_prox.get_subscription_count() > 0
-                same_raw = (
-                    raw == robot.last_scan_raw
-                    and robot.last_scan_products is not None
-                    and robot.last_scan_products[0] == _max_range
-                )
-                if same_raw:
-                    (
-                        _,
-                        hits,
-                        cloud_data,
-                        points_sha256,
-                        scan_ranges,
-                        prox_ranges,
-                        nav_scan_ranges,
-                        nav_prox_ranges,
-                        old_pose_key,
-                    ) = robot.last_scan_products
-                else:
-                    hits = cloud_data = points_sha256 = None
-                    scan_ranges = prox_ranges = nav_scan_ranges = nav_prox_ranges = None
-                    old_pose_key = None
-                # The raw rays determine the packed cloud and physical scans;
-                # only the flattened projections depend on capture-time pose.
-                if old_pose_key != nav_pose_key:
-                    nav_scan_ranges = nav_prox_ranges = None
-                need_hits = points_needed or capture_needed
-                need_rays = (
-                    (need_hits and (cloud_data is None or hits is None))
-                    or (capture_needed and hits and points_sha256 is None)
-                    or (scan_needed and scan_ranges is None)
-                    or (prox_needed and prox_ranges is None)
-                    or (nav_scan_needed and nav_scan_ranges is None)
-                    or (nav_prox_needed and nav_prox_ranges is None)
-                )
-                if need_rays:
-                    arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
-                    hit_mask = arr["hit"] != 0
-                    hits = int(np.count_nonzero(hit_mask))
-                    hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
-                    if need_hits and cloud_data is None and hits:
-                        out = np.empty((hits, 4), dtype="<f4")
-                        out[:, 0] = hit_pts["x"]
-                        out[:, 1] = hit_pts["y"]
-                        out[:, 2] = hit_pts["z"]
-                        out[:, 3] = hit_pts["ring"]
-                        cloud_data = out.tobytes()
-                        points_sha256 = (
-                            hashlib.sha256(
-                                np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
-                            ).hexdigest()
-                            if capture_needed
-                            else None
-                        )
-                    elif capture_needed and hits and points_sha256 is None:
-                        xyz = np.empty((hits, 3), dtype="<f4")
-                        xyz[:, 0], xyz[:, 1], xyz[:, 2] = (
-                            hit_pts["x"],
-                            hit_pts["y"],
-                            hit_pts["z"],
-                        )
-                        points_sha256 = hashlib.sha256(xyz.tobytes()).hexdigest()
-                    if scan_needed and scan_ranges is None:
-                        scan_ranges = project_laserscan_slice(
-                            hit_pts, range_max=float(_max_range)
-                        ).tolist()
-                    if prox_needed and prox_ranges is None:
-                        prox_ranges = project_laserscan_proximity(
-                            hit_pts,
-                            robot.lidar_x,
-                            robot.lidar_z,
-                            robot.base_height,
-                            prox_min_height=robot.prox_min_height,
-                            prox_range_max=robot.prox_range_max,
-                        ).tolist()
-                    if (nav_scan_needed and nav_scan_ranges is None) or (
-                        nav_prox_needed and nav_prox_ranges is None
-                    ):
-                        if nav_pose is not None:
-                            if nav_scan_needed and nav_scan_ranges is None:
-                                nav_scan_ranges = project_laserscan_navigation(
-                                    hit_pts,
-                                    robot.lidar_x,
-                                    robot.lidar_z,
-                                    nav_pose,
-                                    range_max=float(_max_range),
-                                ).tolist()
-                            if nav_prox_needed and nav_prox_ranges is None:
-                                nav_prox_ranges = (
-                                    project_laserscan_proximity_navigation(
-                                        hit_pts,
-                                        robot.lidar_x,
-                                        robot.lidar_z,
-                                        robot.base_height,
-                                        nav_pose,
-                                        prox_min_height=robot.prox_min_height,
-                                        prox_range_max=robot.prox_range_max,
-                                    ).tolist()
-                                )
-                if need_hits and hits is None:
-                    hits = 0
-                robot.last_scan_raw = raw
-                robot.last_scan_products = (
-                    _max_range,
-                    hits,
-                    cloud_data,
-                    points_sha256,
-                    scan_ranges,
-                    prox_ranges,
-                    nav_scan_ranges,
-                    nav_prox_ranges,
-                    nav_pose_key,
-                )
 
-                # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
-                if points_needed and hits:
-                    cloud = PointCloud2()
-                    cloud.header.stamp = scan_stamp
-                    cloud.header.frame_id = robot.frame_lidar
-                    cloud.height = 1
-                    cloud.width = hits
-                    # `intensity` carries the laser channel index. A real unit puts
-                    # return strength there, which this sensor does not model; the
-                    # ring is what a 3D SLAM front-end actually wants from the
-                    # fourth field, and it costs nothing to carry.
-                    cloud.fields = LIDAR_POINT_FIELDS
-                    cloud.is_bigendian = False
-                    cloud.point_step = 16
-                    cloud.row_step = 16 * hits
-                    cloud.is_dense = True
-                    cloud.data = cloud_data
-                    robot.pub_points.publish(cloud)
-                if capture_needed and hits and scan_tick_valid:
-                    robot.pub_capture.publish(
-                        String(
-                            data=json.dumps(
-                                {
-                                    "schema": "swarmdeck.raw-capture.v1",
-                                    "provider": "simulation",
-                                    "source_contract": (
-                                        "argos.photorealistic_lidar.hit_endpoints."
-                                        "single_tick.v1"
-                                    ),
-                                    "geometry": "raw_ray_capture",
-                                    "stamp_ns": scan_stamp.sec * 1_000_000_000
-                                    + scan_stamp.nanosec,
-                                    "frame_id": robot.frame_lidar,
-                                    "clock": "ros_sim_time",
-                                    "first_return": True,
-                                    "instantaneous": True,
-                                    "single_sensor_origin": True,
-                                    "producer_id": self.capture_producer_id,
-                                    "sensor_epoch": self.sensor_epoch,
-                                    "point_count": hits,
-                                    "points_sha256": points_sha256,
-                                },
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            )
-                        )
-                    )
-
-                # 2. Planar LaserScan (horizontal ring slice in sensor frame)
-                if scan_needed:
-                    scan_msg = LaserScan()
-                    scan_msg.header.stamp = scan_stamp
-                    scan_msg.header.frame_id = robot.frame_lidar
-                    scan_msg.angle_min = float(SCAN_ANGLE_MIN)
-                    scan_msg.angle_max = float(SCAN_ANGLE_MAX)
-                    scan_msg.angle_increment = float(SCAN_ANGLE_INC)
-                    scan_msg.time_increment = 0.0
-                    scan_msg.scan_time = float(SCAN_TIME)
-                    scan_msg.range_min = float(SCAN_RANGE_MIN)
-                    scan_msg.range_max = float(_max_range)
-                    scan_msg.ranges = scan_ranges
-                    robot.pub_scan.publish(scan_msg)
-
-                # 3. Nav2 mapping slice in the flattened capture-time frame.
-                # Do not relabel the lidar message: SLAM needs its physical
-                # sensor frame and full roll/pitch TF.
-                if nav_scan_needed and nav_scan_ranges is not None:
-                    nav_scan_msg = LaserScan()
-                    nav_scan_msg.header.stamp = scan_stamp
-                    nav_scan_msg.header.frame_id = robot.frame_nav_scan
-                    nav_scan_msg.angle_min = float(SCAN_ANGLE_MIN)
-                    nav_scan_msg.angle_max = float(SCAN_ANGLE_MAX)
-                    nav_scan_msg.angle_increment = float(SCAN_ANGLE_INC)
-                    nav_scan_msg.time_increment = 0.0
-                    nav_scan_msg.scan_time = float(SCAN_TIME)
-                    nav_scan_msg.range_min = float(SCAN_RANGE_MIN)
-                    nav_scan_msg.range_max = float(_max_range)
-                    nav_scan_msg.ranges = nav_scan_ranges
-                    robot.pub_nav_scan.publish(nav_scan_msg)
-
-                # 4. Proximity 2.5D LaserScan (explorer's support-relative
-                # bumper band in base_link).
-                if prox_needed:
-                    prox_msg = LaserScan()
-                    prox_msg.header.stamp = scan_stamp
-                    prox_msg.header.frame_id = robot.frame_base
-                    prox_msg.angle_min = float(SCAN_ANGLE_MIN)
-                    prox_msg.angle_max = float(SCAN_ANGLE_MAX)
-                    prox_msg.angle_increment = float(SCAN_ANGLE_INC)
-                    prox_msg.time_increment = 0.0
-                    prox_msg.scan_time = float(SCAN_TIME)
-                    prox_msg.range_min = float(SCAN_RANGE_MIN)
-                    prox_msg.range_max = float(robot.prox_range_max)
-                    prox_msg.ranges = prox_ranges
-                    robot.pub_prox.publish(prox_msg)
-
-                # 5. Nav2 proximity band in the same flattened frame. The
-                # support-relative bridge gate remains intact, so ramps and
-                # cliffs are not made traversable by flattening.
-                if nav_prox_needed and nav_prox_ranges is not None:
-                    nav_prox_msg = LaserScan()
-                    nav_prox_msg.header.stamp = scan_stamp
-                    nav_prox_msg.header.frame_id = robot.frame_nav_prox
-                    nav_prox_msg.angle_min = float(SCAN_ANGLE_MIN)
-                    nav_prox_msg.angle_max = float(SCAN_ANGLE_MAX)
-                    nav_prox_msg.angle_increment = float(SCAN_ANGLE_INC)
-                    nav_prox_msg.time_increment = 0.0
-                    nav_prox_msg.scan_time = float(SCAN_TIME)
-                    nav_prox_msg.range_min = float(SCAN_RANGE_MIN)
-                    nav_prox_msg.range_max = float(robot.prox_range_max)
-                    nav_prox_msg.ranges = nav_prox_ranges
-                    robot.pub_nav_prox.publish(nav_prox_msg)
-        # -- camera ------------------------------------------------------------
-        if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            cam_tick, width, height, fov_deg = struct.unpack(
-                "<IIIf", recv_exact(sock, 16)
+        # 3. Nav2 mapping slice in the flattened capture-time frame.
+        # Do not relabel the lidar message: SLAM needs its physical
+        # sensor frame and full roll/pitch TF.
+        if demand.nav_scan and products.nav_scan_ranges is not None:
+            robot.pub_nav_scan.publish(
+                _laser_scan(
+                    scan_stamp,
+                    robot.frame_nav_scan,
+                    products.max_range,
+                    products.nav_scan_ranges,
+                )
             )
-            rgb = recv_exact(sock, width * height * 3)
-            has_depth = struct.unpack("<B", recv_exact(sock, 1))[0]
-            depth_data = recv_exact(sock, width * height * 4) if has_depth else None
-            # Drain the complete frame before skipping it, keeping the next
-            # robot aligned on the socket. Never relabel stale RGB-D as current.
-            # As for LiDAR, tick zero cannot name a capture-time TF in ROS.
-            # The complete RGB-D payload has already been drained, so skipping
-            # it is safe for packet framing and the next positive tick remains
-            # eligible.
-            if (
-                cam_tick == 0
-                or not robot.last_camera_tick < cam_tick <= tick
-                or not width
-                or not height
-            ):
-                return robot_id
-            robot.last_camera_tick = cam_tick
-            camera_stamp = _stamp_of(cam_tick, ticks_per_second)
 
-            if robot.pub_image.get_subscription_count() > 0:
-                image = Image()
-                image.header.stamp = camera_stamp
-                image.header.frame_id = robot.frame_camera
-                image.height, image.width = height, width
-                image.encoding = "rgb8"
-                image.is_bigendian = False
-                image.step = width * 3
-                image.data = rgb
-                robot.pub_image.publish(image)
+        # 4. Proximity 2.5D LaserScan (explorer's support-relative
+        # bumper band in base_link).
+        if demand.prox:
+            robot.pub_prox.publish(
+                _laser_scan(
+                    scan_stamp,
+                    robot.frame_base,
+                    robot.prox_range_max,
+                    products.prox_ranges,
+                )
+            )
 
-            # The sensor reports a VERTICAL field of view, so the focal length
-            # comes from the height. Deriving it from the width instead scales
-            # every deprojected detection by the aspect ratio, which looks like
-            # a calibration error nobody made.
-            if robot.pub_info.get_subscription_count() > 0:
-                fov = math.radians(fov_deg if fov_deg > 0 else 60.0)
-                fy = height / (2.0 * math.tan(fov / 2.0))
-                fx = fy
-                cx, cy = width / 2.0, height / 2.0
-                info = CameraInfo()
-                info.header.stamp = camera_stamp
-                info.header.frame_id = robot.frame_camera
-                info.height, info.width = height, width
-                info.distortion_model = "plumb_bob"
-                info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
-                info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
-                info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-                info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
-                robot.pub_info.publish(info)
+        # 5. Nav2 proximity band in the same flattened frame. The
+        # support-relative bridge gate remains intact, so ramps and
+        # cliffs are not made traversable by flattening.
+        if demand.nav_prox and products.nav_prox_ranges is not None:
+            robot.pub_nav_prox.publish(
+                _laser_scan(
+                    scan_stamp,
+                    robot.frame_nav_prox,
+                    robot.prox_range_max,
+                    products.nav_prox_ranges,
+                )
+            )
 
-            if has_depth and robot.pub_depth.get_subscription_count() > 0:
-                depth = Image()
-                depth.header.stamp = camera_stamp
-                depth.header.frame_id = robot.frame_camera
-                depth.height, depth.width = height, width
-                depth.encoding = "32FC1"
-                depth.is_bigendian = False
-                depth.step = width * 4
-                depth.data = depth_data
-                robot.pub_depth.publish(depth)
+    def _capture_provenance(
+        self, robot: RobotInterface, products: "ScanProducts", scan_stamp
+    ) -> str:
+        return json.dumps(
+            {
+                "schema": "swarmdeck.raw-capture.v1",
+                "provider": "simulation",
+                "source_contract": (
+                    "argos.photorealistic_lidar.hit_endpoints.single_tick.v1"
+                ),
+                "geometry": "raw_ray_capture",
+                "stamp_ns": scan_stamp.sec * 1_000_000_000 + scan_stamp.nanosec,
+                "frame_id": robot.frame_lidar,
+                "clock": "ros_sim_time",
+                "first_return": True,
+                "instantaneous": True,
+                "single_sensor_origin": True,
+                "producer_id": self.capture_producer_id,
+                "sensor_epoch": self.sensor_epoch,
+                "point_count": products.hits,
+                "points_sha256": products.points_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
-        return robot_id
+    def _read_camera(
+        self, sock, robot: RobotInterface, ticks_per_second: int, tick: int
+    ) -> None:
+        cam_tick, width, height, fov_deg = struct.unpack("<IIIf", recv_exact(sock, 16))
+        rgb = recv_exact(sock, width * height * 3)
+        has_depth = _read_flag(sock)
+        depth_data = recv_exact(sock, width * height * 4) if has_depth else None
+        # Drain the complete frame before skipping it, keeping the next
+        # robot aligned on the socket. Never relabel stale RGB-D as current.
+        # As for LiDAR, tick zero cannot name a capture-time TF in ROS.
+        # The complete RGB-D payload has already been drained, so skipping
+        # it is safe for packet framing and the next positive tick remains
+        # eligible.
+        if (
+            cam_tick == 0
+            or not robot.last_camera_tick < cam_tick <= tick
+            or not width
+            or not height
+        ):
+            return
+        robot.last_camera_tick = cam_tick
+        camera_stamp = _stamp_of(cam_tick, ticks_per_second)
 
-    @staticmethod
-    def _iter_hits(raw: bytes, readings: int):
-        arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
-        hit_mask = arr["hit"] != 0
-        for pt in arr[hit_mask]:
-            yield float(pt["x"]), float(pt["y"]), float(pt["z"]), int(pt["ring"])
+        if robot.pub_image.get_subscription_count() > 0:
+            image = Image()
+            image.header.stamp = camera_stamp
+            image.header.frame_id = robot.frame_camera
+            image.height, image.width = height, width
+            image.encoding = "rgb8"
+            image.is_bigendian = False
+            image.step = width * 3
+            image.data = rgb
+            robot.pub_image.publish(image)
+
+        # The sensor reports a VERTICAL field of view, so the focal length
+        # comes from the height. Deriving it from the width instead scales
+        # every deprojected detection by the aspect ratio, which looks like
+        # a calibration error nobody made.
+        if robot.pub_info.get_subscription_count() > 0:
+            fov = math.radians(fov_deg if fov_deg > 0 else 60.0)
+            fy = height / (2.0 * math.tan(fov / 2.0))
+            fx = fy
+            cx, cy = width / 2.0, height / 2.0
+            info = CameraInfo()
+            info.header.stamp = camera_stamp
+            info.header.frame_id = robot.frame_camera
+            info.height, info.width = height, width
+            info.distortion_model = "plumb_bob"
+            info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+            info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+            info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+            robot.pub_info.publish(info)
+
+        if has_depth and robot.pub_depth.get_subscription_count() > 0:
+            depth = Image()
+            depth.header.stamp = camera_stamp
+            depth.header.frame_id = robot.frame_camera
+            depth.height, depth.width = height, width
+            depth.encoding = "32FC1"
+            depth.is_bigendian = False
+            depth.step = width * 4
+            depth.data = depth_data
+            robot.pub_depth.publish(depth)
 
     def _send_commands(
         self, sock: socket.socket, tick: int, ids, sim_now: float

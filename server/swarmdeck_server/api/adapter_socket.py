@@ -247,21 +247,5 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             if not det.get("hidden", False):
                 await state.broadcast({"type": "detection", "detection": det})
 
-    elif kind == "reset_done":
-        # The adapter has finished resetting and has dropped its cached
-        # grid, so the backend may now clear without the old map coming
-        # straight back. See reset_fleet().
-        #
-        # A partial failure is recorded rather than alerted on here:
-        # reset_fleet() clears every alert once the fleet has answered,
-        # which would wipe an alert raised from inside this branch.
-        rid = msg.get("robot_id", "")
-        if rid in state._reset_pending:
-            if not msg.get("ok", True):
-                state._reset_failures[rid] = msg.get("steps") or {}
-            state._reset_pending.discard(rid)
-            if not state._reset_pending and state._reset_done is not None:
-                state._reset_done.set()
-
     # Unknown types are ignored, not fatal (protocol rule 3).
     return False

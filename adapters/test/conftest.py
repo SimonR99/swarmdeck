@@ -31,7 +31,14 @@ class _Cv2Stub:
 
     @staticmethod
     def cvtColor(frame, code):
-        return frame
+        """The three conversions image_to_bgr uses, with OpenCV's channel order."""
+        if code == _Cv2Stub.COLOR_RGB2BGR:
+            return np.ascontiguousarray(frame[..., ::-1])
+        if code == _Cv2Stub.COLOR_RGBA2BGR:
+            return np.ascontiguousarray(frame[..., 2::-1])
+        if code == _Cv2Stub.COLOR_BGRA2BGR:
+            return np.ascontiguousarray(frame[..., :3])
+        raise NotImplementedError(f"cv2 stub has no conversion {code}")
 
     @staticmethod
     def imencode(ext, frame, params=None):

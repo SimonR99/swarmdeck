@@ -559,3 +559,15 @@ def test_pose_lookup_uses_navigation_frame_and_base_frame(mod):
     assert pose["x"] == pytest.approx(1.25)
     assert pose["y"] == pytest.approx(-0.75)
     assert pose["yaw"] == pytest.approx(0.5)
+
+
+def test_hardware_bridge_constructs_with_default_odometry_and_plan_topics(mod):
+    """__init__ subscribes odom and plan, so their message types must import."""
+    mod.rospy.Subscriber.reset_mock()
+    bridge = mod.HardwareBridge("r0", mod.load_config(None), "http://backend")
+
+    subscribed = {
+        call.args[0]: call.args[1] for call in mod.rospy.Subscriber.call_args_list
+    }
+    assert subscribed[bridge.cfg["topics"]["odom"]] is mod.Odometry
+    assert subscribed[bridge.cfg["topics"]["plan"]] is mod.NavPath

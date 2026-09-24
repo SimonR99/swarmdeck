@@ -303,10 +303,8 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 )
 
     elif kind == "reset_sim":
-        # Fire-and-forget: reset_fleet() waits on every adapter, and awaiting it
-        # here would stall this socket's receive loop for as long as that takes,
-        # so the operator's own GUI would stop updating during the one operation
-        # they most want to watch. Progress reaches every client by broadcast.
+        # Fire-and-forget, so a slow supervisor handoff never stalls this
+        # socket's receive loop. Progress reaches every client by broadcast.
         asyncio.create_task(state.reset_fleet())
 
     elif kind == "acknowledge_alert":

@@ -157,19 +157,8 @@ calibration for precise texture alignment.
 | Botman / Aslan | `/oak/rgb/image_raw/compressed`, `/oak/rgb/camera_info` | `oak_rgb_camera_optical_frame` |
 | TARS (ROS 1) | `/d400_arm/color/image_raw/compressed`, `/d400_arm/color/camera_info` | `d400_arm_color_optical_frame` |
 
-Run the passive check inside an adapter container with ROS sourced; it prints
-only visibility counts, projection timing, and failure reasons:
-
-```bash
-python3 /app/swarmdeck/scripts/check_map_color.py --ros 2 \
-  --config /app/swarmdeck/adapters/adapter_ros2/config/bunker.yaml
-# TARS: --ros 1 --config /app/swarmdeck/adapters/adapter_ros1/config/scout_mini.yaml
-```
-
-For a short-lived ROS 2 diagnostic, set `FASTRTPS_DEFAULT_PROFILES_FILE` to
-`/app/swarmdeck/deploy/dds/fastdds_udp_only.xml`; retain shared memory for the
-long-running adapter. Numeric visibility confirms the pipeline, but inspect a
-camera/LiDAR overlay or a calibration target to assess physical alignment.
+Inspect a camera/LiDAR overlay or a calibration target to assess physical
+alignment.
 
 Only the nearest cloud surface per pixel is colored; unseen points remain
 neutral gray. Optimized keyframes carry an explicit visibility alpha mask.
