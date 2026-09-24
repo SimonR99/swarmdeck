@@ -122,3 +122,42 @@ def test_source_defaults_to_cslam(monkeypatch):
     assert robot_poses.selected_source() == "ground_truth"
     with pytest.raises(ValueError):
         robot_poses.selected_source("odometry")
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_cslam_placements_expire_when_authorities_stop():
+    clock = FakeClock()
+    poses = robot_poses.CslamPoses(clock)
+    poses.update("robot_0", authority("robot_0", "c1", np.eye(4)))
+    poses.update("robot_1", authority("robot_1", "c1", np.eye(4)))
+    assert "robot_1" in poses.transforms("robot_0")[1]
+    # robot_1's authority stops: its placement is withdrawn, not republished.
+    clock.now += robot_poses.SOURCE_TTL_S / 2
+    poses.update("robot_0", authority("robot_0", "c1", np.eye(4)))
+    clock.now += robot_poses.SOURCE_TTL_S / 2 + 0.1
+    assert poses.transforms("robot_0") == ("robot_0/odom", {})
+    # Our own authority stopping withdraws every transform.
+    poses.update("robot_1", authority("robot_1", "c1", np.eye(4)))
+    clock.now += robot_poses.SOURCE_TTL_S + 0.1
+    assert poses.transforms("robot_0") == (None, {})
+
+
+def test_ground_truth_placements_expire_when_pairs_stop():
+    clock = FakeClock()
+    poses = robot_poses.GroundTruthPoses(clock)
+    for robot in ("robot_0", "robot_1"):
+        poses.add_truth(robot, 100, np.eye(4))
+        assert poses.add_odometry(robot, 100, f"{robot}/odom", np.eye(4))
+    assert "robot_1" in poses.transforms("robot_0")[1]
+    clock.now += robot_poses.SOURCE_TTL_S + 0.1
+    poses.add_truth("robot_0", 200, np.eye(4))
+    assert poses.add_odometry("robot_0", 200, "robot_0/odom", np.eye(4))
+    # robot_1's simulator feed stopped: no transform to it any more.
+    assert poses.transforms("robot_0") == ("robot_0/odom", {})

@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import time
 
 import numpy as np
 
@@ -41,6 +42,11 @@ MAX_TRUTH_SAMPLES = 400
 # close; a robot at 0.5 m/s moves 2.5 cm in it.
 MAX_PAIRING_GAP_NS = 50_000_000
 MAX_AUTHORITY_BYTES = 32_768
+# A placement not refreshed for this long (by a map authority, or by a paired
+# ground-truth and odometry sample) is withdrawn: its source has stopped, and
+# republishing the last value would keep MGG's TTL alive forever. Three of the
+# peer bridge's 1 s authority heartbeats.
+SOURCE_TTL_S = 3.0
 
 
 def pose_matrix(position, orientation):
@@ -104,8 +110,9 @@ def rigid_transform(value):
 class CslamPoses:
     """Planning frames placed in C-SLAM map components, from map authorities."""
 
-    def __init__(self):
+    def __init__(self, clock=time.monotonic):
         self.placements = {}
+        self.clock = clock
 
     def update(self, robot, authority):
         """Record `robot`'s map authority (a parsed JSON dict)."""
@@ -120,7 +127,7 @@ class CslamPoses:
             transform = rigid_transform(authority.get("T_component_planning"))
             if isinstance(component, str) and component and frame:
                 if transform is not None:
-                    placement = (component, frame, transform)
+                    placement = (component, frame, transform, self.clock())
         if placement is None:
             self.placements.pop(robot, None)
         else:
@@ -128,15 +135,21 @@ class CslamPoses:
 
     def transforms(self, robot):
         """(own frame, {peer: (peer frame, T_ours_theirs)}) for peers in
-        `robot`'s component."""
-        own = self.placements.get(robot)
+        `robot`'s component, each refreshed within SOURCE_TTL_S."""
+        now = self.clock()
+        fresh = {
+            name: placement
+            for name, placement in self.placements.items()
+            if now - placement[3] <= SOURCE_TTL_S
+        }
+        own = fresh.get(robot)
         if own is None:
             return None, {}
-        component, frame, t_component_ours = own
+        component, frame, t_component_ours, _ = own
         ours_component = np.linalg.inv(t_component_ours)
         result = {}
-        for peer, (peer_component, peer_frame, t_component_theirs) in sorted(
-            self.placements.items()
+        for peer, (peer_component, peer_frame, t_component_theirs, _) in sorted(
+            fresh.items()
         ):
             if peer != robot and peer_component == component:
                 result[peer] = (peer_frame, ours_component @ t_component_theirs)
@@ -146,9 +159,10 @@ class CslamPoses:
 class GroundTruthPoses:
     """Odometry frames placed in the simulator's world frame."""
 
-    def __init__(self):
+    def __init__(self, clock=time.monotonic):
         self.truth = {}
         self.world_odom = {}
+        self.clock = clock
 
     def add_truth(self, robot, stamp_ns, t_world_base):
         samples = self.truth.setdefault(robot, {})
@@ -169,18 +183,30 @@ class GroundTruthPoses:
         frame = str(frame).lstrip("/")
         if t_world_base is None or not frame:
             return False
-        self.world_odom[robot] = (frame, t_world_base @ np.linalg.inv(t_odom_base))
+        self.world_odom[robot] = (
+            frame,
+            t_world_base @ np.linalg.inv(t_odom_base),
+            self.clock(),
+        )
         return True
 
     def transforms(self, robot):
-        own = self.world_odom.get(robot)
+        """Like CslamPoses.transforms: only frames placed by a pair within
+        SOURCE_TTL_S."""
+        now = self.clock()
+        fresh = {
+            name: placement
+            for name, placement in self.world_odom.items()
+            if now - placement[2] <= SOURCE_TTL_S
+        }
+        own = fresh.get(robot)
         if own is None:
             return None, {}
-        frame, t_world_ours = own
+        frame, t_world_ours, _ = own
         ours_world = np.linalg.inv(t_world_ours)
         return frame, {
             peer: (peer_frame, ours_world @ t_world_theirs)
-            for peer, (peer_frame, t_world_theirs) in sorted(self.world_odom.items())
+            for peer, (peer_frame, t_world_theirs, _) in sorted(fresh.items())
             if peer != robot
         }
 
