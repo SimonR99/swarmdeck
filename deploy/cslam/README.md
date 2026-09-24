@@ -12,8 +12,11 @@
   and restarted-consumer recovery. The bridge authority heartbeat is unchanged.
 - `cslam-scancontext-index.patch` retains a ring-key KD-tree and searches up to
   63 newly appended keys directly. Every 64 additions rebuild the index. Ties
-  fall back to the full tree to preserve upstream candidate ordering. Scoring,
-  thresholds and the single-best-match API are unchanged.
+  fall back to the full tree to preserve upstream candidate ordering. Thresholds
+  and the single-best-match API are unchanged.
+- `cslam-scancontext-distance.patch` normalizes descriptor columns once and uses
+  one matrix product for every sector pairing. Cyclic diagonals produce all yaw
+  shifts, retaining zero-column exclusion and the original score definition.
 - `cslam-downsample-buffer.patch` converts ROS float32 points to contiguous
   float64 arrays in NumPy before Open3D downsampling. Voxel centroids and
   nonfinite-point rejection are unchanged.
@@ -47,10 +50,16 @@ docker run --rm -v "$PWD/deploy/cslam/tests:/tests:ro" \
   -e PYTHONPATH=/cslam_ws/src/cslam -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   swarmdeck-cslam:lane bash -lc '
     . /opt/ros/jazzy/setup.sh
+    . /cslam_ws/install/setup.sh
     bash /tests/run_pose_graph_test.sh
+    cmake -S /tests/native -B /tmp/native-tests
+    cmake --build /tmp/native-tests -j2
+    /tmp/native-tests/pose_graph_rounds
+    /tmp/native-tests/pose_graph_rounds residual
     python3 -m pytest -q -p no:cacheprovider /tests/test_*.py
     python3 /tests/benchmark_scancontext.py
     python3 /tests/benchmark_downsample.py
+    python3 /tests/benchmark_scancontext_distance.py
   '
 ```
 
