@@ -290,8 +290,9 @@ MGG drops a roadmap whose transform is missing or older than
 `neighbour_transform_ttl_sec` (5 s). `robot_poses.py` stops publishing a
 transform once either robot's placement has not been refreshed for 3 s (no map
 authority, or no paired ground truth and odometry), and before every plan MGG
-disconnects a merged roadmap whose transform is no longer current; a current
-transform joins it again. The source is selected with
+quarantines a merged roadmap whose transform is no longer current: its edges
+are cut and its vertices take no part in linking, expansion or search until a
+current transform joins it again. The source is selected with
 `--robot-poses` in `scripts/sim-up` (`ROBOT_POSES=` for `make up-sim`,
 `SWARMDECK_ROBOT_POSES` in the `mgg` service):
 
