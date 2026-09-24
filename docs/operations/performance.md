@@ -642,3 +642,135 @@ Same launch as the 12:04/12:05 baselines (`0bb7f5a`). The simulation ran at real
   with the uncorrected trace.
 - The stack CPU while exploring varies with what the fleet is doing: peer3,
   the Spot, stays near idle in both runs.
+
+## 2026-09-24T09:20 - tuf, SubT, 4 robots, drift, RTX 4070, idle, all lanes + nav-startup (commit 992272b)
+
+- **Real-time factor 1.00** (27.9 s simulated in 27.9 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| argos | 57 |
+| sim | 26 |
+| peer3 | 11 |
+| peer2 | 11 |
+| peer0 | 11 |
+| peer1 | 11 |
+| mgg | 8 |
+| server | 1 |
+| mediamtx | 0 |
+| mapping | 0 |
+| ui | 0 |
+| **total** | **134** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| argos3 | argos | 57 |
+| swarmdeck_argos_bridge.py | sim | 13 |
+| cslam_bridge.py /r3 | peer3 | 7 |
+| cslam_bridge.py /r2 | peer2 | 7 |
+| cslam_bridge.py /r0 | peer0 | 7 |
+| cslam_bridge.py /r1 | peer1 | 7 |
+| adapter_sim.py | sim | 3 |
+| lidar_handler_node.py /r1 | peer1 | 2 |
+| lidar_handler_node.py /r0 | peer0 | 2 |
+| lidar_handler_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r3 | peer3 | 2 |
+| loop_closure_detection_node.py /r2 | peer2 | 2 |
+| lidar_handler_node.py /r2 | peer2 | 2 |
+| loop_closure_detection_node.py /r1 | peer1 | 2 |
+| loop_closure_detection_node.py /r0 | peer0 | 2 |
+
+- MGG plan cycles: none in the window (fleet not exploring?)
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 4.0 | 8.5 |
+| fleet_change | 0.1 | 0.9 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+## 2026-09-24T09:21 - tuf, SubT, exploring (4 robots), RTX 4070, all lanes + nav-startup (commit 992272b)
+
+- Explore started by the harness
+- **Real-time factor 1.00** (117.6 s simulated in 117.6 s; /clock 10.0 Hz)
+
+| Container | CPU % |
+|---|---:|
+| mapping | 139 |
+| mgg | 98 |
+| peer0 | 90 |
+| argos | 69 |
+| sim | 61 |
+| peer3 | 47 |
+| peer2 | 37 |
+| server | 34 |
+| peer1 | 12 |
+| mediamtx | 0 |
+| ui | 0 |
+| **total** | **588** |
+
+| Process | Container | CPU % |
+|---|---|---:|
+| swarmdeck-mola-import | mapping | 75 |
+| argos3 | argos | 69 |
+| lidar_handler_node.py /r0 | peer0 | 43 |
+| swarmdeck-mola-import | mapping | 34 |
+| python | server | 34 |
+| mggplanner_node /robot_0/mgg | mgg | 27 |
+| swarmdeck-mola-import | mapping | 27 |
+| mggplanner_node /robot_3/mgg | mgg | 25 |
+| mggplanner_node /robot_2/mgg | mgg | 24 |
+| cslam_bridge.py /r0 | peer0 | 23 |
+| swarmdeck_argos_bridge.py | sim | 22 |
+| mggplanner_node /robot_1/mgg | mgg | 18 |
+| cslam_bridge.py /r2 | peer2 | 18 |
+| cslam_bridge.py /r3 | peer3 | 16 |
+| loop_closure_detection_node.py /r3 | peer3 | 16 |
+
+- **MGG plan cycles: 49**, wall ms median 178 (max 307); lattice median 102, gain median 48; median 1499 vertices, 26023 edges
+
+| GUI message | per s | KB/s |
+|---|---:|---:|
+| robot_state | 16.8 | 113.9 |
+| fleet_change | 0.1 | 2.7 |
+| session_state | 1.1 | 0.1 |
+| settings_state | 0.1 | 0.1 |
+| alert | 0.4 | 0.1 |
+| detection_review | 0.1 | 0.0 |
+
+### Plan-log-to-displacement (proxy) (MGG plan → navigation-frame displacement >= 0.10 m)
+- MGG plan cycles in window: 38
+- Cut-off plans without a displacement sample: 2
+  - Clock: host UTC wall clock (docker log timestamps vs container time.time()); typical error < 1 ms
+  - **robot_0**; replan cadence: median 7.75 s, p90 12.39 s, max 13.48 s (12 intervals); latency: median 0.80 s, p90 1.65 s, max 2.35 s (13 samples)
+  - **robot_1**; replan cadence: median 8.10 s, p90 14.74 s, max 16.74 s (12 intervals); latency: median 1.47 s, p90 2.07 s, max 3.29 s (12 samples)
+  - **robot_2**; replan cadence: median 11.25 s, p90 30.62 s, max 30.62 s (8 intervals); latency: median 0.82 s, p90 2.99 s, max 2.99 s (9 samples)
+  - **robot_3**; replan cadence: median 12.80 s, p90 20.67 s, max 20.67 s (2 intervals)
+
+### Reading: clean-up waves 2 and 3, final (`992272b`)
+
+Same launch as every tuf report above (SubT, 4 robots, drift, RTX 4070),
+real-time factor 1.00 throughout.
+
+| | Before the clean-up (`0bb7f5a`) | Wave 1 (`6cc9f15`) | Final (`992272b`) |
+|---|---:|---:|---:|
+| Stack CPU, idle | 136 % | 138 % | 134 % |
+| Stack CPU, exploring 120 s | 869 % | 535 % | 509-588 % (varies with how many robots are actually driving) |
+| MGG plan cycle, median | 692 ms | 192 ms | 168-187 ms |
+| Plan log to 0.1 m of motion, median (proxy) | - | 1.38-1.44 s | 0.80-1.47 s (0.90-1.00 s typical) |
+| Nav2 startup, robots active per launch | - | - | 4/4 in 9 of 9 launches (base: 19/20 robots) |
+| `robot_state` at idle | 20 msg/s, 49 KB/s | 20 msg/s | 4.0 msg/s, 8.5 KB/s |
+
+- The adapter's own per-path timing shows the reservation granted 0.15 s after
+  the path, Nav2 accepting 0.15 s after it, and the next plan requested within
+  0.002 s of the controller's result.
+- Stop check: after `stop_explore`, every driving robot stopped within a second
+  and did not move again.
+- Shared memory: stable over three per-robot map resets (360 Fast DDS files,
+  759 MB of the sim's 2 GB `/dev/shm`).
+- Simulation speed (RTX 4070, unpaced, parked fleet): baseline 2.08x real time,
+  all lidars at 5 Hz 2.26x (+9 %), parked lidars at 2 Hz 2.39x (+15 %); the GPU
+  stays under 30 % busy, so on this host lidar rendering is not the bottleneck.
+  Plan item 2.1 (weak GPUs) stays open.
