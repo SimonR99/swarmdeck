@@ -2,6 +2,10 @@
 
 import importlib.util
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -105,6 +109,80 @@ def test_active_node_loss_during_later_activation_is_not_reported_ready():
         startup.bringup(
             states, lambda name, _: states[name], change, clock=clock, sleep=clock.sleep
         )
+
+
+def test_failed_startup_retries_until_a_late_node_is_active(tmp_path):
+    """A node that appears after the startup deadline is still brought up.
+
+    Nothing else retries on the owner's behalf: the adapter only asks for
+    recovery when an action server is undiscoverable, and a configured but
+    inactive controller is discoverable.
+    """
+    rclpy = pytest.importorskip("rclpy", reason="needs the ROS image")
+    from lifecycle_msgs.srv import ChangeState, GetState
+
+    rclpy.init()
+    node = rclpy.create_node("late_fixture", namespace="late_nav")
+    log = (tmp_path / "owner.log").open("w+")
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--ros-args",
+            "-r",
+            "__ns:=/late_nav",
+            "-p",
+            "node_names:=[controller_server]",
+            "-p",
+            "startup_timeout_s:=1.0",
+            "-p",
+            "retry_interval_s:=0.5",
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    state = 1
+
+    def get_state(_request, response):
+        response.current_state.id = state
+        return response
+
+    def change_state(request, response):
+        nonlocal state
+        state = 2 if request.transition.id == 1 else 3
+        response.success = True
+        return response
+
+    def output():
+        log.seek(0)
+        return log.read()
+
+    try:
+        deadline = time.monotonic() + 15
+        while "Navigation startup failed" not in output():
+            assert time.monotonic() < deadline, output()
+            time.sleep(0.1)
+        node.create_service(GetState, "controller_server/get_state", get_state)
+        node.create_service(ChangeState, "controller_server/change_state", change_state)
+        deadline = time.monotonic() + 15
+        while state != 3 and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        assert state == 3, output()
+        deadline = time.monotonic() + 5
+        while "confirmed active" not in output() and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        assert "confirmed active" in output(), output()
+    finally:
+        owner.send_signal(signal.SIGINT)
+        try:
+            owner.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            owner.kill()
+            owner.wait(timeout=5)
+        node.destroy_node()
+        rclpy.shutdown()
+        print(output())
+        log.close()
 
 
 @pytest.mark.parametrize("query_fails", [False, True])

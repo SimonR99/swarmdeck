@@ -78,7 +78,9 @@ controller's internally constructed local costmap inherits its parameters.
 Lifecycle ownership, per-robot node names, action endpoints and TF remaps remain
 unchanged. Simulation routes velocity through `cmd_vel_nav` → smoother →
 `cmd_vel_adapter` → adapter → `cmd_vel`, so the adapter gates driver motion.
-The bounded simulation startup process still exits after activation. Hardware callers keep
+The bounded simulation startup process (`navigation_startup`) stays up to serve
+`~/recover`; until its nodes are confirmed active it retries a failed bringup
+every 5 s (`retry_interval_s`), logging each failure. Hardware callers keep
 `use_composition:=false` by default and retain their separate processes.
 
 Each composed node is requested by its own `LoadComposableNodes` action. Fast

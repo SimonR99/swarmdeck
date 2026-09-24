@@ -3,7 +3,8 @@
 
 A lost transition response is resolved by observing the node's actual state.
 The same owner remains available at ~/recover after initial startup; never
-retry an assumed transition or reset an already active node.
+retry an assumed transition or reset an already active node. Until the nodes
+are confirmed active, a failed bringup is retried rather than abandoned.
 """
 
 from __future__ import annotations
@@ -99,7 +100,8 @@ def main():
     node.context.on_shutdown(stopping.set)
     names = node.declare_parameter("node_names", ["controller_server"]).value
     deadline_s = float(node.declare_parameter("startup_timeout_s", 60.0).value)
-    if not names or not 0 < deadline_s <= 300:
+    retry_s = float(node.declare_parameter("retry_interval_s", 5.0).value)
+    if not names or not 0 < deadline_s <= 300 or not 0 < retry_s <= 300:
         node.destroy_node()
         rclpy.try_shutdown()
         raise ValueError("invalid navigation startup parameters")
@@ -181,7 +183,7 @@ def main():
         except (TimeoutError, RuntimeError) as exc:
             response.success = False
             response.message = f"Navigation startup failed: {exc}"
-            node.get_logger().error(response.message)
+            node.get_logger().error(f"{response.message}; retrying in {retry_s:g} s")
         return response
 
     async def recover(_request, response):
@@ -199,13 +201,22 @@ def main():
 
     node.create_service(Trigger, "~/recover", recover)
     try:
-        run_bringup(Trigger.Response())
+        ready = run_bringup(Trigger.Response()).success
+        retry_at = time.monotonic() + retry_s
         while not stopping.is_set():
             if queued:
                 reply = queued[0]
                 response = run_bringup(requests[reply])
                 queued.popleft()
                 reply.set_result(response)
+                ready = response.success
+                retry_at = time.monotonic() + retry_s
+            elif not ready and time.monotonic() >= retry_at:
+                # The adapter asks for recovery only while the controller's
+                # action server is undiscoverable; a configured controller
+                # beside a late or missing node is discoverable yet inactive.
+                ready = run_bringup(Trigger.Response()).success
+                retry_at = time.monotonic() + retry_s
             else:
                 # Finite native waits let Python handle SIGINT/SIGTERM before
                 # shutting down the ROS context.
