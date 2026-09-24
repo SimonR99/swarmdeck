@@ -28,13 +28,8 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
-  import {
-    ReplicaTacticalLoader,
-    ReplicaRevisionTracker,
-    acceptsReplicaResult,
-    replicaSelectionKey,
-    type ReplicaTacticalCloud
-  } from './replicaTactical';
+  import { replicaSelectionKey, type ReplicaTacticalCloud } from './replicaTactical';
+  import { ReplicaCloudLoad } from './replicaCloudLoad';
   import {
     liveRobotFreshness,
     liveRobotToMapRobot,
@@ -262,20 +257,15 @@
   }
 
   let worker: Worker | null = null;
-  let pending: AbortController | null = null;
-  let generation = 0;
   let lastScope: string | null = null;
   let mounted = $state(false);
-  const replicaLoader = new ReplicaTacticalLoader();
-  const replicaRevision = new ReplicaRevisionTracker();
-  let replicaNeedsRebuild = false;
-  // A composite's revision advances with every member keyframe, which during
-  // exploration is about once a second across the fleet. Rebuilding the
-  // terrain that often flickers and wastes the worker; geometry-only
-  // revisions are picked up on this cadence, while a selection or frame
-  // change still rebuilds at once through the direct fetchCloud() calls.
-  const REPLICA_REVISION_POLL_MS = 5000;
-  let lastCloudBuildAt = 0;
+  // The replica point cloud, loaded by replicaCloudLoad.ts. A selection or
+  // frame change rebuilds at once through the direct fetchCloud() calls;
+  // geometry-only revisions are picked up on its slower cadence.
+  const cloudLoad = new ReplicaCloudLoad(
+    { selection: () => tacticalReplica, hasScene: () => scene !== null },
+    prepareCloud
+  );
   let renderedOwnerIds: string[] = [];
   const seenMapEpochs = new Map<string, string>();
   $effect(() => {
@@ -284,9 +274,7 @@
       if (seenMapEpochs.get(robotId) === epoch) continue;
       seenMapEpochs.set(robotId, epoch);
       const owner = renderedOwnerIds.indexOf(robotId);
-      generation++;
-      pending?.abort();
-      pending = null;
+      cloudLoad.cancel();
       if (owner >= 0) {
         scene?.terrain.removeOwner(owner, quality);
         scene?.gaussians.clear();
@@ -294,8 +282,7 @@
       points = scene?.terrain.pointCount ?? 0;
       voxels = scene?.terrain.voxelCount ?? 0;
       robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
-      replicaRevision.clear();
-      replicaNeedsRebuild = true;
+      cloudLoad.forgetRevision(true);
       gaussianFetch.forget();
       liveReplicaPoll.set(null);
       scene?.layers.invalidate();
@@ -341,7 +328,7 @@
 
   function prepareCloud(
     id: number,
-    controller: AbortController,
+    signal: AbortSignal,
     positions: Float32Array,
     owners: Uint8Array,
     rgb?: Uint8Array
@@ -354,7 +341,7 @@
           e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.data);
       };
       worker!.onerror = () => reject(new Error('Map preparation failed'));
-      controller.signal.addEventListener(
+      signal.addEventListener(
         'abort',
         () => reject(new DOMException('Aborted', 'AbortError')),
         { once: true }
@@ -397,41 +384,26 @@
   }
 
   async function fetchCloud() {
-    if (!scene || !worker || !active || document.hidden || pending || !tacticalReplica) return;
+    if (!scene || !worker || !active || document.hidden || cloudLoad.busy || !tacticalReplica) return;
     if (waitingForGlobalComponent) return;
-    const controller = new AbortController();
-    pending = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 20000);
-    const id = ++generation;
-    const selection = { ...tacticalReplica };
-    const currentScope = replicaSelectionKey(selection);
+    const result = await cloudLoad.load();
+    if (!result) return;
+    if (result.kind === 'current') {
+      error = null;
+      return;
+    }
+    if (result.kind === 'failed') {
+      error = result.message;
+      return;
+    }
+    const { data, cloud, resetView } = result;
     try {
-      const loaded = await replicaLoader.load(
-        selection,
-        controller.signal,
-        replicaNeedsRebuild ? null : replicaRevision.current
-      );
-      if (!loaded) {
-        if (acceptsReplicaResult(currentScope, tacticalReplica, id, generation)) error = null;
-        return;
-      }
-      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
-      const transition = replicaRevision.transition(loaded);
-      const data = await prepareCloud(id, controller, loaded.positions, loaded.owners, loaded.rgb);
-      if (!scene || !acceptsReplicaResult(loaded.sourceKey, tacticalReplica, id, generation)) return;
-      displayTerrain(data, loaded.ownerIds, Boolean(loaded.rgb), transition === 'selection' || transition === 'frame');
-      replicaRevision.commit(loaded);
-      replicaCloud = { view: loaded.view, partial: loaded.partial, frameKey: loaded.frameKey };
-      replicaNeedsRebuild = false;
-      lastCloudBuildAt = performance.now();
+      displayTerrain(data, cloud.ownerIds, Boolean(cloud.rgb), resetView);
+      cloudLoad.commit(cloud);
+      replicaCloud = { view: cloud.view, partial: cloud.partial, frameKey: cloud.frameKey };
       error = null;
     } catch (cause) {
-      if (!controller.signal.aborted && id === generation) {
-        error = cause instanceof Error ? cause.message : String(cause);
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (pending === controller) pending = null;
+      error = cause instanceof Error ? cause.message : String(cause);
     }
   }
 
@@ -494,9 +466,8 @@
         gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
       }
     }
-    pending?.abort();
-    pending = null;
-    if (tacticalReplica) replicaNeedsRebuild = true;
+    cloudLoad.abort();
+    if (tacticalReplica) cloudLoad.requireRebuild();
     void fetchCloud();
   }
 
@@ -514,12 +485,9 @@
     if (!mounted || !active) return;
     if (currentScope === lastScope) return;
     lastScope = currentScope;
-    generation++;
-    pending?.abort();
-    pending = null;
-    replicaRevision.clear();
+    cloudLoad.cancel();
+    cloudLoad.forgetRevision(false);
     replicaCloud = null;
-    replicaNeedsRebuild = false;
     gaussianFetch.abort();
     gaussianFetch.forget();
     gaussianBuffer = null;
@@ -786,9 +754,7 @@
   function pauseScene() {
     // Whatever changed while the map was away is drawn once on return.
     renderLoop.pause();
-    generation++;
-    pending?.abort();
-    pending = null;
+    cloudLoad.cancel();
     gaussianFetch.abort();
   }
 
@@ -870,7 +836,7 @@
     );
     const poll = window.setInterval(() => {
       if (!active) return;
-      if (replicaNeedsRebuild || performance.now() - lastCloudBuildAt >= REPLICA_REVISION_POLL_MS) {
+      if (cloudLoad.due()) {
         void fetchCloud();
       }
       refreshLiveReplica();
@@ -888,8 +854,7 @@
 
     return () => {
       mounted = false;
-      generation++;
-      pending?.abort();
+      cloudLoad.cancel();
       liveReplicaPoll.dispose();
       gaussianFetch.abort();
       worker?.terminate();
