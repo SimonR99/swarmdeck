@@ -6,7 +6,12 @@ import {
 } from '$lib/components/replicas/replicaCataloguePoll';
 import { keepIfUnchanged } from './sameFieldValue';
 
-const state = $state<ReplicaCatalogueSnapshot>({ catalogue: null, error: '', loading: false });
+const state = $state<ReplicaCatalogueSnapshot>({
+  catalogue: null,
+  error: '',
+  refreshFailed: false,
+  loading: false
+});
 
 const poller = new ReplicaCataloguePoller(
   (signal) => fetchReplicaCatalogue(undefined, signal),
@@ -15,6 +20,7 @@ const poller = new ReplicaCataloguePoller(
     // so the views reading it are not re-run for nothing.
     state.catalogue = keepIfUnchanged(state.catalogue, snapshot.catalogue);
     state.error = snapshot.error;
+    state.refreshFailed = snapshot.refreshFailed;
     state.loading = snapshot.loading;
   }
 );
@@ -26,6 +32,10 @@ export const replicaCatalogue = {
   },
   get error() {
     return state.error;
+  },
+  /** The latest refresh failed or timed out; `catalogue` is the last good one. */
+  get refreshFailed() {
+    return state.refreshFailed;
   },
   get loading() {
     return state.loading;

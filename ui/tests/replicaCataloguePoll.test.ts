@@ -7,6 +7,7 @@ import {
   type ReplicaCatalogueSnapshot
 } from '../src/lib/components/replicas/replicaCataloguePoll.ts';
 import type { ReplicaCatalogue } from '../src/lib/components/replicas/replicaCatalogue.ts';
+import { peerMergeComponent } from '../src/lib/components/slam/peerStatus.ts';
 
 class FakeTimers implements PollTimers {
   running = new Map<number, { callback: () => void; ms: number }>();
@@ -90,16 +91,60 @@ test('a failure keeps the last catalogue and reports why; a success clears it', 
   assert.equal(published.at(-1)?.loading, true);
   requests[2].resolve(catalogue('s2'));
   await settle();
-  assert.deepEqual(poller.current, { catalogue: catalogue('s2'), error: '', loading: false });
+  assert.deepEqual(poller.current, { catalogue: catalogue('s2'), error: '', refreshFailed: false, loading: false });
   stop();
 });
 
-test('an aborted request is not reported as an error', async () => {
+test('a timeout keeps the catalogue and the error text but reports a failed refresh', async () => {
   const { requests, poller } = harness();
   const stop = poller.subscribe();
+  requests[0].resolve(catalogue('s1'));
+  await settle();
+  void poller.refresh();
+  requests[1].reject(new DOMException('Aborted', 'AbortError'));
+  await settle();
+  assert.deepEqual(poller.current, { catalogue: catalogue('s1'), error: '', refreshFailed: true, loading: false });
+  stop();
+});
+
+test('a request abandoned because the last view left reports nothing', async () => {
+  const { requests, poller } = harness();
+  const stop = poller.subscribe();
+  stop();
   requests[0].reject(new DOMException('Aborted', 'AbortError'));
   await settle();
+  assert.equal(poller.current.refreshFailed, false);
   assert.equal(poller.current.error, '');
   assert.equal(poller.current.loading, false);
+});
+
+function merged(session: string): ReplicaCatalogue {
+  const entry = {
+    session_id: session, component_id: 'component:ab', frame_id: 'f', robot_ids: ['a', 'b'],
+    source_count: 2, submap_count: 2, point_count: 10, available: true, status: 'ready' as const,
+    detail: '', solution_order: null, sources: [], composite: false
+  };
+  return { version: 1, active_session_id: session, components: [entry] };
+}
+
+test('the Peer SLAM merge clears on a timeout or failure and returns on recovery', async () => {
+  const { requests, poller } = harness();
+  const stop = poller.subscribe(2000);
+  requests[0].resolve(merged('s1'));
+  await settle();
+  assert.deepEqual(peerMergeComponent(poller.current)?.robot_ids, ['a', 'b']);
+  void poller.refresh();
+  requests[1].reject(new DOMException('Aborted', 'AbortError'));
+  await settle();
+  assert.equal(peerMergeComponent(poller.current), null, 'a timeout clears the merge');
+  assert.equal(poller.current.catalogue?.components.length, 1, 'the selectors keep their cache');
+  void poller.refresh();
+  requests[2].resolve(merged('s1'));
+  await settle();
+  assert.deepEqual(peerMergeComponent(poller.current)?.robot_ids, ['a', 'b']);
+  void poller.refresh();
+  requests[3].reject(new Error('Replica catalogue unavailable (503)'));
+  await settle();
+  assert.equal(peerMergeComponent(poller.current), null, 'a failure clears the merge');
   stop();
 });

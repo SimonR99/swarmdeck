@@ -6,8 +6,17 @@ export const REPLICA_CATALOGUE_POLL_MS = 10_000;
 export interface ReplicaCatalogueSnapshot {
   /** The last catalogue that parsed; kept through a later failure. */
   catalogue: ReplicaCatalogue | null;
-  /** Why the latest completed refresh failed, else ''. */
+  /**
+   * Why the latest refresh failed, for the source selector, else ''. A
+   * timeout leaves it as it was, as the selector always did.
+   */
   error: string;
+  /**
+   * The latest completed refresh failed, timeouts included. `catalogue` still
+   * holds the last one that parsed; a view that must not show stale
+   * membership checks this first.
+   */
+  refreshFailed: boolean;
   loading: boolean;
 }
 
@@ -40,7 +49,12 @@ export class ReplicaCataloguePoller {
   private timer: unknown = null;
   private timerMs = 0;
   private inFlight: AbortController | null = null;
-  private snapshot: ReplicaCatalogueSnapshot = { catalogue: null, error: '', loading: false };
+  private snapshot: ReplicaCatalogueSnapshot = {
+    catalogue: null,
+    error: '',
+    refreshFailed: false,
+    loading: false
+  };
 
   constructor(
     load: (signal: AbortSignal) => Promise<ReplicaCatalogue>,
@@ -77,12 +91,19 @@ export class ReplicaCataloguePoller {
     try {
       const catalogue = await this.load(controller.signal);
       if (controller.signal.aborted) return;
-      this.update({ catalogue, error: '' });
+      this.update({ catalogue, error: '', refreshFailed: false });
     } catch (reason) {
+      // Abandoned because no view is left: nothing to report.
       if (controller.signal.aborted) return;
-      if (reason instanceof DOMException && reason.name === 'AbortError') return;
       // The last verified catalogue stays in place through a transient failure.
-      this.update({ error: reason instanceof Error ? reason.message : 'Component catalogue unavailable' });
+      if (reason instanceof DOMException && reason.name === 'AbortError') {
+        this.update({ refreshFailed: true });
+        return;
+      }
+      this.update({
+        error: reason instanceof Error ? reason.message : 'Component catalogue unavailable',
+        refreshFailed: true
+      });
     } finally {
       if (this.inFlight === controller) this.inFlight = null;
       this.update({ loading: false });
